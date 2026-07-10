@@ -18,6 +18,8 @@ should be updated).
 | 007 | [Execution: OMS, Risk Gate, Reconciler](007-execution.md) | execution | ✅ ready |
 | 008 | [Risk & Sizing Engine](008-risk-sizing.md) | risk | ✅ ready |
 | 009 | [Ops, Monitoring & Alerting](009-ops-alerting.md) | ops | ✅ ready |
+| 010 | [Research Workflow & LLM Agents](010-research-llm.md) | intelligence | ✅ ready |
+| 011 | [WASM Terminal](011-terminal.md) | decision plane | 📝 draft |
 
 Status values: `draft` → `ready` (implementable) → `implementing` →
 `implemented` → `superseded`. Update this table in the same commit as the work
@@ -40,7 +42,8 @@ Decisions      — dated log of ambiguity resolutions (agents append here, rule 
 Open questions — needs human input; do NOT guess these
 ```
 
-Requirement prefixes: CONV, EVT, COL, STO, FEA, SIM, STR, EXE, RSK, OPS.
+Requirement prefixes: CONV, EVT, COL, STO, FEA, SIM, STR, EXE, RSK, OPS,
+RES, UI.
 
 ## How to implement a spec
 

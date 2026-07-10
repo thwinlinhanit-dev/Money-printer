@@ -9,6 +9,10 @@ The design takes direct inspiration from [Cryexc](https://cryexc.josedonato.com/
 (a C++ / Dear ImGui / WebAssembly trading terminal), but pivots from *terminal*
 (eyes) to *intelligence system* (eyes + memory + brain).
 
+**Execution plan:** [`ROADMAP.md`](ROADMAP.md) — phases 0–7, each tied to
+specs, deliverables, and written validation gates. Ideas not yet scheduled
+live in [`docs/BACKLOG.md`](docs/BACKLOG.md) — new ideas land there first.
+
 ## For AI agents (and humans acting like them)
 
 - [`CLAUDE.md`](CLAUDE.md) — the binding rulebook: Prime Directives, workflow
