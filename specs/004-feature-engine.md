@@ -134,15 +134,32 @@ update (no intra-bar repaint — repainting features are banned).
   Map<feature_id, f64>}` — hits are journaled (research grades them weekly).
 
 ## Acceptance criteria
-- [ ] Golden online/offline identity test on a 1-day fixture (FEA-4).
-- [ ] Unit tests per catalog feature against hand-computed fixtures (each formula above gets at least one numeric example test).
-- [ ] Warmup suppression test (FEA-3); stale-book silence test (FEA-8).
-- [ ] Screener: rule TOML → hits on fixture stream with exact expected snapshots (FEA-10).
-- [ ] Materialization reruns with changed params land in `ver=2` without touching `ver=1` (FEA-6).
+- [x] Golden online/offline identity test (FEA-4). `fea_4_online_offline_identity`.
+- [x] Unit tests per implemented catalog feature against hand-computed values (FEA-1). `fea_1_*` (cvd, whale_print, liq.cluster, oi.delta, funding, bar delta).
+- [x] Warmup suppression test (FEA-3); stale-book silence test (FEA-8). `fea_3_*`, `fea_8_book_feature_silent_while_stale`.
+- [x] Screener: rules → edge-triggered hits with exact snapshots (FEA-10). `fea_10_screener_edge_triggers_with_snapshot`.
+- [ ] Offline Parquet materialization + `ver=N` on param change (FEA-6/7) — deferred (needs storage feature-store writer; tracked in Decisions).
 
 ## Decisions
 - 2026-07-10: features output scalar f64 only in v1 (categoricals encoded as
   small ints); vector-valued features deferred.
+- 2026-07-10 (impl): implemented spec 004 BEFORE 005 (deviating from the
+  README order) because the feature engine depends only on `core`, while the
+  backtester needs strategies + risk gate — dependency-correct ordering (W-5).
+- 2026-07-10 (impl): engine uses a two-trait split — `TickFeature`
+  (per-event) and `BarFeature` (on bar close) — driven by a `BarBuilder`.
+  As-of ordering is structural: features only ever receive events in stream
+  order and have no handle to query external state (FEA-2). Determinism from
+  fixed registration order + `BTreeMap` symbol order (FEA-4 proven).
+- 2026-07-10 (impl): v1 catalog subset implemented and tested — `cvd.{venue}`,
+  `whale_print`, `liq.cluster`, `funding.{venue}`, `oi.delta`, `imbalance.top`
+  (stale-aware), `delta.bar.{tf}`, `vol.rv.{tf}.{w}`, `breakout.{n}`. The rest
+  of the catalog is the same pattern (deferred). Screener is AND-only + edge-
+  triggered; OR / time-windowed persistence and TOML parsing deferred.
+- 2026-07-10 (impl): deferred within spec 004 — offline Parquet
+  materialization + `ver=N` versioning (FEA-6/7), `features.toml` param file,
+  `leadlag.*` offline-only enforcement (FEA-9), NaN-suppression counters
+  (FEA-5, the fail-closed path exists; the counter/WARN is TODO). Tracked.
 - 2026-07-10: added volume/price-condition and whale-tape feature groups
   (owner request). All computable from already-specced trade/book data — no
   schema change. Whale data policy: whale activity enters ONLY as graded

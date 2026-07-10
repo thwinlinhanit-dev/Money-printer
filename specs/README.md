@@ -12,7 +12,7 @@ should be updated).
 | 001 | [Event Schema](001-event-schema.md) | core types | ✅ implemented |
 | 002 | [Collectors](002-collectors.md) | data plane | 🔨 implementing |
 | 003 | [Storage](003-storage.md) | data plane | 🔨 implementing |
-| 004 | [Feature Engine](004-feature-engine.md) | intelligence | ✅ ready |
+| 004 | [Feature Engine](004-feature-engine.md) | intelligence | 🔨 implementing |
 | 005 | [Backtester & Simulation](005-backtester.md) | intelligence | ✅ ready |
 | 006 | [Strategy API & Funnel](006-strategy-api.md) | intelligence | ✅ ready |
 | 007 | [Execution: OMS, Risk Gate, Reconciler](007-execution.md) | execution | ✅ ready |

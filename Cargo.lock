@@ -642,6 +642,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp-features"
+version = "0.1.0"
+dependencies = [
+ "mp-core",
+ "serde",
+ "smallvec",
+ "tracing",
+]
+
+[[package]]
 name = "mp-storage"
 version = "0.1.0"
 dependencies = [
