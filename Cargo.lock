@@ -652,6 +652,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp-risk"
+version = "0.1.0"
+dependencies = [
+ "mp-core",
+ "proptest",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "mp-storage"
 version = "0.1.0"
 dependencies = [

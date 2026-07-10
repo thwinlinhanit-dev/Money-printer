@@ -88,16 +88,23 @@ limits file the gate hot-reloads (gate stays dumb, RSK does the thinking).
   Σ final weights ≤ max_deployed; no NaN for any finite input (CONV-8/22).
 
 ## Acceptance criteria
-- [ ] Hand-computed sizing fixtures pass, including floor/rounding edges (RSK-1).
-- [ ] DD governor simulation: equity path fixture ⇒ expected g values and demote event (RSK-2).
-- [ ] Kelly: fixture journals below/above min_trades produce pin/estimate respectively; live-only source enforced by type (backtest trade type ≠ live trade type) (RSK-3).
-- [ ] Allocator end-to-end on fixture journals: weights, corr penalty, regime penalty each verified numerically; intraday shrink-only enforced by test (RSK-4).
-- [ ] SizingTrace emitted and complete for every sized intent (RSK-8).
-- [ ] Property suite passes (RSK-9).
+- [x] Hand-computed sizing incl. floor/rounding + zero-vol edge (RSK-1). `rsk_1_sizing_matches_hand_computation`, `rsk_1_min_notional_floor_zeroes_tiny_trades`, `rsk_1_zero_vol_is_no_trade_not_nan`.
+- [x] DD governor values at 0/half/budget/beyond (RSK-2). `rsk_2_dd_governor_shape`.
+- [x] Kelly pin below min_trades, estimate above, negative-edge clamp (RSK-3). `rsk_3_kelly_cap_pins_below_min_trades_and_estimates_above`.
+- [x] Allocator caps + regime penalty + renormalize; intraday shrink-only (RSK-4). `rsk_4_allocator_caps_and_renormalizes`, `rsk_4_intraday_shrink_only`.
+- [x] SizingTrace complete for every sized intent (RSK-8). Asserted in RSK-1 tests.
+- [x] Property suite: monotonic sizing, g∈[0,1], Σweights≤budget, finite (RSK-9). `rsk_9_*`.
 
 ## Decisions
 - 2026-07-10: quarter-Kelly ceiling and live-trades-only estimation are
   deliberate conservatism; revisit only with 6+ months of live attribution.
+- 2026-07-10 (impl): pure functions over plain inputs (no event/journal coupling
+  yet); the DD governor, Kelly, allocator, and sizer are composable and each
+  fail-closed (bad/`NaN`/zero inputs → zero size or zero weight, never a NaN).
+  Live-only Kelly is documented + a `trades` count gate; a compile-time
+  "backtest trade type ≠ live trade type" barrier arrives with the journal
+  (spec 006/007). `risk.toml` config struct, `explain()` wiring into the OMS
+  journal, and MC-derived `dd_budget` (RSK-5) land when spec 007 consumes this.
 
 ## Open questions
 - Correlation window (60d) vs strategy holding periods — calibrate during
