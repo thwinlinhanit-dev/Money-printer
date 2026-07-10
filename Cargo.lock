@@ -662,6 +662,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp-sim"
+version = "0.1.0"
+dependencies = [
+ "mp-core",
+ "mp-features",
+ "mp-risk",
+ "mp-strategies",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "mp-storage"
 version = "0.1.0"
 dependencies = [

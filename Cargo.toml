@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "collectors", "storage", "features", "risk", "strategies"]
+members = ["core", "collectors", "storage", "features", "risk", "strategies", "sim"]
 
 [workspace.package]
 edition = "2021"

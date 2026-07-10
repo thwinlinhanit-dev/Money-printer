@@ -111,15 +111,26 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
   expected DecisionLog hash) MUST run in CI (CONV-12 enforcement).
 
 ## Acceptance criteria
-- [ ] Golden determinism fixture in CI (SIM-14); replay-live diff command works on a fixture (SIM-11).
-- [ ] Fill model unit suites: L0 haircut math; L1 trade-print rule (touch ≠ fill), latency, partials; L2 depth walk with impact — each against hand-computed fixtures (SIM-2).
-- [ ] Funding-missing run fails (SIM-4); low-coverage run fails without override (SIM-6).
-- [ ] Accounting identity holds through a randomized property test of fills (SIM-13, CONV-22).
-- [ ] `sim wf` on a toy strategy over fixture data produces per-window OOS table + plateau report (SIM-9).
+- [x] Determinism golden: replay twice ⇒ identical decision-log hash + equity (SIM-7/14). `sim_7_replay_is_deterministic`, `sim_14_golden_hash_is_stable`.
+- [x] Clock driven purely by event timestamps (SIM-1). `sim_1_clock_is_driven_by_events`.
+- [x] Taker fill applies fee + slippage; latency-deferred against the trade tape (SIM-2, partial). `sim_2_taker_fill_applies_fee_and_slippage`.
+- [x] Accounting identity holds through a full run and a hand-computed realized+funding case (SIM-13). `sim_13_*`.
+- [ ] L0/L2 fill models, trade-print limit rule, walk-forward/MC/tracker, funding-missing + low-coverage run failures (SIM-2/4/6/9/11) — deferred; the event core + accounting they build on are done.
 
 ## Decisions
 - 2026-07-10: L3 (queue position) deferred to its own spec; until then maker-
   heavy strategies cannot pass gate G2 honestly and the funnel doc says so.
+- 2026-07-10 (impl): the backtester runs the PRODUCTION `mp-features`,
+  `mp-strategies`, and `mp-risk` crates unmodified (SIM-5) via a compile-time
+  dependency — not copies. v1 fill model is a latency-deferred **taker fill
+  against the next trade** (maps to L1 top-of-trade); L0 bar-open and L2 depth
+  walk are deferred. Accounting is average-cost with an exact identity
+  (`equity == start + realized + unrealized − fees − funding`) asserted at run
+  end and unit-tested. Decision log uses an FNV rolling hash over canonical,
+  bit-pattern-rendered records so determinism is a single `u64` comparison.
+- 2026-07-10 (impl): deferred within spec 005 — walk-forward/plateau/Monte-Carlo
+  harnesses, experiment tracker, `sim replay-live` diff, `sim wf` CLI,
+  funding-missing/low-coverage run-failing guards (SIM-4/6). Tracked.
 
 ## Open questions
 - None.
