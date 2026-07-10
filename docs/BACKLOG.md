@@ -35,8 +35,26 @@ decision), or **[maybe-never]** (recorded so it stops being re-proposed).
   projected liq bands; overlay for liq-fade and the terminal.
 - **[v1.x] orderflow dataset exports** — clean labeled Parquet extracts
   (events + forward returns) as the ML substrate, from the feature store.
-- **[v2] on-chain collectors** — stablecoin flows, exchange wallet balances,
-  bridge flows; new source class, own spec (rate limits, providers, trust).
+- **[v1.x] positioning collectors (whale tracking, tier 1)** — poll the free
+  public positioning endpoints: Binance/Bybit/OKX top-trader long/short
+  ratios and global account ratios. Needs an additive `Positioning` event
+  variant (schema amendment → owner sign-off), then passthrough features +
+  z-scores. Evidence as contrarian signal is mixed — record, grade via RES-4,
+  promise nothing.
+- **[v1.x] Hyperliquid whale position tracking (whale tracking, tier 2 — the
+  unique one)** — positions there are public on-chain: collector for large
+  positions (entry, size, leverage, liquidation price), then features:
+  aggregate whale net positioning + deltas, whale liquidation-level bands
+  from REAL positions (upgrades liq-fade-v1 context vs leverage-assumption
+  bands), and wallet-cohort grading (score wallets by realized PnL from our
+  recorded history; cohort flow becomes a feature only after its event study
+  clears). Needs its own small spec: API surface, wallet identity handling,
+  storage layout. Explicitly NOT copy trading — see rejected list.
+- **[v2] on-chain collectors (whale tracking, tier 3)** — stablecoin flows,
+  exchange wallet balances, dormant-wallet awakenings, bridge flows; new
+  source class, own spec (rate limits, providers, trust). Noisiest whale
+  tier: custody shuffles and MM rebalancing masquerade as signals — event-
+  study gate mandatory.
 - **[v2] news/social ingestion + narrative tracker** — deliberately excluded
   from 010 v1 (determinism); needs its own spec: sources, dedupe, archival,
   and the grounding contract extension.
@@ -94,6 +112,11 @@ decision), or **[maybe-never]** (recorded so it stops being re-proposed).
   at agent session start so every agent begins knowing the tree's health.
 
 ## Explicitly rejected (don't re-propose without new evidence)
+- **Copy trading** — mirroring individual whale wallets/accounts blind.
+  Whale data enters this system only as features graded by event studies
+  (spec 004 Decisions). Copying imports someone else's risk process without
+  their exits, sizing, or information — and the best wallets stop working
+  the moment they're crowded.
 - Live-decision LLMs (010 Decisions) — human-read only.
 - Touch-fills-at-limit-price backtesting (SIM-2 trade-print rule is law).
 - Sizing from backtest trades (RSK-3 — live trades only feed Kelly).

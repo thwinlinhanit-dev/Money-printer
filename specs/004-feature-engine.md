@@ -49,6 +49,34 @@ update (no intra-bar repaint — repainting features are banned).
 - `absorption.{tf}` — |delta.bar| / (|close−open| in ticks + 1); high value =
   aggression without displacement. Emitted at bar close.
 
+**Volume & price conditions** (from trades/bars — the screener's core vocabulary)
+- `rvol.{tf}` — bar volume / median volume of the SAME time-of-day bucket over
+  trailing `rvol_days` (default 20): crypto volume is session-patterned, so
+  raw spikes are meaningless without a time-of-day baseline.
+- `vwap.session` — session VWAP anchored at UTC 00:00; `vwap.dev` —
+  (close − vwap.session) / (rv-scaled price unit) — stretch from fair.
+- `dist.pdh` / `dist.pdl` — distance from close to prior UTC-day high/low,
+  in vol units (negative = beyond the level).
+- `breakout.{n}` — event feature at bar close: close exceeds the prior
+  `n`-bar high (+1) or low (−1), Donchian-style (n ∈ {20, 55} default;
+  trend-breadth-v1's entry vocabulary).
+- `climax.{tf}` — rvol ≥ `climax_rvol` (default 4) AND |delta.bar| /
+  volume ≥ `climax_delta_frac` (default 0.6): one-sided volume extreme
+  (exhaustion/initiation candidate — direction is the strategy's problem).
+- `profile.dist_hvn` / `profile.dist_lvn` — distance (vol units) from close
+  to nearest high-/low-volume node of the rolling `profile_days` (default 10)
+  footprint volume profile; nodes = local maxima/minima of volume-at-price
+  smoothed over `profile_smooth` ticks.
+
+**Whale tape** (tracking, not copying — see Decisions)
+- `whale_print` — event feature: single trade notional ≥
+  max(`whale_floor_usd`, `k_whale` × trade_size.p95.{w}) (defaults $250k,
+  k=4); value = signed notional (aggressor sign).
+- `whale_flow.{w}` — rolling Σ signed whale_print notional over window `w` —
+  whale tape pressure; divergence of whale_flow vs price is screener fodder.
+- `whale_share.{tf}` — whale_print volume / total volume per bar — is the
+  move institutional or retail dust?
+
 **Liquidity / book** (require BookMirror, EVT-9)
 - `depth.{bps}.{side}` — resting qty within ±bps of mid (bps ∈ {10,25,50}),
   sampled on a 1s timer aligned to event stream (SimClock-driven).
@@ -115,6 +143,14 @@ update (no intra-bar repaint — repainting features are banned).
 ## Decisions
 - 2026-07-10: features output scalar f64 only in v1 (categoricals encoded as
   small ints); vector-valued features deferred.
+- 2026-07-10: added volume/price-condition and whale-tape feature groups
+  (owner request). All computable from already-specced trade/book data — no
+  schema change. Whale data policy: whale activity enters ONLY as graded
+  features (event studies per RES-4 before any strategy trusts them), never
+  as follow-the-wallet copy trading. Positioning-based whale tracking
+  (top-trader ratios, Hyperliquid public positions) requires new collector
+  streams — held in docs/BACKLOG.md pending an additive event-schema
+  amendment (owner sign-off required per CLAUDE.md safety table).
 
 ## Open questions
 - None blocking; `wall_min_notional` defaults need per-symbol calibration
