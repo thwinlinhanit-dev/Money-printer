@@ -42,11 +42,14 @@ fi
 
 # ---- PD-3 / CONV-5: no wall clock on decision paths -------------------------
 # Allowlist: collectors (recv_ts stamping), oms (real order timestamps),
-# ops (telemetry), tests, benches.
+# ops (telemetry), tests, benches, and the ONE sanctioned wall-clock reader
+# core/src/wall_clock.rs (it is what gets injected so nothing else reads time).
+# Match actual calls (`::now(`) so doc-comment mentions don't false-positive.
 clock_hits=$(tracked 'core/**/*.rs' 'features/**/*.rs' 'strategies/**/*.rs' \
                      'sim/**/*.rs' 'risk/**/*.rs' 'funnel/**/*.rs' 'storage/**/*.rs' 2>/dev/null \
   | grep -vE '(^|/)(tests|benches)/' \
-  | xargs -r grep -nE 'SystemTime::now|Instant::now|Utc::now|Local::now' 2>/dev/null || true)
+  | grep -v 'core/src/wall_clock.rs' \
+  | xargs -r grep -nE '(SystemTime|Instant|Utc|Local)::now\(' 2>/dev/null || true)
 if [ -n "$clock_hits" ]; then
   echo "$clock_hits" >&2
   err "PD-3/CONV-5: wall-clock call on a decision-path crate (inject core::Clock)"

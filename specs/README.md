@@ -8,8 +8,8 @@ should be updated).
 
 | # | Spec | Area | Status |
 |---|------|------|--------|
-| 000 | [Conventions](000-conventions.md) | engineering ground rules | ✅ ready |
-| 001 | [Event Schema](001-event-schema.md) | core types | ✅ ready |
+| 000 | [Conventions](000-conventions.md) | engineering ground rules | 🔨 implementing |
+| 001 | [Event Schema](001-event-schema.md) | core types | ✅ implemented |
 | 002 | [Collectors](002-collectors.md) | data plane | ✅ ready |
 | 003 | [Storage](003-storage.md) | data plane | ✅ ready |
 | 004 | [Feature Engine](004-feature-engine.md) | intelligence | ✅ ready |

@@ -98,6 +98,12 @@ IDs. Out: domain logic (see specs 001+).
 ## Decisions
 - 2026-07-10: f64 (not fixed-point) for v1 prices — simplicity; revisit in a
   v2 spec if precision incidents occur.
+- 2026-07-10: `WallClock` (the sole sanctioned `SystemTime::now` caller) lives
+  in `core/src/wall_clock.rs`, isolated so the guardrail can allowlist exactly
+  that one file. It is infrastructure that gets *injected* in place of letting
+  decision code read the clock — not itself decision-path logic. The clock
+  guardrail matches actual calls (`::now(`) to avoid flagging doc-comment
+  mentions of the forbidden pattern.
 
 ## Open questions
 - None.

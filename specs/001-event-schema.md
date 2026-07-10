@@ -85,15 +85,28 @@ downstream), never block the producer.
   MUST mark itself stale and refuse reads until the next snapshot.
 
 ## Acceptance criteria
-- [ ] Property round-trip test per variant (EVT-3).
-- [ ] Torn-write recovery test: truncate a log mid-record, reopen, reader yields all whole records + WARN (EVT-4).
-- [ ] K-way merge test across 2 venues × 2 days yields globally ordered stream (EVT-5).
-- [ ] Ring overrun test: slow consumer sees gap flag, no torn reads (EVT-7).
-- [ ] BookMirror gap test: out-of-sequence delta ⇒ stale until snapshot (EVT-9).
+- [x] Property round-trip test per variant (EVT-3). `evt_3_envelope_roundtrip`, `evt_3_nan_sentinel_roundtrip`.
+- [x] Torn-write recovery test: truncate a log mid-record, reopen, reader yields all whole records + WARN (EVT-4). `evt_4_torn_tail_recovered_on_open`, `evt_4_symbols_and_events_reload`.
+- [x] K-way merge test across 2 venues × 2 days yields globally ordered stream (EVT-5). `evt_5_kway_merge_two_venues_two_days`.
+- [x] Ring overrun test: slow consumer sees gap flag, no torn reads (EVT-7). `evt_7_ring_overrun_deterministic`, `evt_7_ring_no_torn_reads_under_contention`.
+- [x] BookMirror gap test: out-of-sequence delta ⇒ stale until snapshot (EVT-9). `evt_9_book_gap_marks_stale_until_snapshot`, `evt_9_book_ignores_old_delta`.
+- [x] EVT-2 heap-free Trade path proven by a counting allocator. `evt_2_trade_envelope_is_alloc_free`.
 
 ## Decisions
 - 2026-07-10: bincode over protobuf for the internal log — single-language
   ecosystem, speed; Parquet (spec 003) is the interchange format for research.
+- 2026-07-10 (impl): `SmallString` aliased to `String` in v1 — Status events
+  are not on the per-trade hot path, so EVT-2's no-alloc rule is unaffected;
+  an inline-string optimization is deferred.
+- 2026-07-10 (impl): `trade_id` is `u64`; venues with string/u128 trade ids
+  are hashed/truncated at the collector boundary (revisit if collisions seen).
+- 2026-07-10 (impl): `Ring<T>` is `T: Copy` in v1 (sound concurrent overwrite
+  without drop-in-place races). Non-`Copy` events (book deltas) flow via the
+  owned log/channel path; a zero-copy arena ring is a later optimization.
+  EVT-6's 1M/s target is a criterion bench checked manually, not a unit assert.
+- 2026-07-10 (impl): event log gains an 8-byte magic + `format_ver` header and
+  a per-frame CRC32 (`kind|len|crc|payload` framing) — realizes EVT-4's
+  crash-safety and EVT-8's in-log symbol snapshots.
 
 ## Open questions
 - None.
