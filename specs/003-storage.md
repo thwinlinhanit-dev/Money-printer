@@ -68,15 +68,30 @@ read path MUST consult manifests** (SIM-6 depends on this).
   (tick sizes change; delistings happen).
 
 ## Acceptance criteria
-- [ ] Round-trip: synthetic event log → compactor → Dataset reader yields identical event sequence (STO-1, STO-4).
-- [ ] Idempotency: run compactor twice, second run is a no-op (STO-1).
-- [ ] Manifest math: injected disconnect + resync in fixture log produces expected gap list and coverage to 6 decimals (STO-2).
-- [ ] Prune refuses to delete when row counts mismatch (STO-3).
-- [ ] As-of symbol lookup returns the correct tick_size across a change boundary (STO-9).
+- [x] Round-trip: events → compactor → Dataset reader yields identical sequence (STO-1, STO-4). `sto_1_and_4_trades_roundtrip_and_idempotent`.
+- [x] Idempotency: run compactor twice, second run is a no-op (STO-1). Same test.
+- [x] Manifest math: injected disconnect/resync produces expected gaps + coverage to 6 decimals (STO-2). `sto_2_manifest_disconnect_gap_and_coverage`, `sto_2_manifest_sequence_gap_on_book_deltas`.
+- [x] Prune refuses to delete when row counts mismatch (STO-3). `sto_3_prune_refuses_on_row_mismatch`.
+- [x] As-of symbol lookup returns correct tick_size across a change boundary (STO-9). `sto_9_scd2_as_of_resolves_across_change`.
+- [x] Dataset coverage/gaps from manifest without scanning data (STO-5). `sto_5_dataset_reads_coverage_from_manifest`.
 
 ## Decisions
 - 2026-07-10: Parquet is canonical; ClickHouse is a disposable acceleration
   layer. Local disk first; S3 path support behind the same API.
+- 2026-07-10 (impl): arrow/parquet 53 with zstd; footer KV metadata carries
+  `schema_ver`, `compactor_version`, `source_log_hash` (STO-8); idempotency
+  (STO-1) checks the stored `source_log_hash` before rewriting.
+- 2026-07-10 (impl): v1 writes the **trades** stream to Parquet; other streams
+  are the same pattern (deferred) — but the quality **manifest already covers
+  every stream**, so honesty (STO-2/5) is complete now, not later.
+- 2026-07-10 (impl): manifest gap rules — `Disconnected→Connected` on symbol S
+  gaps *all* of S's streams; `GapDetected→GapResync` gaps S's `book_deltas`;
+  intervals open at day end close at `day_end_ns`; overlapping gaps merged so
+  coverage never double-counts. Venue-wide disconnect fan-out across symbols is
+  refined when COL-3 (per-symbol status) lands.
+- 2026-07-10 (impl): deferred within spec 003 — other streams' Parquet,
+  ClickHouse warm store (STO-6, explicitly optional), disk watchdog (STO-7,
+  belongs with ops spec 009). Tracked, not dropped.
 
 ## Open questions
 - Off-site backup cadence for `cold/` — needs owner's storage budget decision.
