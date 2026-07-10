@@ -9,6 +9,19 @@ The design takes direct inspiration from [Cryexc](https://cryexc.josedonato.com/
 (a C++ / Dear ImGui / WebAssembly trading terminal), but pivots from *terminal*
 (eyes) to *intelligence system* (eyes + memory + brain).
 
+## For AI agents (and humans acting like them)
+
+- [`CLAUDE.md`](CLAUDE.md) — the binding rulebook: Prime Directives, workflow
+  rules, conventions, safety boundaries. Read it first. (`AGENTS.md` points here.)
+- [`specs/`](specs/README.md) — numbered, testable implementation specs
+  (000–009) covering the event schema, collectors, storage, feature engine,
+  backtester, strategy API + promotion funnel, execution (OMS/risk gate),
+  sizing, and ops. Specs are the source of truth; docs are the design intent.
+- [`.claude/skills/`](.claude/skills/) — step-by-step workflows:
+  `implement-spec`, `add-strategy`, `add-venue`.
+
+## Design docs
+
 **Start here:**
 
 1. [`docs/SYSTEM_BLUEPRINT.md`](docs/SYSTEM_BLUEPRINT.md) — **the full-loop
