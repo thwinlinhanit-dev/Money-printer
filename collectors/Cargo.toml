@@ -1,0 +1,28 @@
+[package]
+name = "mp-collectors"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Venue WS collectors → normalized events — spec 002 (offline core; live transport deferred)"
+
+[lib]
+name = "mp_collectors"
+path = "src/lib.rs"
+
+[dependencies]
+mp-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+smallvec.workspace = true
+
+# NOTE: no network dependency yet. The live WebSocket transport (tokio +
+# tokio-tungstenite) is deferred behind the `Transport` trait until the owner
+# approves it (CLAUDE.md safety table: adding a network dependency is
+# must-ask-first). All logic here is transport-agnostic and tested via a mock.
+
+[lints]
+workspace = true

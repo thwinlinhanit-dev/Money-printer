@@ -86,14 +86,31 @@ snapshot channel or REST snapshot), mark/funding, open interest, liquidations.
   behavior (COL-1, COL-7).
 
 ## Acceptance criteria
-- [ ] One venue (start: Bybit) records trades+book+funding+OI+liq for 3 symbols through a full simulated disconnect/gap cycle in integration tests.
-- [ ] Fixture tests pass for every implemented venue (COL-13).
-- [ ] `/health` + `/metrics` respond; gap and reconnect counters move under mock-venue chaos script (COL-10/11/14).
-- [ ] 24h soak on a real venue produces an event log whose BookMirror replays with zero unexplained gaps (gaps present only where Status events say so).
+- [~] One venue (Bybit) normalizes trades+book+funding+OI+liq through a simulated disconnect/gap cycle — done at the normalizer+driver level (`col_1_reconnects_after_disconnect_with_backoff`, `col_7_*`); end-to-end over a *live* socket awaits the transport.
+- [~] Fixture tests pass (COL-13) — `bybit_fixtures.rs` green, but fixtures are SYNTHETIC-representative, not real captures (see Decisions). Real-capture validation is the remaining COL-13 work.
+- [~] Gap and reconnect counters move under mock-venue chaos (COL-14) — `collector_chaos.rs` green. `/health` + `/metrics` HTTP export (COL-10/11) deferred with the live transport.
+- [ ] 24h soak on a real venue (needs the live WS transport → network dependency approval).
 
 ## Decisions
 - 2026-07-10: first venue = Bybit (API-friendly, no US geo-block, in-band
   book snapshots). Binance second, from a non-US host.
+- 2026-07-10 (impl): the collector is split into a **transport-agnostic core**
+  (this crate) and a live WS transport (deferred). Adding a network dependency
+  (tokio/tokio-tungstenite) is must-ask-first (CLAUDE.md); until approved, all
+  logic is driven through the `Transport` trait and a `MockTransport`. This is
+  also better design: venue logic is isolated from I/O and fully unit-testable.
+- 2026-07-10 (impl): fixtures are SYNTHETIC frames built to documented Bybit v5
+  shapes (knowledge cutoff), not real captures — COL-13 is only partially met
+  until real frames are recorded and diffed. Flagged honestly (PD-5).
+- 2026-07-10 (impl): book gap policy keyed on Bybit's `type:"snapshot"` reset +
+  `u == prev+1` continuity; on gap → `Status::GapDetected`, drop deltas until
+  the next snapshot (emitted with `reason: GapResync`).
+- 2026-07-10 (impl): `Funding.interval_s` set to 0 (unknown) — Bybit's tickers
+  stream omits it; fill from REST instrument info when that path exists.
+- 2026-07-10 (impl): deferred within spec 002 — raw capture (COL-9), `/health`
+  + `/metrics` HTTP (COL-10/11), graceful shutdown (COL-12), venue-wide
+  connect/disconnect Status events (COL-3), and the `sampled` stream flag
+  (COL-8) — all tracked, none silently dropped.
 
 ## Open questions
 - NATS fan-out: required only when features run in a separate process — defer
