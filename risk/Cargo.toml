@@ -14,6 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 mp-core = { path = "../core" }
 serde.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 
 # Pure math over core types. No network, no venue access (PD-4).

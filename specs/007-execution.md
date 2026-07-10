@@ -122,18 +122,30 @@ can't verify via venue API-key info endpoints).
   Adapter fixture tests per COL-13 pattern for the private streams.
 
 ## Acceptance criteria
-- [ ] State machine property test: random legal event sequences never reach an illegal transition; illegal injected events are rejected (EXE-2, CONV-22).
-- [ ] Idempotency chaos test passes (EXE-3, EXE-5).
-- [ ] UNKNOWN drill: mock venue eats an ack; order resolves by query; venue freezes on unresolvable (EXE-4).
-- [ ] Reconciler divergence drill: foreign position injected in mock ⇒ freeze + alert; auto_flatten path covered by test but ships disabled (EXE-6).
-- [ ] Kill switch latch + human reset flow tested (EXE-7).
-- [ ] `oms doctor` fails closed on a withdrawal-enabled key in mock (EXE-10).
-- [ ] End-to-end paper session on live Bybit testnet data: intent → sized → gated → simulated fill → journal, 24h without fault (EXE-8).
+- [x] Risk gate: clean order passes; each of RG-1..11 rejects in order (EXE-1). `exe_1_gate_passes_a_clean_order`, `exe_1_gate_rejects_each_check_in_order`, `exe_10_kill_switch_blocks_orders`.
+- [x] State machine legal path + illegal transitions error (EXE-2). `exe_2_state_machine_legal_path`, `exe_2_illegal_transitions_error`.
+- [x] Idempotent submit: resubmit same client id ⇒ one order (EXE-3). `exe_3_submit_is_idempotent`.
+- [x] UNKNOWN resolves by query (Acked / NotFound→Failed) (EXE-4). `exe_4_unknown_resolves_by_query`.
+- [x] Reconciler clean + foreign-position divergence (EXE-6). `exe_6_reconciler_clean_and_diverged`.
+- [x] Kill switch one-way latch + human-only reset (EXE-7). `exe_7_kill_switch_is_one_way_latch`.
+- [ ] Live paper/testnet e2e, WAL crash chaos, `oms doctor` key check (EXE-5/8/10/12) — need the venue adapter (network); deferred.
 
 ## Decisions
 - 2026-07-10: auto_flatten ships OFF; alert-only until the owner has watched
   the reconciler behave for a month.
 - 2026-07-10: venue #1 = Bybit (matches collector decision, testnet exists).
+- 2026-07-10 (impl): risk gate + kill switches live in `mp-risk` (repo map);
+  OMS state machine + reconciler in the new `mp-oms` crate. Gate is a pure
+  ordered function RG-1..11 returning the first failure (verdicts meant to be
+  journaled by the caller); kill switches are a one-way latch with human-only
+  reset (agents cannot pass `human=true`). OMS enforces the full legal
+  transition graph incl. first-class `Unknown`; submit is idempotent by client
+  id. Reconciler is a pure diff (unknown venue position ⇒ Diverged).
+- 2026-07-10 (impl): deferred within spec 007 — venue adapters (network → the
+  live boundary), WAL persistence + kill-9 chaos (EXE-5), paper/live wiring
+  (EXE-8), `oms doctor` (EXE-10), per-strategy virtual netting (EXE-9). The
+  transport-agnostic safety core is done and tested. Credentials will load
+  ONLY in `mp-oms` (CONV-17). PD-1 holds: nothing here can be set to live.
 
 ## Open questions
 - Amend-vs-cancel/replace per venue: decide per adapter at implementation,

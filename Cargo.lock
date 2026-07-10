@@ -652,12 +652,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp-oms"
+version = "0.1.0"
+dependencies = [
+ "mp-core",
+ "serde",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "mp-risk"
 version = "0.1.0"
 dependencies = [
  "mp-core",
  "proptest",
  "serde",
+ "thiserror",
  "tracing",
 ]
 
