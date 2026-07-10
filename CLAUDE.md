@@ -52,6 +52,18 @@ file completely before writing any code.
 - **W-6** Never delete or rewrite recorded market data. The data directories
   are append-only. Migration = write new + verify + only the human deletes.
 - **W-7** Update `specs/README.md` status table in the same commit as the work.
+- **W-8** Before any push, run the `self-review` skill
+  (`.claude/skills/self-review/SKILL.md`) and `ops/ci/guardrails.sh`. The
+  guardrails script mechanically enforces PD-1..4 and W-7; weakening it to
+  pass is a PD-5 violation.
+
+## Why this repo is shaped this way
+
+`docs/AGENT_FORCE_MULTIPLIERS.md` explains the design theory behind the
+rulebook/specs/skills/guardrails structure (feedback loops, mechanical
+guardrails, layered context, recorded judgment). Read it when extending the
+agent infrastructure itself; follow its "rules of thumb" when you hit a
+situation these rules don't cover.
 
 ## Engineering conventions (summary — full detail in specs/000)
 

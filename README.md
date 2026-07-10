@@ -18,7 +18,12 @@ The design takes direct inspiration from [Cryexc](https://cryexc.josedonato.com/
   backtester, strategy API + promotion funnel, execution (OMS/risk gate),
   sizing, and ops. Specs are the source of truth; docs are the design intent.
 - [`.claude/skills/`](.claude/skills/) — step-by-step workflows:
-  `implement-spec`, `add-strategy`, `add-venue`.
+  `implement-spec`, `add-strategy`, `add-venue`, `self-review` (mandatory
+  pre-push), `bootstrap-workspace`.
+- [`docs/AGENT_FORCE_MULTIPLIERS.md`](docs/AGENT_FORCE_MULTIPLIERS.md) — the
+  theory: how this repo is engineered so any agent works at full power
+  (feedback loops, mechanical guardrails via `ops/ci/guardrails.sh` + CI,
+  layered context, recorded judgment).
 
 ## Design docs
 
