@@ -103,16 +103,24 @@ click (G3/G4).** Agents may prepare the evidence, never click the button.
   worked example of a G1 kill.
 
 ## Acceptance criteria
-- [ ] Compile-time isolation test: strategies crate builds with no net/oms deps (STR-1).
-- [ ] Funnel CLI: full lifecycle exercised in an integration test — register(hypothesis) → G1 evidence → promote → auto-demote on DD breach → kill with autopsy (STR-3, G4/G5 auto paths).
-- [ ] Promotion without human flag fails; with stale evidence fails (STR-3/4).
-- [ ] Transition journal lines match schema (STR-5).
-- [ ] CoinFlipStrategy fails G1 on fixture data (STR-9) — the machine kills honestly.
+- [x] Compile-time isolation: strategies crate has no net/oms deps (STR-1) — enforced by `ops/ci/guardrails.sh` PD-4 check + crate manifest.
+- [x] Funnel full lifecycle: register(hypothesis) → G1 evidence → promote → human-gated G3 → auto-demote on DD breach → kill with autopsy (STR-3). `str_3_funnel_full_lifecycle_and_gates`.
+- [x] Promotion without the human flag fails at G3/G4 (STR-3). Same test (`NeedsHuman`).
+- [x] Transition journal lines are valid JSONL with the right schema (STR-5). `str_5_transitions_journal_as_jsonl`.
+- [x] Null/CoinFlip fixtures exist; CoinFlip is deterministic under a seed (STR-7/9). `str_9_*`, `str_7_*`.
+- [ ] CoinFlip fails G1 on real fixture data (STR-9) — needs the backtester (spec 005) to produce the run; the strategy + funnel are ready for it.
 
 ## Decisions
 - 2026-07-10: strategies consume features only (not raw events) in v1 —
   narrows the deterministic surface and forces the feature catalog to grow
   deliberately.
+- 2026-07-10 (impl): `OrderIntent`/`Fill`/`SizeUnit` live in `core::exec` (not
+  oms) so strategies can emit them without a venue dependency (PD-4). `Ctx` is a
+  trait exposing only now/position/equity/seeded-rng/timer/log — no I/O handle
+  exists to misuse. The funnel is a library state machine (STR-3) with
+  human-gated promotion + automatic demotion; the `funnel` CLI binary wrapping
+  it, evidence-staleness (STR-4), and per-strategy dirs (STR-8 hypotheses
+  already exist) are deferred. `state()` returns nothing yet (deferred).
 
 ## Open questions
 - Multi-strategy netting at the venue (one position, many strategies): v1

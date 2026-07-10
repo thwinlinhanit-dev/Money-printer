@@ -8,6 +8,7 @@
 pub mod book;
 pub mod codec;
 pub mod event;
+pub mod exec;
 pub mod log;
 pub mod ring;
 pub mod symbol;
@@ -21,6 +22,9 @@ pub use book::BookMirror;
 pub use event::{
     EventEnvelope, Level, Levels, MarketEvent, Side, SmallString, SnapshotReason, StatusKind,
     SymbolId, Venue,
+};
+pub use exec::{
+    Fill, IntentId, Liquidity, OrderIntent, OrderKind, SizeUnit, StrategyId, TimeInForce,
 };
 pub use ring::{Consumer, Overrun, Producer, Ring};
 pub use symbol::{InstrumentKind, SymbolMeta, SymbolTable};

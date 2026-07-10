@@ -14,7 +14,7 @@ should be updated).
 | 003 | [Storage](003-storage.md) | data plane | 🔨 implementing |
 | 004 | [Feature Engine](004-feature-engine.md) | intelligence | 🔨 implementing |
 | 005 | [Backtester & Simulation](005-backtester.md) | intelligence | ✅ ready |
-| 006 | [Strategy API & Funnel](006-strategy-api.md) | intelligence | ✅ ready |
+| 006 | [Strategy API & Funnel](006-strategy-api.md) | intelligence | 🔨 implementing |
 | 007 | [Execution: OMS, Risk Gate, Reconciler](007-execution.md) | execution | ✅ ready |
 | 008 | [Risk & Sizing Engine](008-risk-sizing.md) | risk | 🔨 implementing |
 | 009 | [Ops, Monitoring & Alerting](009-ops-alerting.md) | ops | ✅ ready |

@@ -1,0 +1,26 @@
+[package]
+name = "mp-strategies"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Strategy API + promotion funnel — spec 006 (pure; emits OrderIntent only, PD-4)"
+
+[lib]
+name = "mp_strategies"
+path = "src/lib.rs"
+
+[dependencies]
+mp-core = { path = "../core" }
+mp-features = { path = "../features" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# NO oms/collectors/network deps — strategies emit intents only (PD-4).
+# The guardrail (ops/ci/guardrails.sh) enforces this mechanically.
+
+[lints]
+workspace = true
