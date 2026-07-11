@@ -83,8 +83,9 @@ liq.cluster > $5M?") and scheduled studies.
 - [ ] Grading job on fixture hits produces hand-verified forward-return grades (RES-2).
 - [ ] Decay flag fires on a synthetic decaying rule (RES-3).
 - [ ] Event study on fixture data reproduces hand-computed CAR ± CI (RES-4).
-- [ ] Brief generated from fixture inputs contains all sections, quotes only input numbers (spot-check test on numeric tokens ⊆ input), archives its bundle (RES-5/6).
-- [ ] Permission test: brief job user cannot write to `risk.toml`/funnel state (RES-7).
+- [x] Brief generated from fixture inputs contains all fixed sections, degrades missing sections to "no data" (never invents), and quotes only input numbers — the numeric-subset guard `verify_grounded` (RES-5/6). `test_res5_brief_has_all_fixed_sections`, `test_res5_missing_section_renders_no_data_not_invention`, `test_res6_brief_quotes_only_input_numbers`, `test_res6_ungrounded_number_is_detected`, `test_res5_generate_or_alert_returns_p3_on_ungrounded`.
+- [x] Brief archived with input-bundle hash + prompt version + model id + output, append-only (RES-6). `test_res6_input_bundle_hash_is_deterministic`, `test_res6_archive_writes_reproducible_record`.
+- [x] Permission guard: the brief archiver refuses to write outside the briefs dir — cannot touch `risk.toml`/funnel state (RES-7, code-level guard; process-user is the deployment backstop). `test_res7_archive_refuses_to_write_outside_briefs_dir`.
 
 ## Decisions
 - 2026-07-10: no external news/web tools for v1 agents — determinism and
@@ -126,6 +127,21 @@ liq.cluster > $5M?") and scheduled studies.
   the scheduled brief/anomaly/monthly-report *jobs* wiring these to `mp-llm`
   and the ops timer, and the `mp_data` Polars/DuckDB frame readers — status
   stays `implementing`.
+- 2026-07-11 (impl): the daily-brief job's grounded, testable core is
+  implemented in `research/brief.py` (RES-5/6/7). `render_brief` produces the
+  fixed sections and degrades a missing section to an explicit "no data" line
+  (never invents); `generate_or_alert` returns a P3 alert rather than staying
+  silent on failure (RES-5). `verify_grounded` is the numeric-subset guard —
+  every number in a brief must appear in the input bundle — and it is applied
+  to *any* brief text (the deterministic template draft here, or the real
+  `mp-llm` output in production) before it ships. `InputBundle` content-hashes
+  the inputs and `ArchiveRecord`/`archive_brief` write the append-only
+  `{bundle_hash, prompt_version, model_id, output}` record (RES-6). RES-7 is a
+  code-level guard: `archive_brief` resolves paths and refuses to write
+  outside the briefs directory (so it can never touch `risk.toml` or funnel
+  state); the process-user permission is the deployment backstop. 8 pytest
+  fixtures. What remains is the scheduler/ops-timer wiring and swapping the
+  template draft for a live `mp-llm` call — both binary-edge, no new contract.
 
 ## Open questions
 - Which model/provider and monthly token budget — owner picks (cost knob).

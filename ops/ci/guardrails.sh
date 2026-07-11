@@ -107,6 +107,17 @@ if [ -f ops/src/registry.rs ]; then
   done < <(grep -oE 'alert!\("[a-z0-9-]+"' ops/src/registry.rs | sed -E 's/alert!\("([a-z0-9-]+)"/\1/')
 fi
 
+# ---- CONV-3: one crate per top-level dir (workspace members are real dirs) ----
+if [ -f Cargo.toml ]; then
+  while read -r member; do
+    [ -n "$member" ] || continue
+    [ -f "$member/Cargo.toml" ] || err "CONV-3: workspace member '$member' has no $member/Cargo.toml"
+    case "$member" in
+      */*) err "CONV-3: workspace member '$member' is not a top-level directory" ;;
+    esac
+  done < <(grep -E '^\s*members\s*=' Cargo.toml | grep -oE '"[a-z0-9_-]+"' | tr -d '"')
+fi
+
 # ---- Skill frontmatter sanity -------------------------------------------------
 for f in .claude/skills/*/SKILL.md; do
   [ -e "$f" ] || continue

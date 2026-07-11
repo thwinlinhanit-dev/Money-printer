@@ -90,10 +90,10 @@ IDs. Out: domain logic (see specs 001+).
   MUST pass before any push.
 
 ## Acceptance criteria
-- [ ] Workspace builds with one crate per top-level dir; dep graph acyclic per CONV-3 (enforced by `cargo deny` or a graph test).
-- [ ] `core::Clock` exists with `SimClock` + `WallClock`; a lint/grep CI step rejects `SystemTime::now` outside allowed crates.
-- [ ] Golden determinism fixture test exists and passes (CONV-12).
-- [ ] CI runs fmt, clippy, tests (CONV-24).
+- [x] Workspace builds with one crate per top-level dir; dep graph acyclic per CONV-3. Cargo rejects a dependency cycle at build time, and the guardrails `CONV-3` check verifies every `members` entry is a real top-level crate dir (`ops/ci/guardrails.sh`).
+- [x] `core::Clock` exists with `SimClock` + `WallClock` (`core/src/time.rs`, `core/src/wall_clock.rs`); the guardrails `PD-3/CONV-5` grep rejects `SystemTime::now` outside the allowlisted `core/src/wall_clock.rs`, and CI runs it.
+- [x] Golden determinism fixture test exists and passes (CONV-12). `sim_14_golden_hash_is_stable`, `sim_7_replay_is_deterministic` (`sim/tests/backtest.rs`).
+- [x] CI runs fmt, clippy, tests, guardrails, and the Python research suite (CONV-24). `.github/workflows/ci.yml` (rust + research + guardrails jobs; feature-gated `live-ws`/`live-http` compiles checked too).
 
 ## Decisions
 - 2026-07-10: f64 (not fixed-point) for v1 prices — simplicity; revisit in a
