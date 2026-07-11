@@ -80,9 +80,9 @@ liq.cluster > $5M?") and scheduled studies.
   remain interpretable.
 
 ## Acceptance criteria
-- [ ] Grading job on fixture hits produces hand-verified forward-return grades (RES-2).
-- [ ] Decay flag fires on a synthetic decaying rule (RES-3).
-- [ ] Event study on fixture data reproduces hand-computed CAR ± CI (RES-4).
+- [x] Grading job on fixture hits produces hand-verified forward-return grades with an honest denominator + leaderboard (RES-2). `test_res2_forward_return_step_lookup_and_short_series_guard`, `test_res2_grade_hits_computes_excess_winrate_and_avg`, `test_res2_leaderboard_ranks_by_avg_excess`, `test_res2_uncomputable_hits_are_skipped_not_counted`.
+- [x] Decay flag fires on a synthetic decaying rule (RES-3). `test_res3_decay_flag_fires_on_fading_edge_only`.
+- [x] Event study on fixture data reproduces hand-computed CAR ± seeded bootstrap CI, with regime slicing (RES-4). `test_res4_car_averages_then_cumsums_across_events`, `test_res4_bootstrap_ci_is_seeded_and_reproducible`, `test_res4_regime_slicing_splits_by_tag`, plus incomplete-window and run-record tests.
 - [x] Brief generated from fixture inputs contains all fixed sections, degrades missing sections to "no data" (never invents), and quotes only input numbers — the numeric-subset guard `verify_grounded` (RES-5/6). `test_res5_brief_has_all_fixed_sections`, `test_res5_missing_section_renders_no_data_not_invention`, `test_res6_brief_quotes_only_input_numbers`, `test_res6_ungrounded_number_is_detected`, `test_res5_generate_or_alert_returns_p3_on_ungrounded`.
 - [x] Brief archived with input-bundle hash + prompt version + model id + output, append-only (RES-6). `test_res6_input_bundle_hash_is_deterministic`, `test_res6_archive_writes_reproducible_record`.
 - [x] Permission guard: the brief archiver refuses to write outside the briefs dir — cannot touch `risk.toml`/funnel state (RES-7, code-level guard; process-user is the deployment backstop). `test_res7_archive_refuses_to_write_outside_briefs_dir`.
