@@ -164,4 +164,52 @@ impl BookMirror {
         }
         Some((self.bids.len(), self.asks.len()))
     }
+
+    /// Walk the ask side consuming up to `qty`, best price first, removing
+    /// displayed size as it is taken (a market buy paying impact — SIM-2 L2).
+    /// The book recovers naturally from subsequent deltas. Returns
+    /// `(filled_qty, notional)`; `None` if stale (no trusted book to walk).
+    pub fn walk_ask(&mut self, qty: f64) -> Option<(f64, f64)> {
+        self.walk(qty, true)
+    }
+
+    /// Walk the bid side consuming up to `qty`, best price first (a market
+    /// sell). See [`Self::walk_ask`].
+    pub fn walk_bid(&mut self, qty: f64) -> Option<(f64, f64)> {
+        self.walk(qty, false)
+    }
+
+    fn walk(&mut self, qty: f64, asks: bool) -> Option<(f64, f64)> {
+        if self.is_stale() {
+            return None;
+        }
+        let mut remaining = qty;
+        let mut notional = 0.0;
+        let mut drained: Vec<Px> = Vec::new();
+        let side = if asks { &mut self.asks } else { &mut self.bids };
+        // Asks: ascending (lowest first). Bids: descending (highest first).
+        let prices: Vec<Px> = if asks {
+            side.keys().copied().collect()
+        } else {
+            side.keys().rev().copied().collect()
+        };
+        for px in prices {
+            if remaining <= 0.0 {
+                break;
+            }
+            let level_qty = *side.get(&px).unwrap();
+            let take = remaining.min(level_qty);
+            notional += take * px.0;
+            remaining -= take;
+            if take >= level_qty {
+                drained.push(px);
+            } else {
+                side.insert(px, level_qty - take);
+            }
+        }
+        for px in drained {
+            side.remove(&px);
+        }
+        Some((qty - remaining, notional))
+    }
 }

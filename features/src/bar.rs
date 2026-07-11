@@ -42,6 +42,12 @@ pub struct BarBuilder {
 }
 
 impl BarBuilder {
+    /// Open price of the bucket currently accumulating (the most recent bar's
+    /// open once a new bucket has started). `0.0` before the first trade.
+    pub fn current_open(&self) -> f64 {
+        self.open
+    }
+
     pub fn new(tf_ns: i64) -> Self {
         Self {
             tf_ns: tf_ns.max(1),

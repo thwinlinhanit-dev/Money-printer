@@ -17,6 +17,7 @@ mp-features = { path = "../features" }
 mp-strategies = { path = "../strategies" }
 mp-risk = { path = "../risk" }
 serde.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 
 # Runs the PRODUCTION feature engine, strategy, and sizing crates unmodified

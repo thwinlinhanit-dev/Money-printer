@@ -53,7 +53,7 @@ fn run_once(seed: u64) -> (u64, f64) {
         },
         seed,
     );
-    bt.run(&feed());
+    bt.run(&feed()).unwrap();
     (bt.decision_log().hash(), bt.equity())
 }
 
@@ -66,7 +66,7 @@ fn sim_1_clock_is_driven_by_events() {
         1,
     );
     let events = feed();
-    bt.run(&events);
+    bt.run(&events).unwrap();
     assert_eq!(bt.now_ns(), events.last().unwrap().recv_ts_ns);
 }
 
@@ -118,7 +118,7 @@ fn sim_13_accounting_identity_holds_through_run() {
         },
         7,
     );
-    bt.run(&feed());
+    bt.run(&feed()).unwrap();
     // equity == start + realized + unrealized − fees − funding, at run end.
     assert!(
         bt.identity_residual().abs() < 1e-6,

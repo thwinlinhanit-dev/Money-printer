@@ -115,7 +115,10 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
 - [x] Clock driven purely by event timestamps (SIM-1). `sim_1_clock_is_driven_by_events`.
 - [x] Taker fill applies fee + slippage; latency-deferred against the trade tape (SIM-2, partial). `sim_2_taker_fill_applies_fee_and_slippage`.
 - [x] Accounting identity holds through a full run and a hand-computed realized+funding case (SIM-13). `sim_13_*`.
-- [ ] L0/L2 fill models, trade-print limit rule, walk-forward/MC/tracker, funding-missing + low-coverage run failures (SIM-2/4/6/9/11) — deferred; the event core + accounting they build on are done.
+- [x] L0/L1/L2 fill models incl. trade-print limit rule and participation/queue-share caps (SIM-2). `sim_2_l1_market_buy_is_capped_by_top_of_book_participation`, `sim_2_l1_limit_trade_print_rule_bans_touch_fills`, `sim_2_l2_market_buy_walks_multiple_levels_and_pays_impact`, `sim_2_l2_limit_fill_capped_by_queue_share_needs_multiple_prints`.
+- [x] Funding-missing and low-coverage run refusals (SIM-4/6). `sim_4_missing_funding_refuses_to_report_a_held_perp_position`, `sim_4_funding_event_present_lets_the_run_report`, `sim_6_low_manifest_coverage_refuses_the_run`, `sim_6_full_coverage_runs_normally`.
+- [x] 2x-cost stress column and optimistic-maker split (SIM-8/12). `sim_8_stress_expectancy_2x_is_never_better_than_base_when_fees_positive`, `sim_12_optimistic_maker_fills_are_tracked_separately`.
+- [ ] Walk-forward/plateau/Monte-Carlo CLI harnesses, experiment tracker, `sim replay-live` determinism command (SIM-9/10/11) — deferred; the event core, fill ladder, and accounting they build on are done.
 
 ## Decisions
 - 2026-07-10: L3 (queue position) deferred to its own spec; until then maker-
@@ -131,6 +134,34 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
 - 2026-07-10 (impl): deferred within spec 005 — walk-forward/plateau/Monte-Carlo
   harnesses, experiment tracker, `sim replay-live` diff, `sim wf` CLI,
   funding-missing/low-coverage run-failing guards (SIM-4/6). Tracked.
+- 2026-07-11 (impl): the L0/L1/L2 fill-model ladder is implemented (SIM-2),
+  closing the prior "taker-fill-only" gap. `L1TopOfBook` reads the production
+  `BookMirror` (core) for opposing best price/qty, caps market fills at
+  `top_qty × participation` with the remainder walking forward to the next
+  event, and fills resting limits only on a trade-print crossing the price
+  (touch-fills banned). `L2DepthWalk` walks `BookMirror` levels via new
+  `walk_ask`/`walk_bid` methods (impact paid, book recovers from later
+  deltas) and caps each limit-fill print at `trade_qty × queue_share`,
+  needing multiple prints to complete (queue-position realism). `L0BarFill`
+  uses `mp_features::BarBuilder` (new `current_open()` accessor) to fill at
+  the next bar's open ± a tick/bps haircut, always complete. When no book
+  data is present in the stream (trade-only fixtures), L1/L2 market orders
+  fall back to filling in full at the next trade print — the exact pre-ladder
+  behavior, so existing fixtures and the golden-hash test are unaffected
+  (the golden test asserts determinism, not a pinned hash literal, so this
+  was safe to change). SIM-4 (funding-missing) and SIM-6 (low-coverage) are
+  now enforced: `Backtester::run_checked(events, coverage)` refuses upfront on
+  coverage below `min_coverage`, and refuses at run end if a held perp
+  position never saw a Funding event within `funding_check_interval_ns`
+  (default 8h) — both return a `SimError`, not a silently-wrong number.
+  SIM-8's 2×-cost stress is an approximation: `Metrics::stress_expectancy`
+  re-prices the *actual* total fee spend at 2× and spreads it across the
+  trade count, rather than re-simulating fills under doubled costs (a true
+  re-simulation is additional scope, left for the walk-forward harness work).
+  SIM-12 optimistic-maker fills are tracked via `Metrics::record_maker_trade`
+  (a separate win/loss tally) and tagged in the decision log
+  (`record_fill_tagged`) so the hash captures the distinction. 10 new tests
+  in `sim/tests/fill_models.rs`.
 
 ## Open questions
 - None.

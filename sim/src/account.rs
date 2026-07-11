@@ -97,6 +97,11 @@ impl Accountant {
         self.positions.get(&symbol).map(|p| p.qty).unwrap_or(0.0)
     }
 
+    /// Average entry price of the current position (0.0 if flat).
+    pub fn avg_cost(&self, symbol: SymbolId) -> f64 {
+        self.positions.get(&symbol).map(|p| p.avg).unwrap_or(0.0)
+    }
+
     pub fn positions(&self) -> BTreeMap<SymbolId, f64> {
         self.positions.iter().map(|(k, v)| (*k, v.qty)).collect()
     }

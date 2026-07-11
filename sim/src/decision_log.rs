@@ -41,15 +41,22 @@ impl DecisionLog {
     }
 
     pub fn record_fill(&mut self, seq: u64, f: &Fill) {
+        self.record_fill_tagged(seq, f, false);
+    }
+
+    /// Record a fill, tagging whether it is an `optimistic_maker` fill (SIM-12:
+    /// a resting-limit fill our L1/L2 model assumed but didn't queue-model).
+    pub fn record_fill_tagged(&mut self, seq: u64, f: &Fill, optimistic_maker: bool) {
         self.fills += 1;
         let s = format!(
-            "F|{seq}|{}|{:?}|{}|{}|{}|{:?}",
+            "F|{seq}|{}|{:?}|{}|{}|{}|{:?}|{}",
             f.symbol.0,
             f.side,
             f.price.to_bits(),
             f.qty.to_bits(),
             f.fee.to_bits(),
             f.liquidity,
+            optimistic_maker,
         );
         self.absorb(&s);
     }
