@@ -118,7 +118,10 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
 - [x] L0/L1/L2 fill models incl. trade-print limit rule and participation/queue-share caps (SIM-2). `sim_2_l1_market_buy_is_capped_by_top_of_book_participation`, `sim_2_l1_limit_trade_print_rule_bans_touch_fills`, `sim_2_l2_market_buy_walks_multiple_levels_and_pays_impact`, `sim_2_l2_limit_fill_capped_by_queue_share_needs_multiple_prints`.
 - [x] Funding-missing and low-coverage run refusals (SIM-4/6). `sim_4_missing_funding_refuses_to_report_a_held_perp_position`, `sim_4_funding_event_present_lets_the_run_report`, `sim_6_low_manifest_coverage_refuses_the_run`, `sim_6_full_coverage_runs_normally`.
 - [x] 2x-cost stress column and optimistic-maker split (SIM-8/12). `sim_8_stress_expectancy_2x_is_never_better_than_base_when_fees_positive`, `sim_12_optimistic_maker_fills_are_tracked_separately`.
-- [ ] Walk-forward/plateau/Monte-Carlo CLI harnesses, experiment tracker, `sim replay-live` determinism command (SIM-9/10/11) — deferred; the event core, fill ladder, and accounting they build on are done.
+- [x] Walk-forward rolling windows, parameter-plateau sign-flip check, Monte-Carlo block bootstrap with seeded DD distribution (SIM-9). `sim_9_walk_forward_rolls_windows_and_reports_oos`, `sim_9_plateau_flags_sign_flip_within_30pct`, `sim_9_monte_carlo_is_seeded_and_reports_dd_distribution`, `sim_9_monte_carlo_empty_is_zero`.
+- [x] Experiment tracker run records: config hash + git SHA + data range + manifest hashes + decision-log hash, reproducible & experiment-identifying (SIM-10). `sim_10_run_record_is_reproducible_and_identifies_experiments`.
+- [x] `replay-live` decision-log divergence detection (SIM-11). `sim_11_replay_live_diff_detects_divergence`, `sim_11_length_mismatch_with_shared_prefix_diverges`.
+- [ ] CLI subcommand wiring (`sim wf`/`plateau`/`mc`/`replay-live` binaries) — the harness/tracker/diff libraries are done and tested; only the `clap` argv front-end and `runs/` file I/O binary remain (a binary-edge concern, no new logic).
 
 ## Decisions
 - 2026-07-10: L3 (queue position) deferred to its own spec; until then maker-
@@ -162,6 +165,26 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
   (a separate win/loss tally) and tagged in the decision log
   (`record_fill_tagged`) so the hash captures the distinction. 10 new tests
   in `sim/tests/fill_models.rs`.
+- 2026-07-11 (impl): the statistical harnesses (SIM-9/10/11) are implemented
+  as libraries: `harness::walk_forward` rolls `(train,test)` windows over the
+  recv-ordered event span and hands each pair to a caller fit/apply closure
+  (the fit is strategy-specific; the harness owns only the windowing);
+  `harness::plateau_ok` is the curve-fit sign-flip check within ±30%;
+  `harness::monte_carlo` block-bootstraps the per-trade P&L sequence by day
+  with a seeded splitmix64 (CONV-11) and returns the DD distribution incl.
+  `p95(maxDD)` (the RSK-5 sizing input). `tracker::RunRecord` captures the
+  SIM-10 reproducibility fields (config hash + git SHA + data range + manifest
+  hashes + decision-log hash) and a `same_experiment` identity; the `run_id`
+  is caller-supplied (ULID at the binary edge) so the crate stays
+  wall-clock-free (PD-3). `DecisionLog::first_divergence` is the SIM-11
+  replay-live diff (any divergence is a P1). Gate **G1** (spec 006) is
+  evaluated in `gates::evaluate_g1` — it lives here, not in `mp-strategies`,
+  because it reads the backtest `Metrics` and `mp-strategies` must not depend
+  on `mp-sim`. The Backtester now records the `(ts,pnl)` trade sequence and
+  exposes a `summary()`. What remains is only the argv/`clap` binary front-end
+  (`sim wf|plateau|mc|replay-live`) and its `runs/` file writes — a
+  binary-edge concern with no new decision logic. 10 new tests in
+  `sim/tests/harness.rs`.
 
 ## Open questions
 - None.

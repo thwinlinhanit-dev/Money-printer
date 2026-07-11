@@ -108,7 +108,7 @@ click (G3/G4).** Agents may prepare the evidence, never click the button.
 - [x] Promotion without the human flag fails at G3/G4 (STR-3). Same test (`NeedsHuman`).
 - [x] Transition journal lines are valid JSONL with the right schema (STR-5). `str_5_transitions_journal_as_jsonl`.
 - [x] Null/CoinFlip fixtures exist; CoinFlip is deterministic under a seed (STR-7/9). `str_9_*`, `str_7_*`.
-- [ ] CoinFlip fails G1 on real fixture data (STR-9) — needs the backtester (spec 005) to produce the run; the strategy + funnel are ready for it.
+- [x] CoinFlip fails G1 on fixture data — the worked example of a G1 kill (STR-9). `str_9_coinflip_fails_g1_on_fixture_data`, `str_9_g1_passes_only_when_all_conditions_met`, `sim_12_g1_rejects_optimistic_maker_dependent_edge` (in `sim/tests/harness.rs`; G1 reads the backtest Metrics so it lives in `mp-sim`).
 
 ## Decisions
 - 2026-07-10: strategies consume features only (not raw events) in v1 —

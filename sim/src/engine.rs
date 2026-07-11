@@ -159,6 +159,7 @@ pub struct Backtester {
     bars: BTreeMap<SymbolId, BarBuilder>,
     funding_seen: BTreeMap<SymbolId, i64>,
     run_start_ns: Option<i64>,
+    trade_pnls: Vec<(i64, f64)>,
     rng: u64,
     seq: u64,
     next_intent: u128,
@@ -181,6 +182,7 @@ impl Backtester {
             bars: BTreeMap::new(),
             funding_seen: BTreeMap::new(),
             run_start_ns: None,
+            trade_pnls: Vec::new(),
             rng: seed,
             seq: 0,
             next_intent: 0,
@@ -212,6 +214,24 @@ impl Backtester {
     /// report alongside the base expectancy).
     pub fn stress_expectancy_2x(&self) -> f64 {
         self.metrics.stress_expectancy(self.acct.fees(), 2.0)
+    }
+    /// Total fees paid over the run (for the stress column and the tracker).
+    pub fn fees(&self) -> f64 {
+        self.acct.fees()
+    }
+    /// The realized per-trade P&L sequence `(ts_ns, pnl)` — the Monte-Carlo
+    /// block bootstrap resamples this (SIM-9).
+    pub fn trade_pnls(&self) -> &[(i64, f64)] {
+        &self.trade_pnls
+    }
+    /// Compact metrics snapshot for walk-forward tables and tracker records.
+    pub fn summary(&self) -> crate::harness::MetricsSummary {
+        crate::harness::MetricsSummary {
+            trades: self.metrics.trades,
+            expectancy: self.metrics.expectancy(),
+            stress_expectancy_2x: self.stress_expectancy_2x(),
+            max_drawdown: self.metrics.max_drawdown,
+        }
     }
 
     /// Replay a full event sequence at full (1.0) assumed coverage. See
@@ -586,6 +606,11 @@ impl Backtester {
             self.metrics.record_maker_trade(realized_delta);
         } else {
             self.metrics.record_trade(realized_delta);
+        }
+        // Per-trade P&L sequence with timestamps (feeds the Monte-Carlo block
+        // bootstrap, SIM-9). Only realized (position-reducing) fills count.
+        if realized_delta != 0.0 {
+            self.trade_pnls.push((self.clock.now_ns(), realized_delta));
         }
 
         self.seq += 1;

@@ -73,4 +73,28 @@ impl DecisionLog {
     pub fn fill_count(&self) -> u64 {
         self.fills
     }
+
+    /// The canonical decision lines, in order.
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    /// First index at which two logs diverge, or `None` if one is a prefix of
+    /// the other and they share every common line (SIM-11 `replay-live`: any
+    /// divergence between a live session and its deterministic replay is a P1
+    /// bug). A length mismatch with identical prefix still diverges — at the
+    /// index where the shorter log ends.
+    pub fn first_divergence(&self, other: &DecisionLog) -> Option<usize> {
+        let n = self.lines.len().min(other.lines.len());
+        for i in 0..n {
+            if self.lines[i] != other.lines[i] {
+                return Some(i);
+            }
+        }
+        if self.lines.len() != other.lines.len() {
+            Some(n)
+        } else {
+            None
+        }
+    }
 }
