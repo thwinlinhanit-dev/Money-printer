@@ -92,6 +92,28 @@ liq.cluster > $5M?") and scheduled studies.
   spec when wanted.
 - 2026-07-10: LLM output is human-read only; anything "LLM → decision path"
   requires a new spec and owner sign-off.
+- 2026-07-11: LLM provider abstraction implemented as a Rust crate `mp-llm`
+  (not Python) so the intelligence agents share the workspace's error/logging
+  conventions and the grounding types are compile-checked. Nine providers:
+  Anthropic (default model `claude-opus-4-8`), OpenAI, Gemini, Mistral, Cohere,
+  DeepSeek, Groq, xAI, and local Ollama. Each is a pure translator
+  (`build_request`/`parse_response`); the six OpenAI-compatible providers share
+  one code path. Live network I/O (blocking `reqwest`+rustls) is behind the
+  `live-http` feature so all request-shaping/parsing is offline-testable — same
+  gating pattern as collectors' `live-ws`. This is the single new external
+  dependency-with-network for spec 010; it is feature-off by default and never
+  reads or logs keys.
+- 2026-07-11: RES-6 grounding realised in code: `InputBundle` content-hashes
+  (FNV-1a, non-crypto, documented) the exact prompt inputs; `ArchiveRecord`
+  emits a deterministic one-line JSON for the append-only `journal/briefs/`
+  archive `{provider, model_id, prompt_version, bundle_hash, output, ts}`.
+  RES-7 "no LLM on a decision path" is made structural: completions are wrapped
+  in `HumanReadOnly` which has no method producing an `OrderIntent`/decision
+  type — the guarantee is a type, not a comment. Keys resolve only from env
+  vars (PD-2); `providers.example.toml` documents the model/env map with no
+  secrets. Still open per spec: the Python research layer (`mp_data`, screener
+  grading RES-2/3, event study RES-4) and the brief/anomaly/report *jobs* that
+  compose these providers — status stays `implementing`.
 
 ## Open questions
 - Which model/provider and monthly token budget — owner picks (cost knob).

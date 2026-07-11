@@ -18,7 +18,7 @@ should be updated).
 | 007 | [Execution: OMS, Risk Gate, Reconciler](007-execution.md) | execution | 🔨 implementing |
 | 008 | [Risk & Sizing Engine](008-risk-sizing.md) | risk | 🔨 implementing |
 | 009 | [Ops, Monitoring & Alerting](009-ops-alerting.md) | ops | ✅ ready |
-| 010 | [Research Workflow & LLM Agents](010-research-llm.md) | intelligence | ✅ ready |
+| 010 | [Research Workflow & LLM Agents](010-research-llm.md) | intelligence | 🔨 implementing |
 | 011 | [WASM Terminal](011-terminal.md) | decision plane | 📝 draft |
 
 Status values: `draft` → `ready` (implementable) → `implementing` →
