@@ -13,12 +13,12 @@ should be updated).
 | 002 | [Collectors](002-collectors.md) | data plane | 🔨 implementing |
 | 003 | [Storage](003-storage.md) | data plane | 🔨 implementing |
 | 004 | [Feature Engine](004-feature-engine.md) | intelligence | 🔨 implementing |
-| 005 | [Backtester & Simulation](005-backtester.md) | intelligence | 🔨 implementing |
-| 006 | [Strategy API & Funnel](006-strategy-api.md) | intelligence | 🔨 implementing |
+| 005 | [Backtester & Simulation](005-backtester.md) | intelligence | ✅ implemented |
+| 006 | [Strategy API & Funnel](006-strategy-api.md) | intelligence | ✅ implemented |
 | 007 | [Execution: OMS, Risk Gate, Reconciler](007-execution.md) | execution | 🔨 implementing |
-| 008 | [Risk & Sizing Engine](008-risk-sizing.md) | risk | 🔨 implementing |
+| 008 | [Risk & Sizing Engine](008-risk-sizing.md) | risk | ✅ implemented |
 | 009 | [Ops, Monitoring & Alerting](009-ops-alerting.md) | ops | 🔨 implementing |
-| 010 | [Research Workflow & LLM Agents](010-research-llm.md) | intelligence | 🔨 implementing |
+| 010 | [Research Workflow & LLM Agents](010-research-llm.md) | intelligence | ✅ implemented |
 | 011 | [WASM Terminal](011-terminal.md) | decision plane | 📝 draft |
 
 Status values: `draft` → `ready` (implementable) → `implementing` →

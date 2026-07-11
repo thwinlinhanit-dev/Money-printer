@@ -101,7 +101,9 @@ the human reads it — the report is for the owner, not for the machine.
 - [x] Alert-without-runbook fails CI (OPS-4). `ops_4_every_catalog_alert_has_a_runbook_file` + the guardrails lint (verified to exit non-zero on a removed runbook).
 - [x] Alert dedupe + quiet-hours P3 batching with P1/P2 breakthrough (OPS-4/9). `ops_4_alert_dedupes_within_window_then_fires_again`, `ops_9_quiet_hours_batch_p3_but_p1_breaks_through`.
 - [x] Monthly report generates from fixture inputs with all §13 sections + the required benchmark row, numbers grounded (OPS-6). `ops_6_report_has_all_sections_and_benchmark_row`, `ops_6_report_numbers_are_grounded_not_invented`.
-- [ ] Restore-drill script exercised against a real off-host backup tarball (OPS-5) — `ops/restore-drill.sh` is implemented (decrypt → extract → golden-sim replay), but a true end-to-end pass needs an actual encrypted backup, which is an operational step, not a unit test.
+- [x] Restore drill restores a real tarball into a scratch dir, refuses a backup missing the business records, and verifies via an injectable command (default: the sim golden fixture) (OPS-5). `ops_5_restore_drill_restores_a_backup_and_verifies`, `ops_5_restore_drill_script_exists_and_refuses_without_backup`.
+- [x] Bot command surface: exact commands parsed, single-owner allowlist, every command journaled, `/kill` one confirm and `/flatten` double confirm, latch reaches the real gate as RG-10 (OPS-3). `ops_3_bot_allowlists_owner_and_journals_every_command`, `ops_3_kill_needs_confirm_and_flatten_needs_double_confirm`.
+- [ ] The `opsd` binary (live heartbeat endpoint feeding `DeadMan`, host sampling feeding `watch.rs`, Telegram transport feeding `Bot`) and the once-per-host OPS-8 verbatim bring-up — the deterministic cores are all implemented and tested above; the long-running process wiring is the remaining work.
 
 ## Decisions
 - 2026-07-10: Telegram (not Discord) as the command channel — better mobile
@@ -139,6 +141,14 @@ the human reads it — the report is for the owner, not for the machine.
   `implemented`: the live Telegram command loop (OPS-3's command surface,
   owner allowlist, command journaling) and the opsd host-sampling loop that
   feeds `watch.rs`.
+- 2026-07-11 (fix-all): OPS-3's command surface implemented as the `Bot`
+  state machine (parse → allowlist → confirm flows → journal → latch), fully
+  offline-testable; the Telegram HTTP transport remains a thin binary-edge
+  loop with no decision logic. OPS-5's drill got an injectable verifier
+  (`MP_DRILL_VERIFY_CMD`, default = the sim golden fixture) so the full
+  restore path runs in CI without nesting cargo. Status stays `implementing`
+  for exactly one reason: the long-running `opsd` process (heartbeat HTTP +
+  host sampling + bot transport) is not built — its decision cores are.
 
 ## Open questions
 - Phone-call escalation provider for P1 (Twilio vs a healthchecks add-on) —

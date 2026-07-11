@@ -360,3 +360,153 @@ fn ops_10_process_log_rotation_is_configured() {
     assert!(compose.contains("max-size"), "log rotation bound (OPS-10)");
     assert!(compose.contains("max-file"), "log rotation count (OPS-10)");
 }
+
+// ---- OPS-3: bot command surface, allowlist, confirm flows, journaling ------
+
+#[test]
+fn ops_3_bot_allowlists_owner_and_journals_every_command() {
+    use mp_ops::Bot;
+    let mut bot = Bot::new(777);
+    // A non-owner cannot command — and the attempt is journaled (evidence).
+    let r = bot.handle(666, "/kill GLOBAL", 1);
+    assert_eq!(r.text, "not authorized");
+    assert!(r.latch.is_none());
+    // Owner read-only commands are acknowledged and journaled.
+    for cmd in ["/status", "/positions", "/funnel", "/report"] {
+        assert!(bot.handle(777, cmd, 2).latch.is_none());
+    }
+    assert!(bot
+        .journal()
+        .iter()
+        .any(|l| l.contains("REFUSED non-owner")));
+    assert!(bot.journal().len() >= 5, "every command journaled (OPS-3)");
+}
+
+#[test]
+fn ops_3_kill_needs_confirm_and_flatten_needs_double_confirm() {
+    use mp_core::{Side, StrategyId, SymbolId};
+    use mp_ops::Bot;
+    use mp_risk::{evaluate, GateInput, Mode, RejectReason, RiskLimits, Verdict};
+
+    let mut bot = Bot::new(1);
+    // /kill GLOBAL: no latch until "yes".
+    assert!(bot.handle(1, "/kill GLOBAL", 1).latch.is_none());
+    let confirmed = bot.handle(1, "yes", 2);
+    let latch = confirmed.latch.expect("latch after confirm");
+
+    // The latch reaches the REAL gate: next intent rejected with RG-10.
+    let sym = SymbolId(0);
+    let allowed = [(Venue::Bybit, sym)];
+    let verdict = evaluate(
+        &RiskLimits::default(),
+        &latch.to_kill_switches(),
+        &GateInput {
+            mode: Mode::Paper,
+            venue: Venue::Bybit,
+            symbol: sym,
+            strategy: StrategyId::new("carry-v1"),
+            side: Side::Buy,
+            qty: 1.0,
+            price: 100.0,
+            mark: 100.0,
+            current_position_qty: 0.0,
+            gross_exposure_notional: 0.0,
+            orders_last_min: 0,
+            strategy_daily_pnl: 0.0,
+            portfolio_daily_pnl: 0.0,
+            reconciler_clean: true,
+            allowed: &allowed,
+        },
+    );
+    assert_eq!(verdict, Verdict::Reject(RejectReason::KillSwitchTripped));
+
+    // /flatten needs TWO yes replies; a decline aborts.
+    let mut bot2 = mp_ops::Bot::new(1);
+    assert!(bot2.handle(1, "/flatten", 1).latch.is_none());
+    assert!(bot2.handle(1, "yes", 2).latch.is_none()); // 1/2
+    let done = bot2.handle(1, "yes", 3);
+    assert!(done.latch.is_some()); // 2/2 ⇒ global latch
+    let mut bot3 = mp_ops::Bot::new(1);
+    bot3.handle(1, "/flatten", 1);
+    assert!(bot3.handle(1, "no", 2).latch.is_none()); // aborted
+}
+
+#[test]
+fn ops_5_restore_drill_restores_a_backup_and_verifies() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("restore-drill.sh");
+    let dir = std::env::temp_dir().join(format!("mpdrill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("stage/journal")).unwrap();
+    std::fs::create_dir_all(dir.join("stage/runs")).unwrap();
+    std::fs::write(dir.join("stage/journal/briefs.jsonl"), "{}\n").unwrap();
+    std::fs::write(dir.join("stage/runs/index.jsonl"), "{}\n").unwrap();
+    let tarball = dir.join("backup.tar.gz");
+    let tar = std::process::Command::new("tar")
+        .args([
+            "-czf",
+            tarball.to_str().unwrap(),
+            "-C",
+            dir.join("stage").to_str().unwrap(),
+            "journal",
+            "runs",
+        ])
+        .status()
+        .expect("tar");
+    assert!(tar.success());
+
+    // Full restore path with an injected verifier (the default verifier is the
+    // sim golden fixture; injecting avoids nesting cargo inside cargo test).
+    let ok = std::process::Command::new("bash")
+        .arg(&script)
+        .arg(&tarball)
+        .env("MP_DRILL_VERIFY_CMD", "true")
+        .output()
+        .expect("run drill");
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+
+    // A backup missing the business records must FAIL the drill.
+    let bad = dir.join("bad.tar.gz");
+    std::process::Command::new("tar")
+        .args([
+            "-czf",
+            bad.to_str().unwrap(),
+            "-C",
+            dir.join("stage").to_str().unwrap(),
+            "runs",
+        ])
+        .status()
+        .expect("tar bad");
+    let fail = std::process::Command::new("bash")
+        .arg(&script)
+        .arg(&bad)
+        .env("MP_DRILL_VERIFY_CMD", "true")
+        .output()
+        .expect("run drill bad");
+    assert!(
+        !fail.status.success(),
+        "missing journal/ must fail the drill"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sto_7_disk_watchdog_alerts_and_never_deletes() {
+    use mp_ops::disk_alert;
+    // The watchdog is ALERT-ONLY (STO-7/W-6): it has no deletion capability —
+    // its whole surface is (readings) -> Option<Alert>. Prove the alert fires
+    // past the budget and that data on disk is untouched by the check.
+    let dir = std::env::temp_dir().join(format!("mpsto7-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let data = dir.join("recorded.parquet");
+    std::fs::write(&data, b"recorded market data").unwrap();
+    let a = disk_alert(0.90, 0.85, MIN).expect("over budget must alert");
+    assert_eq!(a.id, "disk-high");
+    assert!(data.exists(), "the watchdog never deletes recorded data");
+    assert_eq!(std::fs::read(&data).unwrap(), b"recorded market data");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,0 +1,10 @@
+# RES-5: daily brief at 07:00 UTC.
+[Unit]
+Description=Daily brief timer
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

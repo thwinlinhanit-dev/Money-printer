@@ -61,6 +61,21 @@ impl DecisionLog {
         self.absorb(&s);
     }
 
+    /// Record a feature update consumed by the strategy (SIM-7: the decision
+    /// log captures what the strategy SAW, not just what it did — a feature
+    /// change shows up as a divergence even before any intent differs).
+    pub fn record_feature(&mut self, seq: u64, u: &mp_features::FeatureUpdate) {
+        let s = format!(
+            "U|{seq}|{}|{}|{}|{}|{}",
+            u.feature,
+            u.symbol.0,
+            u.ts_ns,
+            u.value.to_bits(),
+            u.ver,
+        );
+        self.absorb(&s);
+    }
+
     /// Record the risk-gate verdict for an intent (SIM-5/SIM-7: verdicts are
     /// decisions and belong in the hash — a gate change shows up as a diff).
     pub fn record_verdict(&mut self, seq: u64, intent: mp_core::IntentId, v: mp_risk::Verdict) {

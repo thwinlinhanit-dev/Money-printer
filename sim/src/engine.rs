@@ -357,9 +357,12 @@ impl Backtester {
             self.try_fill_market(ev.symbol, ev.recv_ts_ns);
         }
 
-        // Features → strategy → sized intents.
+        // Features → strategy → sized intents. Every update the strategy
+        // consumes is recorded (SIM-7: the log captures inputs, not just acts).
         let ups = self.fe.on_event(ev);
         for u in ups {
+            self.seq += 1;
+            self.log.record_feature(self.seq, &u);
             if u.feature.starts_with("vol.rv") {
                 self.latest_vol.insert(u.symbol, u.value);
             }

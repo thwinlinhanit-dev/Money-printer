@@ -107,6 +107,47 @@ pub enum FunnelError {
     MissingAutopsy,
     #[error("demotion target must be a lower stage")]
     NotLower,
+    #[error("evidence is stale (> 30 days old) — re-run the experiment (STR-4)")]
+    StaleEvidence,
+    #[error("autopsy must state what we believed, what the data said, and the lesson (STR-6)")]
+    IncompleteAutopsy,
+}
+
+/// A gate-evidence reference (STR-4): the experiment-tracker run id (SIM-10)
+/// plus when the run was produced, so staleness is checkable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceRef {
+    pub run_id: String,
+    pub created_ts_ns: i64,
+}
+
+/// STR-4: evidence older than this is stale and refused (30 days).
+pub const EVIDENCE_MAX_AGE_NS: i64 = 30 * 86_400_000_000_000;
+
+/// The kill artifact (STR-6): what we believed, what the data said, the
+/// lesson. Rendered to `strategies/{id}/AUTOPSY.md` — the kill log is a
+/// product (W-6). All three fields must be non-empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Autopsy {
+    pub believed: String,
+    pub data_said: String,
+    pub lesson: String,
+}
+
+impl Autopsy {
+    pub fn is_complete(&self) -> bool {
+        !self.believed.trim().is_empty()
+            && !self.data_said.trim().is_empty()
+            && !self.lesson.trim().is_empty()
+    }
+
+    /// Render `AUTOPSY.md` (STR-6).
+    pub fn to_markdown(&self, id: &StrategyId) -> String {
+        format!(
+            "# AUTOPSY — {}\n\n## What we believed\n{}\n\n## What the data said\n{}\n\n## Lesson\n{}\n",
+            id.0, self.believed, self.data_said, self.lesson
+        )
+    }
 }
 
 /// Persisted funnel state for one strategy (`strategies/{id}/funnel.toml`).
@@ -136,7 +177,8 @@ impl FunnelState {
         &mut self,
         to: Stage,
         human: bool,
-        evidence: Vec<String>,
+        evidence: Vec<EvidenceRef>,
+        now_ns: i64,
     ) -> Result<Transition, FunnelError> {
         if self.stage == Stage::Killed {
             return Err(FunnelError::Terminal);
@@ -150,18 +192,29 @@ impl FunnelState {
         if self.stage.requires_human(to) && !human {
             return Err(FunnelError::NeedsHuman);
         }
-        if self.stage.requires_evidence(to) && evidence.is_empty() {
-            return Err(FunnelError::MissingEvidence);
+        if self.stage.requires_evidence(to) {
+            if evidence.is_empty() {
+                return Err(FunnelError::MissingEvidence);
+            }
+            // STR-4: run-id evidence must be fresh — older than 30 days is
+            // stale and the promotion is refused (re-run the experiment).
+            if evidence
+                .iter()
+                .any(|e| now_ns.saturating_sub(e.created_ts_ns) > EVIDENCE_MAX_AGE_NS)
+            {
+                return Err(FunnelError::StaleEvidence);
+            }
         }
         let from = self.stage;
         self.stage = to;
-        self.evidence.extend(evidence.iter().cloned());
+        let run_ids: Vec<String> = evidence.iter().map(|e| e.run_id.clone()).collect();
+        self.evidence.extend(run_ids.iter().cloned());
         Ok(Transition {
             id: self.id.clone(),
             from,
             to,
             reason: "promote".into(),
-            evidence,
+            evidence: run_ids,
             actor: if human { Actor::Human } else { Actor::Auto },
         })
     }
@@ -191,17 +244,18 @@ impl FunnelState {
         })
     }
 
-    /// Kill a strategy (STR-6). Requires an autopsy; terminal.
+    /// Kill a strategy (STR-6). Requires a COMPLETE autopsy (believed /
+    /// data said / lesson) — the artifact, not a checkbox; terminal.
     pub fn kill(
         &mut self,
-        autopsy_present: bool,
+        autopsy: &Autopsy,
         reason: impl Into<String>,
     ) -> Result<Transition, FunnelError> {
         if self.stage == Stage::Killed {
             return Err(FunnelError::Terminal);
         }
-        if !autopsy_present {
-            return Err(FunnelError::MissingAutopsy);
+        if !autopsy.is_complete() {
+            return Err(FunnelError::IncompleteAutopsy);
         }
         let from = self.stage;
         self.stage = Stage::Killed;

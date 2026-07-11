@@ -121,7 +121,7 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
 - [x] Walk-forward rolling windows, parameter-plateau sign-flip check, Monte-Carlo block bootstrap with seeded DD distribution (SIM-9). `sim_9_walk_forward_rolls_windows_and_reports_oos`, `sim_9_plateau_flags_sign_flip_within_30pct`, `sim_9_monte_carlo_is_seeded_and_reports_dd_distribution`, `sim_9_monte_carlo_empty_is_zero`.
 - [x] Experiment tracker run records: config hash + git SHA + data range + manifest hashes + decision-log hash, reproducible & experiment-identifying (SIM-10). `sim_10_run_record_is_reproducible_and_identifies_experiments`.
 - [x] `replay-live` decision-log divergence detection (SIM-11). `sim_11_replay_live_diff_detects_divergence`, `sim_11_length_mismatch_with_shared_prefix_diverges`.
-- [ ] CLI subcommand wiring (`sim wf`/`plateau`/`mc`/`replay-live` binaries) — the harness/tracker/diff libraries are done and tested; only the `clap` argv front-end and `runs/` file I/O binary remain (a binary-edge concern, no new logic).
+- [x] `sim` CLI: `backtest|wf|plateau|mc|replay-live` over a real event-log file, writing tracker runs to `runs/index.jsonl`; `replay-live` exits non-zero on any decision-log divergence (SIM-9/10/11). `sim_9_cli_backtest_mc_and_replay_live_work_end_to_end` (end-to-end against the built binary).
 
 ## Decisions
 - 2026-07-10: L3 (queue position) deferred to its own spec; until then maker-
@@ -202,6 +202,14 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
   Remaining before `implemented`: the `sim wf|plateau|mc|replay-live` CLI
   binaries (SIM-9's letter) and recording consumed feature updates in the
   decision log (SIM-7's letter).
+- 2026-07-11 (fix-all): the `sim` binary implements SIM-9/11's letter with
+  hand-rolled argv parsing (no new dependency). The run id is caller-supplied
+  (ULID at the ops layer) so the binary reads no wall clock at all. SIM-7's
+  letter is now met too: the decision log records every consumed
+  `FeatureUpdate` (`record_feature`) alongside intents, verdicts, and fills.
+  With every requirement ID tested and every acceptance criterion automated,
+  status flips to `implemented`. Remaining honest caveats live in COL/EXE
+  (live-venue work), not here.
 
 ## Open questions
 - None.

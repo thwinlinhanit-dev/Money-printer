@@ -229,3 +229,63 @@ fn rsk_8_sizing_trace_exposes_every_term_of_the_formula() {
     let recomposed = 1.0 * t.per_unit_risk / (1.5 * t.dollar_vol_per_contract);
     assert!((t.raw_contracts - recomposed).abs() < 1e-9);
 }
+
+#[test]
+fn rsk_6_risk_toml_parses_rejects_unknown_keys_and_journals_changes() {
+    use mp_risk::RiskConfig;
+    let toml = r#"
+        max_order_notional = 500.0
+        max_position_notional = 2000.0
+        max_gross_portfolio = 300000.0
+        max_px_dev_frac = 0.02
+        max_orders_per_min = 30
+        strategy_daily_loss_budget = 1000.0
+        portfolio_daily_loss_budget = 3000.0
+    "#;
+    let cfg = RiskConfig::from_toml(toml).unwrap();
+    assert_eq!(cfg.to_limits().max_order_notional, 500.0);
+    // Typo'd key is an error, never a silent default (deny_unknown_fields).
+    assert!(RiskConfig::from_toml("max_order_notionl = 1.0").is_err());
+    // Every change journals old->new with ts + actor; no change ⇒ no lines.
+    let mut newer = cfg.clone();
+    newer.max_order_notional = 750.0;
+    let j = cfg.journal_change(&newer, 123, "owner");
+    assert_eq!(j.len(), 1);
+    assert!(j[0].contains("max_order_notional: 500 -> 750"));
+    assert!(j[0].starts_with("123|owner|"));
+    assert!(cfg.journal_change(&cfg.clone(), 124, "owner").is_empty());
+}
+
+#[test]
+fn rsk_7_regime_fit_reads_live_features_not_opinion() {
+    use mp_risk::regime_fit_from_features;
+    let declared = vec!["trend".to_string()];
+    // Live regime.trend = 1 (trend) ⇒ full fit; = 0 (chop) ⇒ penalty.
+    assert_eq!(regime_fit_from_features(&declared, 1.0, 1.0, 0.25), 1.0);
+    assert_eq!(regime_fit_from_features(&declared, 1.0, 0.0, 0.25), 0.25);
+    // Vol labels resolve from the regime.vol encoding {0,1,2}.
+    let hv = vec!["high_vol".to_string()];
+    assert_eq!(regime_fit_from_features(&hv, 2.0, 0.0, 0.5), 1.0);
+    assert_eq!(regime_fit_from_features(&hv, 0.0, 0.0, 0.5), 0.5);
+    // Empty mask ⇒ any regime fits.
+    assert_eq!(regime_fit_from_features(&[], 0.0, 0.0, 0.1), 1.0);
+    // The fit feeds the allocator's regime_fit term (RSK-7 end-to-end).
+    use mp_risk::{allocate, AllocParams, StrategyInput};
+    let mut inputs = std::collections::BTreeMap::new();
+    inputs.insert(
+        "carry-v1".to_string(),
+        StrategyInput {
+            base_w: 1.0,
+            regime_fit: regime_fit_from_features(&declared, 1.0, 0.0, 0.25),
+            corr_penalty: 1.0,
+            dd_gov: 1.0,
+            kelly_cap: 1.0,
+        },
+    );
+    let w = allocate(&AllocParams::default(), &inputs);
+    // base 1.0 x fit 0.25 = 0.25 — a quarter of what a matching regime gets.
+    assert!(
+        (w["carry-v1"] - 0.25).abs() < 1e-9,
+        "mismatch de-weights allocation"
+    );
+}

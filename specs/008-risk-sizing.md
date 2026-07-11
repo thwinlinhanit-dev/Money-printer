@@ -94,6 +94,10 @@ limits file the gate hot-reloads (gate stays dumb, RSK does the thinking).
 - [x] Allocator caps + regime penalty + renormalize; intraday shrink-only (RSK-4). `rsk_4_allocator_caps_and_renormalizes`, `rsk_4_intraday_shrink_only`.
 - [x] SizingTrace complete for every sized intent (RSK-8). Asserted in RSK-1 tests.
 - [x] Property suite: monotonic sizing, g∈[0,1], Σweights≤budget, finite (RSK-9). `rsk_9_*`.
+- [x] MC-derived default DD budget `p95(maxDD)×1.25` (RSK-5). `rsk_5_dd_budget_defaults_to_p95_mc_times_1_25`.
+- [x] `risk.toml` parses with deny_unknown_fields and journals every change old→new/ts/actor (RSK-6). `rsk_6_risk_toml_parses_rejects_unknown_keys_and_journals_changes` + `risk.toml.example`.
+- [x] Regime fit computed from live regime feature values, feeding the allocator (RSK-7). `rsk_7_regime_fit_reads_live_features_not_opinion`.
+- [x] SizingTrace recomposes the sizing formula term-by-term (RSK-8). `rsk_8_sizing_trace_exposes_every_term_of_the_formula`.
 
 ## Decisions
 - 2026-07-10: quarter-Kelly ceiling and live-trades-only estimation are
@@ -111,6 +115,12 @@ limits file the gate hot-reloads (gate stays dumb, RSK does the thinking).
   test proving the terms recompose the formula (`rsk_8_*`). Remaining before
   `implemented`: RSK-6 `risk.toml` parsing + change journaling, RSK-7 regime
   de-weighting from live features.
+- 2026-07-11 (fix-all): RSK-6 implemented (`RiskConfig::from_toml` +
+  `journal_change`, `risk.toml.example` with the owner-only defaults) and
+  RSK-7 implemented (`regime_fit_from_features` maps the FEA `regime.vol`/
+  `regime.trend` encodings to the declared-mask fit that feeds
+  `StrategyInput::regime_fit` — never an opinion field). All requirement IDs
+  tested; status → `implemented`.
 
 ## Open questions
 - Correlation window (60d) vs strategy holding periods — calibrate during

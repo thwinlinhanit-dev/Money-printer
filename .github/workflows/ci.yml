@@ -54,6 +54,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install pytest
-        run: pip install pytest
+        run: pip install pytest polars
       - name: Research tests (RES-1..6, pure stdlib)
         run: cd research && python -m pytest -q

@@ -1,0 +1,12 @@
+# Weekly screener grading (RES-2). Runs as the research user; can only write
+# under research/grades (RES-7 posture — journals are the job's only output).
+[Unit]
+Description=Money Printer weekly screener grading
+
+[Service]
+Type=oneshot
+User=printer
+ExecStart=/usr/bin/python3 /opt/money-printer/research/run_grading.py
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/research/grades
+NoNewPrivileges=true

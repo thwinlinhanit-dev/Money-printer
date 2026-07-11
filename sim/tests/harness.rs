@@ -359,3 +359,118 @@ fn sim_5_production_risk_gate_gates_every_sized_intent() {
         "RG-10 must block all fills"
     );
 }
+
+// ---- SIM-9/10/11: the `sim` CLI over a real event-log file -----------------
+
+#[test]
+fn sim_9_cli_backtest_mc_and_replay_live_work_end_to_end() {
+    use mp_core::log::EventLogWriter;
+    let bin = env!("CARGO_BIN_EXE_sim");
+    let dir = std::env::temp_dir().join(format!("mpsimcli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log_path = dir.join("events.log");
+    {
+        let (mut w, _fresh) = EventLogWriter::open(&log_path).unwrap();
+        for ev in feed(120) {
+            w.append(&ev).unwrap();
+        }
+        w.sync().unwrap();
+    }
+    let log_s = log_path.to_str().unwrap();
+    let runs = dir.join("runs");
+    let run = |args: &[&str]| {
+        std::process::Command::new(bin)
+            .args(args)
+            .output()
+            .expect("run sim cli")
+    };
+
+    // backtest writes a tracker record (SIM-9/10).
+    let out = run(&[
+        "backtest",
+        "--log",
+        log_s,
+        "--strategy",
+        "coinflip",
+        "--seed",
+        "42",
+        "--run-id",
+        "01JTESTRUN",
+        "--runs-dir",
+        runs.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let idx = std::fs::read_to_string(runs.join("index.jsonl")).unwrap();
+    assert!(idx.contains("\"run_id\":\"01JTESTRUN\""));
+    assert!(idx.contains("\"decision_log_hash\""));
+
+    // mc reports the DD distribution (SIM-9).
+    let out = run(&[
+        "mc",
+        "--log",
+        log_s,
+        "--strategy",
+        "coinflip",
+        "--seed",
+        "42",
+        "--resamples",
+        "200",
+    ]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("p95_maxDD"));
+
+    // plateau detects the ±30% sign flip (SIM-9).
+    assert!(run(&["plateau", "--base", "0.5", "--point", "0.1:0.4"])
+        .status
+        .success());
+    assert_eq!(
+        run(&["plateau", "--base", "0.5", "--point", "0.2:-0.1"])
+            .status
+            .code(),
+        Some(1)
+    );
+
+    // replay-live: identical log ⇒ green; a truncated log ⇒ exit 1 (P1, SIM-11).
+    let out = run(&[
+        "replay-live",
+        "--log",
+        log_s,
+        "--log-b",
+        log_s,
+        "--strategy",
+        "coinflip",
+        "--seed",
+        "42",
+    ]);
+    assert!(out.status.success());
+    let short_path = dir.join("short.log");
+    {
+        let (mut w, _f) = EventLogWriter::open(&short_path).unwrap();
+        for ev in feed(60) {
+            w.append(&ev).unwrap();
+        }
+        w.sync().unwrap();
+    }
+    let out = run(&[
+        "replay-live",
+        "--log",
+        log_s,
+        "--log-b",
+        short_path.to_str().unwrap(),
+        "--strategy",
+        "coinflip",
+        "--seed",
+        "42",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "divergence must be a failing exit"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

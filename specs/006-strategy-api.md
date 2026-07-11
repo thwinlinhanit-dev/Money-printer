@@ -109,6 +109,11 @@ click (G3/G4).** Agents may prepare the evidence, never click the button.
 - [x] Transition journal lines are valid JSONL with the right schema (STR-5). `str_5_transitions_journal_as_jsonl`.
 - [x] Null/CoinFlip fixtures exist; CoinFlip is deterministic under a seed (STR-7/9). `str_9_*`, `str_7_*`.
 - [x] CoinFlip fails G1 on fixture data — the worked example of a G1 kill (STR-9). `str_9_coinflip_fails_g1_on_fixture_data`, `str_9_g1_passes_only_when_all_conditions_met`, `sim_12_g1_rejects_optimistic_maker_dependent_edge` (in `sim/tests/harness.rs`; G1 reads the backtest Metrics so it lives in `mp-sim`).
+- [x] Stale evidence (> 30 days) refuses promotion; run ids land in the evidence log (STR-4). `str_4_stale_evidence_is_refused`.
+- [x] Kill requires a complete Autopsy (believed / data said / lesson) and renders `AUTOPSY.md` (STR-6). `str_6_autopsy_renders_the_kill_artifact`.
+- [x] `funnel` CLI: register/promote/demote/kill/show on a state file; `--i-am-human` gates G3/G4; every transition journaled; kill writes `AUTOPSY.md` (STR-3/5/6). `str_3_funnel_cli_gates_human_promotions_and_writes_autopsy` (end-to-end against the built binary).
+- [x] Strategy trait + I/O-free Ctx surface pinned (STR-1). `str_1_strategy_trait_matches_design_and_ctx_exposes_no_io`.
+- [x] The three launch strategies carry real hypotheses (STR-8). `str_8_launch_strategies_have_written_hypotheses`.
 
 ## Decisions
 - 2026-07-10: strategies consume features only (not raw events) in v1 —
@@ -121,6 +126,13 @@ click (G3/G4).** Agents may prepare the evidence, never click the button.
   human-gated promotion + automatic demotion; the `funnel` CLI binary wrapping
   it, evidence-staleness (STR-4), and per-strategy dirs (STR-8 hypotheses
   already exist) are deferred. `state()` returns nothing yet (deferred).
+- 2026-07-11 (fix-all): STR-4 implemented — `EvidenceRef {run_id,
+  created_ts_ns}` replaces bare strings and `promote` refuses evidence older
+  than 30 days (`EVIDENCE_MAX_AGE_NS`); STR-6 implemented — `kill` takes a
+  typed `Autopsy` (all three sections non-empty) and the CLI writes
+  `AUTOPSY.md`. The `funnel` binary implements STR-3's letter (hand-rolled
+  argv, wall clock only at the binary edge via the sanctioned `WallClock`
+  for staleness). All requirement IDs tested; status → `implemented`.
 
 ## Open questions
 - Multi-strategy netting at the venue (one position, many strategies): v1

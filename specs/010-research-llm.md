@@ -86,6 +86,9 @@ liq.cluster > $5M?") and scheduled studies.
 - [x] Brief generated from fixture inputs contains all fixed sections, degrades missing sections to "no data" (never invents), and quotes only input numbers — the numeric-subset guard `verify_grounded` (RES-5/6). `test_res_5_brief_has_all_fixed_sections`, `test_res_5_missing_section_renders_no_data_not_invention`, `test_res_6_brief_quotes_only_input_numbers`, `test_res_6_ungrounded_number_is_detected`, `test_res_5_generate_or_alert_returns_p3_on_ungrounded`.
 - [x] Brief archived with input-bundle hash + prompt version + model id + output, append-only (RES-6). `test_res_6_input_bundle_hash_is_deterministic`, `test_res_6_archive_writes_reproducible_record`.
 - [x] Permission guard: the brief archiver refuses to write outside the briefs dir — cannot touch `risk.toml`/funnel state (RES-7, code-level guard; process-user is the deployment backstop). `test_res_7_archive_refuses_to_write_outside_briefs_dir`.
+- [x] `mp_data` reads the REAL cold-store layout (Polars over the same Parquet) with the coverage gate: warn returns gaps, refuse raises on gaps or missing manifests (RES-1). `test_res_1_reader_returns_frame_and_gaps_in_warn_mode`, `test_res_1_reader_refuses_gapped_or_unmanifested_data`.
+- [x] Weekly grading job is idempotent and journals a leaderboard; scheduled by `ops/systemd/grading.timer` (RES-2). `test_res_2_weekly_grading_job_is_idempotent_and_journals_leaderboard`.
+- [x] Prompt templates carry version headers (RES-8). `test_res_8_prompt_templates_carry_version_headers`.
 
 ## Decisions
 - 2026-07-10: no external news/web tools for v1 agents — determinism and
@@ -142,6 +145,15 @@ liq.cluster > $5M?") and scheduled studies.
   state); the process-user permission is the deployment backstop. 8 pytest
   fixtures. What remains is the scheduler/ops-timer wiring and swapping the
   template draft for a live `mp-llm` call — both binary-edge, no new contract.
+- 2026-07-11 (fix-all): `mp_data.reader.events()` wraps the actual Rust
+  cold-store layout (`storage/src/layout.rs` — writing this reader caught the
+  layout drift a hand-rolled path would have hidden, which is RES-1's whole
+  point) using Polars (the spec-sanctioned research stack; added to CI's pip
+  install). `grading_job.run_weekly_grading` is idempotent (a re-fired week
+  is a no-op) and appends the leaderboard journal; `ops/systemd/grading.timer`
+  + `brief.timer` are the RES-2/RES-5 schedules, and `brief.service`'s
+  User/ReadWritePaths is the RES-7 process-level backstop. All requirement
+  IDs tested; status → `implemented`.
 
 ## Open questions
 - Which model/provider and monthly token budget — owner picks (cost knob).

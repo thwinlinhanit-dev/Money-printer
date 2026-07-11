@@ -12,6 +12,7 @@
 //! logic here is clock-injected and I/O-free (PD-3).
 
 pub mod alert;
+pub mod bot;
 pub mod deadman;
 pub mod latch;
 pub mod registry;
@@ -19,6 +20,7 @@ pub mod report;
 pub mod watch;
 
 pub use alert::{Alert, AlertRouter, Channel, Dispatch, QuietHours, RouteOutcome, Severity};
+pub use bot::{parse as parse_command, Bot, BotReply, Command, KillScope};
 pub use deadman::DeadMan;
 pub use latch::{KillLatch, LatchError, LatchScope};
 pub use registry::{runbook_path, spec_for, AlertSpec, ALERTS};

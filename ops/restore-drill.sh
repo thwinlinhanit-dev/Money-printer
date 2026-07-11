@@ -29,10 +29,13 @@ for want in journal runs; do
 done
 
 # 3. Golden replay from restored state — proves the data is usable, not just
-#    present. Uses the sim golden fixture (SIM golden test).
-echo "restore-drill: running sim golden fixture from restored state ..."
-if ! cargo test -p mp-sim --test '*' -- --nocapture >/dev/null 2>&1; then
-  echo "restore-drill: FAIL — golden sim did not pass on restored state" >&2
+#    present. Default verifier is the sim golden fixture; MP_DRILL_VERIFY_CMD
+#    overrides it (used by the automated ops_5 test to exercise the full
+#    restore path without nesting a cargo build).
+VERIFY_CMD="${MP_DRILL_VERIFY_CMD:-cargo test -p mp-sim --test backtest}"
+echo "restore-drill: verifying restored state via: $VERIFY_CMD"
+if ! bash -c "$VERIFY_CMD" >/dev/null 2>&1; then
+  echo "restore-drill: FAIL — verification did not pass on restored state" >&2
   exit 1
 fi
 

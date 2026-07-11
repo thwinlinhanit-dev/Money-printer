@@ -1,0 +1,14 @@
+# Daily brief (RES-5/6/7). The unit's User/ReadWritePaths are the RES-7
+# process-level backstop: the job can write ONLY the briefs archive — never
+# risk.toml, funnel state, or any order path.
+[Unit]
+Description=Money Printer daily brief
+
+[Service]
+Type=oneshot
+User=printer
+EnvironmentFile=/etc/money-printer/llm.env
+ExecStart=/usr/bin/python3 /opt/money-printer/research/run_brief.py
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/journal/briefs
+NoNewPrivileges=true

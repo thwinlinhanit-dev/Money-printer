@@ -355,3 +355,33 @@ fn fea_9_offline_only_features_are_flagged_for_live_refusal() {
     clean.register_tick(|| Box::new(Cvd::new("bybit")));
     assert!(clean.offline_only_features().is_empty());
 }
+
+// ---- FEA-2: as-of ordering is a prefix property -----------------------------
+
+#[test]
+fn fea_2_updates_for_a_prefix_equal_the_prefix_of_updates() {
+    // As-of discipline: the updates produced by events[..k] are EXACTLY the
+    // first part of the updates produced by the full sequence — no feature can
+    // peek at an event that hasn't arrived (FEA-2/PD-3, structural).
+    let events: Vec<EventEnvelope> = (0..30)
+        .map(|i| {
+            trade(
+                i * SEC / 2 + 1,
+                100.0 + (i % 5) as f64,
+                1.0 + (i % 3) as f64,
+                if i % 2 == 0 { Side::Buy } else { Side::Sell },
+            )
+        })
+        .collect();
+    let mut full_engine = engine_with_all();
+    let full = full_engine.run(events.iter());
+    for k in [1usize, 7, 15, 29] {
+        let mut prefix_engine = engine_with_all();
+        let prefix = prefix_engine.run(events[..k].iter());
+        assert_eq!(
+            prefix.as_slice(),
+            &full[..prefix.len()],
+            "prefix k={k} must be a prefix of the full run"
+        );
+    }
+}

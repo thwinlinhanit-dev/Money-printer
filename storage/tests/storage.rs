@@ -407,3 +407,42 @@ fn sto_4_dataset_streams_events_in_global_recv_order() {
     assert_eq!(got.len(), 3);
     assert!(got.windows(2).all(|w| w[0].recv_ts_ns <= w[1].recv_ts_ns));
 }
+
+#[test]
+fn sto_8_parquet_footer_carries_required_kv_metadata() {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let root = tmp("sto8");
+    let (syms, btc) = table();
+    compact_day(
+        &root,
+        Venue::Bybit,
+        "2026-07-11",
+        0,
+        DAY,
+        vec![trade(btc, 10, 1, 100.0)],
+        &syms,
+        "srchash9",
+        "gitsha9",
+        0,
+    )
+    .unwrap();
+    let file =
+        mp_storage::layout::partition_file(&root, "trades", Venue::Bybit, "BTCUSDT", "2026-07-11");
+    let f = std::fs::File::open(&file).unwrap();
+    let kvs = ParquetRecordBatchReaderBuilder::try_new(f)
+        .unwrap()
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned()
+        .expect("footer kv present (STO-8)");
+    let get = |k: &str| {
+        kvs.iter()
+            .find(|kv| kv.key == k)
+            .and_then(|kv| kv.value.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(get("schema_ver"), mp_core::SCHEMA_VER.to_string());
+    assert_eq!(get("compactor_version"), "gitsha9");
+    assert_eq!(get("source_log_hash"), "srchash9");
+}

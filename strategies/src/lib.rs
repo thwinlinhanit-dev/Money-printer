@@ -11,5 +11,7 @@ pub mod funnel;
 pub mod strategy;
 
 pub use examples::{CoinFlipStrategy, NullStrategy};
-pub use funnel::{Actor, FunnelError, FunnelState, Stage, Transition};
+pub use funnel::{
+    Actor, Autopsy, EvidenceRef, FunnelError, FunnelState, Stage, Transition, EVIDENCE_MAX_AGE_NS,
+};
 pub use strategy::{Ctx, ParamSpace, RegimeMask, Strategy, TimerId, Universe};
