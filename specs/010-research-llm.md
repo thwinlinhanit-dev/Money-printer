@@ -111,9 +111,21 @@ liq.cluster > $5M?") and scheduled studies.
   in `HumanReadOnly` which has no method producing an `OrderIntent`/decision
   type — the guarantee is a type, not a comment. Keys resolve only from env
   vars (PD-2); `providers.example.toml` documents the model/env map with no
-  secrets. Still open per spec: the Python research layer (`mp_data`, screener
-  grading RES-2/3, event study RES-4) and the brief/anomaly/report *jobs* that
-  compose these providers — status stays `implementing`.
+  secrets.
+- 2026-07-11: Python research layer implemented under `research/` (CONV-2,
+  research-only — no Python on a decision path). `mp_data.Coverage` does the
+  refuse-or-warn gap check (RES-1, mirrors SIM-6); `grading.py` does forward-
+  return screener grading with an honest denominator + a rules leaderboard
+  (RES-2) and the 4-wk-vs-half-12-wk edge-decay flag (RES-3); `event_study.py`
+  computes CAR with seeded (CONV-11) percentile bootstrap CIs and regime
+  slicing (RES-4), plus SIM-10-style run records. All math is pure stdlib and
+  deterministic so the 15 pytest fixtures (hand-verified numbers, RES-2/3/4)
+  run without Polars/DuckDB — production readers add those for the heavy
+  frames. `research/prompts/daily-brief.md` is the versioned template (RES-8)
+  with the fixed sections + degrade-to-"no data" rule (RES-5). Still deferred:
+  the scheduled brief/anomaly/monthly-report *jobs* wiring these to `mp-llm`
+  and the ops timer, and the `mp_data` Polars/DuckDB frame readers — status
+  stays `implementing`.
 
 ## Open questions
 - Which model/provider and monthly token budget — owner picks (cost knob).
