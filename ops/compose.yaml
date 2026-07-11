@@ -1,0 +1,42 @@
+# Docker Compose topology (OPS-1/OPS-8). Example only — no secrets in the repo
+# (PD-2); env comes from host-side 0600 files. PD-1: nothing here enables live
+# trading. restart=always + resource limits + log rotation are mandatory.
+services:
+  collector-bybit:
+    image: money-printer:latest
+    command: ["mp-collector", "--venue", "bybit"]
+    restart: always
+    env_file: [/etc/money-printer/venues.env]
+    volumes: ["./data:/data"]
+    logging: { driver: json-file, options: { max-size: "50m", max-file: "6" } }
+    deploy:
+      resources:
+        limits: { memory: 512m, cpus: "0.50" }
+
+  collector-okx:
+    image: money-printer:latest
+    command: ["mp-collector", "--venue", "okx"]
+    restart: always
+    env_file: [/etc/money-printer/venues.env]
+    volumes: ["./data:/data"]
+    logging: { driver: json-file, options: { max-size: "50m", max-file: "6" } }
+    deploy:
+      resources:
+        limits: { memory: 512m, cpus: "0.50" }
+
+  compactor:
+    image: money-printer:latest
+    command: ["mp-compactor", "--once"]  # driven by a systemd timer / cron in prod
+    restart: "no"
+    volumes: ["./data:/data"]
+
+  opsd:
+    image: money-printer:latest
+    command: ["opsd"]
+    restart: always
+    env_file: [/etc/money-printer/ops.env, /etc/money-printer/llm.env]
+    volumes: ["./journal:/journal", "./data:/data"]
+    logging: { driver: json-file, options: { max-size: "50m", max-file: "6" } }
+    deploy:
+      resources:
+        limits: { memory: 256m, cpus: "0.25" }

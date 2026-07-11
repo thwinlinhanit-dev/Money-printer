@@ -96,6 +96,17 @@ if [ -f specs/README.md ]; then
   done
 fi
 
+# ---- OPS-4: every registered alert has a runbook -----------------------------
+# Each alert!("id", SEV) row in the ops registry MUST have ops/runbooks/id.md.
+# Adding an alert without its runbook fails CI (spec 009 OPS-4).
+if [ -f ops/src/registry.rs ]; then
+  # Process substitution (not a pipe) so err's fail=1 reaches this shell.
+  while read -r id; do
+    [ -n "$id" ] || continue
+    [ -f "ops/runbooks/${id}.md" ] || err "OPS-4: alert '${id}' has no ops/runbooks/${id}.md"
+  done < <(grep -oE 'alert!\("[a-z0-9-]+"' ops/src/registry.rs | sed -E 's/alert!\("([a-z0-9-]+)"/\1/')
+fi
+
 # ---- Skill frontmatter sanity -------------------------------------------------
 for f in .claude/skills/*/SKILL.md; do
   [ -e "$f" ] || continue

@@ -1,0 +1,25 @@
+# opsd: monitor + Telegram bot + dead-man (OPS-1/2/3). Watched by an EXTERNAL
+# dead-man (OPS-2). PD-1: opsd's /kill and /flatten write the kill-latch file
+# the risk gate reads — risk-OFF only, never risk-ON.
+[Unit]
+Description=Money Printer opsd (monitor, telegram, dead-man)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printer
+Group=printer
+EnvironmentFile=/etc/money-printer/ops.env
+EnvironmentFile=/etc/money-printer/llm.env
+ExecStart=/opt/money-printer/bin/opsd
+Restart=always
+RestartSec=2
+MemoryMax=256M
+CPUQuota=25%
+ProtectSystem=strict
+# opsd writes the kill-latch + journal; nothing else.
+ReadWritePaths=/opt/money-printer/journal /opt/money-printer/run
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

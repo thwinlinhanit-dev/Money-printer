@@ -1,0 +1,23 @@
+[package]
+name = "mp-ops"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Monitoring, alerting, dead-man switch, kill-latch bridge, monthly report — spec 009 (networked surfaces are deployment artifacts)"
+
+[lib]
+name = "mp_ops"
+path = "src/lib.rs"
+
+[dependencies]
+mp-core = { path = "../core" }
+mp-risk = { path = "../risk" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

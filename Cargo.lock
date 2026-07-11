@@ -1055,6 +1055,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp-ops"
+version = "0.1.0"
+dependencies = [
+ "mp-core",
+ "mp-risk",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "mp-risk"
 version = "0.1.0"
 dependencies = [

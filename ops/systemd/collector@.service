@@ -1,0 +1,26 @@
+# Templated collector unit (OPS-1): `systemctl enable --now collector@bybit`.
+# Public market data only (PD-1) — no order path, no auth here.
+[Unit]
+Description=Money Printer collector (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printer
+Group=printer
+EnvironmentFile=/etc/money-printer/venues.env
+ExecStart=/opt/money-printer/bin/mp-collector --venue %i
+Restart=always
+RestartSec=2
+# Resource limits (OPS-1).
+MemoryMax=512M
+CPUQuota=50%
+# Log rotation is handled by journald limits below + system journald config.
+LimitNOFILE=65536
+# Hardening: the collector never needs write beyond its data dir.
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/data
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

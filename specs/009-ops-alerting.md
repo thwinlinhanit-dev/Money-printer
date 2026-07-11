@@ -105,6 +105,30 @@ the human reads it — the report is for the owner, not for the machine.
 ## Decisions
 - 2026-07-10: Telegram (not Discord) as the command channel — better mobile
   interrupt behavior; single-owner allowlist model.
+- 2026-07-11: Ops deterministic core implemented as the `mp-ops` crate. The
+  logic that must be correct — alert dedupe + quiet-hours batching (OPS-4/9),
+  the dead-man switch (OPS-2), the kill-latch bridge (OPS-3/RG-10), and the
+  monthly-report renderer (OPS-6) — is clock-injected and I/O-free so it is
+  unit-testable offline (8 tests, IDs in names). Networked/host surfaces (the
+  Telegram bot transport, the external watcher ping, live heartbeat HTTP) are
+  deployment artifacts, not decision-path code, and ship as `ops/deploy.md`,
+  `ops/compose.yaml`, `ops/systemd/*.service`, `ops/restore-drill.sh`, and the
+  `ops/runbooks/` set — the wiring is documented and reproducible (OPS-8) but
+  the bot's live command-execution loop is deferred (status stays
+  `implementing`).
+- 2026-07-11: OPS-3 kill-latch is a JSON file (`KillLatch` → `LatchScope`)
+  that deserializes into `mp_risk::KillSwitches`, so `/kill` and `/flatten`
+  reach the gate as a file read, independent of oms health (RG-10). `mp_risk::
+  Scope` is not itself `Serialize`, so `LatchScope` is a portable mirror with a
+  `to_scope()` conversion — the latch format stays decoupled from internal
+  types. Latches remain one-way; only a human clears the file (EXE-7).
+- 2026-07-11: OPS-4 "alert without a runbook fails CI" is enforced two ways:
+  an in-crate test (`ops4_every_catalog_alert_has_a_runbook_file`) and a
+  guardrails lint that extracts every `alert!("id", …)` from the registry and
+  checks `ops/runbooks/{id}.md` exists (verified it fails CI when a runbook is
+  removed). The 11 P1/P2 alert ids from the policy table each have a runbook
+  (symptoms/diagnosis/remediation/escalation); remediation steps are risk-off
+  only (never widen a limit, PD-1).
 
 ## Open questions
 - Phone-call escalation provider for P1 (Twilio vs a healthchecks add-on) —
