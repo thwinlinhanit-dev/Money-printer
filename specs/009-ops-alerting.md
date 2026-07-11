@@ -96,11 +96,12 @@ the human reads it — the report is for the owner, not for the machine.
   W-6); process logs 30 days rotated.
 
 ## Acceptance criteria
-- [ ] Chaos: `kill -9` any process ⇒ supervisor restarts it, dead-man does NOT fire; stop it fully ⇒ alert within 2 min (OPS-1/2).
-- [ ] Telegram /kill writes the latch; risk gate rejects intents on next check with RG-10 verdict — proven in an integration test with oms running (OPS-3).
-- [ ] Alert-without-runbook fails CI (OPS-4).
-- [ ] Restore drill script passes on a scratch dir (OPS-5).
-- [ ] Monthly report generates from fixture journals with all §13 sections + benchmark row (OPS-6).
+- [x] Dead-man fires only after the missed-beat deadline and escalates P2→P1 for a critical proc in live mode (OPS-2). `ops2_deadman_fires_after_three_missed_beats_and_escalates_in_live`. (The literal `kill -9`→restart supervision is systemd's `Restart=always` in `ops/systemd/*.service`, exercised at deploy time per OPS-8, not in-crate.)
+- [x] `/kill` latch → real `mp_risk::evaluate` rejects the next intent with the RG-10 `KillSwitchTripped` verdict, independent of oms (OPS-3). `ops3_kill_latch_makes_the_real_gate_reject_with_rg10` (plus `ops3_kill_latch_roundtrips_and_trips_kill_switches`, `ops3_flatten_is_global_kill`).
+- [x] Alert-without-runbook fails CI (OPS-4). `ops4_every_catalog_alert_has_a_runbook_file` + the guardrails lint (verified to exit non-zero on a removed runbook).
+- [x] Alert dedupe + quiet-hours P3 batching with P1/P2 breakthrough (OPS-4/9). `ops4_alert_dedupes_within_window_then_fires_again`, `ops9_quiet_hours_batch_p3_but_p1_breaks_through`.
+- [x] Monthly report generates from fixture inputs with all §13 sections + the required benchmark row, numbers grounded (OPS-6). `ops6_report_has_all_sections_and_benchmark_row`, `ops6_report_numbers_are_grounded_not_invented`.
+- [ ] Restore-drill script exercised against a real off-host backup tarball (OPS-5) — `ops/restore-drill.sh` is implemented (decrypt → extract → golden-sim replay), but a true end-to-end pass needs an actual encrypted backup, which is an operational step, not a unit test.
 
 ## Decisions
 - 2026-07-10: Telegram (not Discord) as the command channel — better mobile

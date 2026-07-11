@@ -14,6 +14,8 @@ path = "src/lib.rs"
 [dependencies]
 mp-core = { path = "../core" }
 serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
 tracing.workspace = true
 
 # No network, no wall clock — features are pure functions of events (PD-3/PD-4).

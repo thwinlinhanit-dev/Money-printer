@@ -257,3 +257,46 @@ fn fea_10_screener_edge_triggers_with_snapshot() {
     }
     assert!(hits2.is_empty(), "edge-triggered: fires once");
 }
+
+// ---- FEA-7: catalog config (features.toml) --------------------------------
+
+#[test]
+fn fea_7_features_toml_parses_and_rejects_unknown_keys() {
+    use mp_features::FeaturesConfig;
+    let toml = r#"
+        bar_tf_ns = 60000000000
+        [cvd]
+        venues = ["bybit", "okx"]
+        [whale_print]
+        min_notional = 300000.0
+        [liq_cluster]
+        window_ns = 30000000000
+        min_cluster_notional = 4000000.0
+    "#;
+    let cfg = FeaturesConfig::from_toml(toml).unwrap();
+    assert_eq!(cfg.cvd.venues, vec!["bybit", "okx"]);
+    assert_eq!(cfg.whale_print.min_notional, 300000.0);
+
+    // A typo'd key is a hard error (deny_unknown_fields), never a silent default.
+    let bad = r#"
+        [whale_print]
+        min_notionl = 300000.0
+    "#;
+    assert!(FeaturesConfig::from_toml(bad).is_err());
+}
+
+#[test]
+fn fea_6_params_hash_is_canonical_and_change_sensitive() {
+    use mp_features::FeaturesConfig;
+    // Formatting / whitespace differences do NOT change the hash (canonical:
+    // parse-normalize then hash, not a raw-text hash).
+    let a =
+        FeaturesConfig::from_toml("bar_tf_ns = 60000000000\n[cvd]\nvenues=[\"bybit\"]").unwrap();
+    let b =
+        FeaturesConfig::from_toml("bar_tf_ns   =   60000000000\n\n[cvd]\nvenues = [ \"bybit\" ]\n")
+            .unwrap();
+    assert_eq!(a.params_hash().unwrap(), b.params_hash().unwrap());
+    // A real param change DOES change the hash (⇒ forces a new ver=N, FEA-6).
+    let c = FeaturesConfig::from_toml("[whale_print]\nmin_notional = 999999.0").unwrap();
+    assert_ne!(a.params_hash().unwrap(), c.params_hash().unwrap());
+}

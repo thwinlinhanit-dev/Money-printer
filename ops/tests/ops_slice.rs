@@ -198,6 +198,59 @@ fn ops6_report_numbers_are_grounded_not_invented() {
     assert!(md2.contains("_no data_"));
 }
 
+// ---- OPS-3 end-to-end: /kill latch → real risk gate RG-10 verdict --------
+
+#[test]
+fn ops3_kill_latch_makes_the_real_gate_reject_with_rg10() {
+    use mp_core::{Side, StrategyId, SymbolId};
+    use mp_risk::{evaluate, GateInput, Mode, RejectReason, RiskLimits, Verdict};
+
+    let sym = SymbolId(0);
+    let strat = StrategyId::new("carry-v1");
+    let allowed = [(Venue::Bybit, sym)];
+    let base = GateInput {
+        mode: Mode::Paper,
+        venue: Venue::Bybit,
+        symbol: sym,
+        strategy: strat.clone(),
+        side: Side::Buy,
+        qty: 1.0,
+        price: 100.0,
+        mark: 100.0,
+        current_position_qty: 0.0,
+        gross_exposure_notional: 0.0,
+        orders_last_min: 0,
+        strategy_daily_pnl: 0.0,
+        portfolio_daily_pnl: 0.0,
+        reconciler_clean: true,
+        allowed: &allowed,
+    };
+    let limits = RiskLimits::default();
+
+    // Before the latch: a normal order passes the gate.
+    let no_kills = mp_risk::KillSwitches::new();
+    assert_eq!(evaluate(&limits, &no_kills, &base), Verdict::Pass);
+
+    // The phone writes a GLOBAL /kill latch; the gate loads it and now rejects
+    // the very next intent with the RG-10 verdict — no RPC to oms involved.
+    let latch = KillLatch::global("phone /flatten", 1);
+    let kills = latch.to_kill_switches();
+    assert_eq!(
+        evaluate(&limits, &kills, &base),
+        Verdict::Reject(RejectReason::KillSwitchTripped)
+    );
+
+    // A venue-scoped latch blocks that venue but not another.
+    let venue_latch = KillLatch::new("kill bybit", 2).kill(LatchScope::Venue {
+        venue: Venue::Bybit,
+    });
+    let vkills = venue_latch.to_kill_switches();
+    assert_eq!(
+        evaluate(&limits, &vkills, &base),
+        Verdict::Reject(RejectReason::KillSwitchTripped)
+    );
+}
+
 // ---- Registry ↔ runbooks (OPS-4) ----------------------------------------
 
 #[test]

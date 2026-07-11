@@ -17,6 +17,7 @@ tracing = "0.1"
 smallvec = { version = "1", features = ["serde", "union"] }
 crc32fast = "1"
 proptest = "1"
+toml = "0.8"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

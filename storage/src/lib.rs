@@ -12,6 +12,7 @@
 
 pub mod compactor;
 pub mod dataset;
+pub mod feature_store;
 pub mod layout;
 pub mod manifest;
 pub mod parquet_trades;
@@ -31,6 +32,9 @@ pub enum StorageError {
 
 pub use compactor::{compact_day, CompactStats};
 pub use dataset::Dataset;
+pub use feature_store::{
+    materialize, read_feature_meta, read_features, resolve_version, FeatureMeta, FeatureRow,
+};
 pub use manifest::{derive_manifest, Gap, GapKind, QualityManifest, StreamStats};
 pub use prune::{verify_prunable, PruneRefusal};
 pub use scd2::{SymbolScd2, SymbolVersion};

@@ -12,9 +12,11 @@
 
 pub mod bar;
 pub mod catalog;
+pub mod config;
 pub mod engine;
 pub mod screener;
 
 pub use bar::{Bar, BarBuilder};
+pub use config::{ConfigError, FeaturesConfig};
 pub use engine::{BarFeature, FeatureEngine, FeatureUpdate, TickFeature};
 pub use screener::{Cond, Op, Rule, Screener, ScreenerHit};

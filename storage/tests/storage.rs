@@ -314,3 +314,63 @@ fn sto_9_scd2_as_of_resolves_across_change() {
     );
     assert!(scd.as_of(Venue::Bybit, "ETHUSDT", 500).is_none());
 }
+
+// ---- FEA-6: feature-store materialization + ver=N -------------------------
+
+#[test]
+fn fea_6_materialize_versions_on_params_change_never_overwrites() {
+    use mp_storage::feature_store::{materialize, read_feature_meta, read_features};
+    use mp_storage::{FeatureMeta, FeatureRow};
+
+    let root_buf = tmp("featstore");
+    let root = root_buf.as_path();
+    let rows = vec![
+        FeatureRow {
+            symbol_id: 0,
+            venue_code: 1,
+            ts_ns: 10,
+            value: 1.5,
+            ver: 1,
+        },
+        FeatureRow {
+            symbol_id: 0,
+            venue_code: 1,
+            ts_ns: 20,
+            value: 2.5,
+            ver: 1,
+        },
+    ];
+    let meta_a = FeatureMeta {
+        feature_ver: 1,
+        engine_git_sha: "abc123".into(),
+        params_hash: "aaaa0000".into(),
+    };
+
+    // First materialization → ver=0.
+    let p0 = materialize(root, "cvd.bybit", "bybit", 0, "2026-07-11", &rows, &meta_a).unwrap();
+    assert!(p0.to_string_lossy().contains("ver=0"));
+    // Footer carries {feature ver, engine git sha, params hash} (FEA-6).
+    let read_meta = read_feature_meta(&p0).unwrap().unwrap();
+    assert_eq!(read_meta, meta_a);
+    // Data round-trips through real Parquet.
+    assert_eq!(read_features(&p0).unwrap(), rows);
+
+    // Re-materializing the SAME params reuses ver=0 (idempotent).
+    let p0b = materialize(root, "cvd.bybit", "bybit", 0, "2026-07-11", &rows, &meta_a).unwrap();
+    assert_eq!(p0, p0b);
+
+    // CHANGED params ⇒ a new ver=1 directory; the old ver=0 file is untouched.
+    let meta_b = FeatureMeta {
+        params_hash: "bbbb1111".into(),
+        ..meta_a.clone()
+    };
+    let p1 = materialize(root, "cvd.bybit", "bybit", 0, "2026-07-11", &rows, &meta_b).unwrap();
+    assert!(p1.to_string_lossy().contains("ver=1"));
+    assert_ne!(p0, p1);
+    // W-6: the original version's data and metadata are still there, unchanged.
+    assert_eq!(
+        read_feature_meta(&p0).unwrap().unwrap().params_hash,
+        "aaaa0000"
+    );
+    assert_eq!(read_features(&p0).unwrap(), rows);
+}

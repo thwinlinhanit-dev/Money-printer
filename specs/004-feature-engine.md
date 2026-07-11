@@ -138,7 +138,8 @@ update (no intra-bar repaint — repainting features are banned).
 - [x] Unit tests per implemented catalog feature against hand-computed values (FEA-1). `fea_1_*` (cvd, whale_print, liq.cluster, oi.delta, funding, bar delta).
 - [x] Warmup suppression test (FEA-3); stale-book silence test (FEA-8). `fea_3_*`, `fea_8_book_feature_silent_while_stale`.
 - [x] Screener: rules → edge-triggered hits with exact snapshots (FEA-10). `fea_10_screener_edge_triggers_with_snapshot`.
-- [ ] Offline Parquet materialization + `ver=N` on param change (FEA-6/7) — deferred (needs storage feature-store writer; tracked in Decisions).
+- [x] Offline Parquet materialization with footer `{feature ver, engine git sha, params hash}` and `ver=N` on param change, never overwriting (FEA-6). `fea_6_materialize_versions_on_params_change_never_overwrites` (in `storage/tests/storage.rs`), `fea_6_params_hash_is_canonical_and_change_sensitive`.
+- [x] `features.toml` single catalog config with `deny_unknown_fields`, hashed into materialization metadata (FEA-7). `fea_7_features_toml_parses_and_rejects_unknown_keys`.
 
 ## Decisions
 - 2026-07-10: features output scalar f64 only in v1 (categoricals encoded as
@@ -160,6 +161,22 @@ update (no intra-bar repaint — repainting features are banned).
   materialization + `ver=N` versioning (FEA-6/7), `features.toml` param file,
   `leadlag.*` offline-only enforcement (FEA-9), NaN-suppression counters
   (FEA-5, the fail-closed path exists; the counter/WARN is TODO). Tracked.
+- 2026-07-11 (impl): FEA-6/7 done. `mp_features::FeaturesConfig` parses the
+  single `features.toml` with `deny_unknown_fields` (a mistyped key errors,
+  never silently defaults) and yields a canonical `params_hash` — parse then
+  re-serialize then hash, so whitespace/formatting differences don't change it
+  but any real param change does. `features.toml.example` documents the file.
+  The materializer lives in `mp-storage` (`feature_store.rs`), not features,
+  to keep the feature engine I/O-free (PD-3/PD-4): `materialize()` writes real
+  zstd Parquet at `{root}/{feature}/ver=N/venue=…/symbol=…/{date}.parquet`
+  with footer `{feature_ver, engine_git_sha, params_hash}` and resolves the
+  version by matching a per-`ver` `_params` marker — same params reuse the
+  version (idempotent), changed params allocate `max+1` and never overwrite an
+  existing version's data (W-6, proven by the test re-reading ver=0 after
+  ver=1 is written). The engine→rows glue (running the live `FeatureEngine`
+  over the Dataset reader to produce `FeatureRow`s) is a thin binary-edge
+  loop; the writer + versioning it depends on are done and tested. Remaining:
+  FEA-5 NaN counters and FEA-9 leadlag online/offline enforcement.
 - 2026-07-10: added volume/price-condition and whale-tape feature groups
   (owner request). All computable from already-specced trade/book data — no
   schema change. Whale data policy: whale activity enters ONLY as graded
