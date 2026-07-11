@@ -31,7 +31,7 @@ fn header<'a>(hs: &'a [(String, String)], k: &str) -> Option<&'a str> {
 // ---- Anthropic -----------------------------------------------------------
 
 #[test]
-fn res6_anthropic_request_hoists_system_and_sets_version_header() {
+fn res_6_anthropic_request_hoists_system_and_sets_version_header() {
     let p = mp_llm::anthropic::AnthropicProvider::new();
     let http = p.build_request("SECRET_KEY", &req()).unwrap();
     assert_eq!(http.url, "https://api.anthropic.com/v1/messages");
@@ -50,7 +50,7 @@ fn res6_anthropic_request_hoists_system_and_sets_version_header() {
 }
 
 #[test]
-fn res6_anthropic_parses_text_blocks_and_usage() {
+fn res_6_anthropic_parses_text_blocks_and_usage() {
     let p = mp_llm::anthropic::AnthropicProvider::new();
     let raw = r#"{"model":"claude-opus-4-8","stop_reason":"end_turn",
         "content":[{"type":"text","text":"Funding is "},{"type":"text","text":"positive."}],
@@ -63,7 +63,7 @@ fn res6_anthropic_parses_text_blocks_and_usage() {
 }
 
 #[test]
-fn res6_anthropic_error_envelope_surfaces_as_provider_error() {
+fn res_6_anthropic_error_envelope_surfaces_as_provider_error() {
     let p = mp_llm::anthropic::AnthropicProvider::new();
     let raw = r#"{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}"#;
     let err = p.parse_response(raw.as_bytes()).unwrap_err();
@@ -73,7 +73,7 @@ fn res6_anthropic_error_envelope_surfaces_as_provider_error() {
 // ---- OpenAI-family (OpenAI / DeepSeek / Groq / xAI / Mistral / Ollama) ----
 
 #[test]
-fn res6_openai_family_uses_bearer_and_chat_completions_shape() {
+fn res_6_openai_family_uses_bearer_and_chat_completions_shape() {
     let p = mp_llm::openai_family::OpenAiProvider::new();
     let http = p.build_request("SECRET_KEY", &req()).unwrap();
     assert_eq!(http.url, "https://api.openai.com/v1/chat/completions");
@@ -89,7 +89,7 @@ fn res6_openai_family_uses_bearer_and_chat_completions_shape() {
 }
 
 #[test]
-fn res6_openai_family_parses_choices_and_usage() {
+fn res_6_openai_family_parses_choices_and_usage() {
     let p = mp_llm::openai_family::GroqProvider::new();
     let raw = r#"{"model":"llama-3.3-70b-versatile",
         "choices":[{"message":{"role":"assistant","content":"Neutral."},"finish_reason":"stop"}],
@@ -102,7 +102,7 @@ fn res6_openai_family_parses_choices_and_usage() {
 }
 
 #[test]
-fn res6_ollama_is_keyless_no_auth_header() {
+fn res_6_ollama_is_keyless_no_auth_header() {
     let p = mp_llm::openai_family::OllamaProvider::new();
     assert_eq!(p.api_key_env(), "");
     let http = p.build_request("", &req()).unwrap();
@@ -111,7 +111,7 @@ fn res6_ollama_is_keyless_no_auth_header() {
 }
 
 #[test]
-fn res6_deepseek_xai_mistral_endpoints() {
+fn res_6_deepseek_xai_mistral_endpoints() {
     // Model override flows through to the body for every OpenAI-family member.
     let ds = mp_llm::openai_family::DeepSeekProvider::new();
     assert!(body_json(&ds)["model"]
@@ -131,7 +131,7 @@ fn res6_deepseek_xai_mistral_endpoints() {
 // ---- Gemini --------------------------------------------------------------
 
 #[test]
-fn res6_gemini_maps_roles_and_key_header_not_url() {
+fn res_6_gemini_maps_roles_and_key_header_not_url() {
     let p = mp_llm::gemini::GeminiProvider::new();
     let r = ChatRequest::new(
         vec![
@@ -153,7 +153,7 @@ fn res6_gemini_maps_roles_and_key_header_not_url() {
 }
 
 #[test]
-fn res6_gemini_parses_candidates() {
+fn res_6_gemini_parses_candidates() {
     let p = mp_llm::gemini::GeminiProvider::new();
     let raw = r#"{"candidates":[{"content":{"parts":[{"text":"Up "},{"text":"trend."}]},
         "finishReason":"STOP"}],
@@ -167,7 +167,7 @@ fn res6_gemini_parses_candidates() {
 // ---- Cohere --------------------------------------------------------------
 
 #[test]
-fn res6_cohere_v2_parses_content_blocks_and_tokens() {
+fn res_6_cohere_v2_parses_content_blocks_and_tokens() {
     let p = mp_llm::cohere::CohereProvider::new();
     let http = p.build_request("SECRET_KEY", &req()).unwrap();
     assert_eq!(http.url, "https://api.cohere.com/v2/chat");
@@ -183,7 +183,7 @@ fn res6_cohere_v2_parses_content_blocks_and_tokens() {
 // ---- Dispatch + key resolution ------------------------------------------
 
 #[test]
-fn res7_provider_for_dispatch_covers_all_nine() {
+fn res_7_provider_for_dispatch_covers_all_nine() {
     for p in [
         Provider::Anthropic,
         Provider::OpenAi,
@@ -202,7 +202,7 @@ fn res7_provider_for_dispatch_covers_all_nine() {
 }
 
 #[test]
-fn res7_missing_key_names_var_without_leaking_value() {
+fn res_7_missing_key_names_var_without_leaking_value() {
     let p = mp_llm::anthropic::AnthropicProvider::new();
     // Ensure the var is unset for this assertion.
     std::env::remove_var("ANTHROPIC_API_KEY");
@@ -217,7 +217,7 @@ fn res7_missing_key_names_var_without_leaking_value() {
 // ---- Grounding contract (RES-6) -----------------------------------------
 
 #[test]
-fn res6_bundle_hash_is_deterministic_and_input_sensitive() {
+fn res_6_bundle_hash_is_deterministic_and_input_sensitive() {
     assert_eq!(bundle_hash(b"same"), bundle_hash(b"same"));
     assert_ne!(bundle_hash(b"a"), bundle_hash(b"b"));
     let b = InputBundle::new(b"regime=chop;funding_z=2.1".to_vec());
@@ -225,7 +225,7 @@ fn res6_bundle_hash_is_deterministic_and_input_sensitive() {
 }
 
 #[test]
-fn res6_archive_record_is_reproducible_json_line() {
+fn res_6_archive_record_is_reproducible_json_line() {
     let bundle = InputBundle::new(b"inputs".to_vec());
     let completion = Completion {
         model: "claude-opus-4-8".to_string(),

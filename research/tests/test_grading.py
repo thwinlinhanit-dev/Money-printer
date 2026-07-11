@@ -13,7 +13,7 @@ from grading import (
 MIN = 60_000_000_000  # 1 minute in ns
 
 
-def test_res2_forward_return_step_lookup_and_short_series_guard():
+def test_res_2_forward_return_step_lookup_and_short_series_guard():
     prices = [(0, 100.0), (MIN, 110.0)]
     # +1m return: 110/100 - 1 = 0.10.
     assert forward_return(prices, 0, MIN) == approx(0.10)
@@ -23,7 +23,7 @@ def test_res2_forward_return_step_lookup_and_short_series_guard():
     assert forward_return(prices, -MIN, MIN) is None
 
 
-def test_res2_grade_hits_computes_excess_winrate_and_avg():
+def test_res_2_grade_hits_computes_excess_winrate_and_avg():
     prices = {"BTC": [(0, 100.0), (MIN, 110.0), (2 * MIN, 121.0)]}
     baseline = {"BTC": 0.05}  # symbol's do-nothing forward return
     hits = [Hit("pump", "BTC", 0), Hit("pump", "BTC", MIN)]
@@ -36,7 +36,7 @@ def test_res2_grade_hits_computes_excess_winrate_and_avg():
     assert abs(g.avg_excess - 0.05) < 1e-12
 
 
-def test_res2_leaderboard_ranks_by_avg_excess():
+def test_res_2_leaderboard_ranks_by_avg_excess():
     prices = {"BTC": [(0, 100.0), (MIN, 110.0)], "ETH": [(0, 100.0), (MIN, 101.0)]}
     baseline = {"BTC": 0.0, "ETH": 0.0}
     hits = [Hit("strong", "BTC", 0), Hit("weak", "ETH", 0)]
@@ -45,7 +45,7 @@ def test_res2_leaderboard_ranks_by_avg_excess():
     assert board[0].avg_excess > board[1].avg_excess
 
 
-def test_res2_uncomputable_hits_are_skipped_not_counted():
+def test_res_2_uncomputable_hits_are_skipped_not_counted():
     prices = {"BTC": [(0, 100.0)]}  # too short for any forward return
     hits = [Hit("pump", "BTC", 0), Hit("pump", "MISSING", 0)]
     grades = grade_hits(hits, prices, MIN, {"BTC": 0.0})
@@ -53,7 +53,7 @@ def test_res2_uncomputable_hits_are_skipped_not_counted():
     assert "pump" not in grades
 
 
-def test_res3_decay_flag_fires_on_fading_edge_only():
+def test_res_3_decay_flag_fires_on_fading_edge_only():
     # 8 strong weeks then 4 weak weeks: 4-wk mean well below half the 12-wk mean.
     fading = [0.10] * 8 + [0.01] * 4
     assert decay_flag(fading) is True

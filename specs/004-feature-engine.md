@@ -185,6 +185,13 @@ update (no intra-bar repaint — repainting features are banned).
   (top-trader ratios, Hyperliquid public positions) requires new collector
   streams — held in docs/BACKLOG.md pending an additive event-schema
   amendment (owner sign-off required per CLAUDE.md safety table).
+- 2026-07-11 (audit): FEA-5 implemented — the engine validates every feature
+  output, suppresses non-finite values, counts them (`nan_suppressed()`), and
+  WARNs; never silent (`fea_5_*`). FEA-9 implemented — `TickFeature::locality`
+  marks features `Online|Offline|Both` and `offline_only_features()` is the
+  startup check a live runner MUST treat as fatal (`fea_9_*`). FEA-2 remains
+  structural (features have no API to read ahead), documented rather than
+  pseudo-tested.
 
 ## Open questions
 - None blocking; `wall_min_notional` defaults need per-symbol calibration

@@ -300,3 +300,58 @@ fn fea_6_params_hash_is_canonical_and_change_sensitive() {
     let c = FeaturesConfig::from_toml("[whale_print]\nmin_notional = 999999.0").unwrap();
     assert_ne!(a.params_hash().unwrap(), c.params_hash().unwrap());
 }
+
+// ---- FEA-5: NaN validate/suppress/count/WARN -------------------------------
+
+#[test]
+fn fea_5_non_finite_outputs_are_suppressed_and_counted() {
+    use mp_features::TickFeature;
+    struct NanFeature;
+    impl TickFeature for NanFeature {
+        fn id(&self) -> String {
+            "nan.test".into()
+        }
+        fn on_event(&mut self, _ev: &mp_core::EventEnvelope) -> Option<f64> {
+            Some(f64::NAN)
+        }
+    }
+    let mut e = FeatureEngine::new(1_000_000_000);
+    e.register_tick(|| Box::new(NanFeature));
+    let ups = e.on_event(&trade(1, 100.0, 1.0, Side::Buy));
+    // The NaN never reaches downstream (fail-closed), and the suppression is
+    // COUNTED — visible to the ops layer, not silent (FEA-5/CONV-8).
+    assert!(ups.iter().all(|u| u.value.is_finite()));
+    assert!(!ups.iter().any(|u| u.feature == "nan.test"));
+    assert_eq!(e.nan_suppressed(), 1);
+}
+
+// ---- FEA-9: offline-only features are refused on the live path -------------
+
+#[test]
+fn fea_9_offline_only_features_are_flagged_for_live_refusal() {
+    use mp_features::{Locality, TickFeature};
+    struct LeadLag;
+    impl TickFeature for LeadLag {
+        fn id(&self) -> String {
+            "leadlag.bybit.okx".into()
+        }
+        fn locality(&self) -> Locality {
+            Locality::Offline
+        }
+        fn on_event(&mut self, _ev: &mp_core::EventEnvelope) -> Option<f64> {
+            None
+        }
+    }
+    let mut e = FeatureEngine::new(1_000_000_000);
+    e.register_tick(|| Box::new(Cvd::new("bybit"))); // online-capable
+    e.register_tick(|| Box::new(LeadLag)); // offline-only
+                                           // The live runner MUST call this after registration and refuse to start
+                                           // if it is non-empty (FEA-9): leadlag never runs on the live path.
+    assert_eq!(
+        e.offline_only_features(),
+        vec!["leadlag.bybit.okx".to_string()]
+    );
+    let mut clean = FeatureEngine::new(1_000_000_000);
+    clean.register_tick(|| Box::new(Cvd::new("bybit")));
+    assert!(clean.offline_only_features().is_empty());
+}

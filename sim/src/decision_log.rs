@@ -61,6 +61,13 @@ impl DecisionLog {
         self.absorb(&s);
     }
 
+    /// Record the risk-gate verdict for an intent (SIM-5/SIM-7: verdicts are
+    /// decisions and belong in the hash — a gate change shows up as a diff).
+    pub fn record_verdict(&mut self, seq: u64, intent: mp_core::IntentId, v: mp_risk::Verdict) {
+        let s = format!("V|{seq}|{}|{v:?}", intent.0);
+        self.absorb(&s);
+    }
+
     /// Stable hash of the whole decision sequence.
     pub fn hash(&self) -> u64 {
         self.hash

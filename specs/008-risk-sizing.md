@@ -105,6 +105,12 @@ limits file the gate hot-reloads (gate stays dumb, RSK does the thinking).
   "backtest trade type ≠ live trade type" barrier arrives with the journal
   (spec 006/007). `risk.toml` config struct, `explain()` wiring into the OMS
   journal, and MC-derived `dd_budget` (RSK-5) land when spec 007 consumes this.
+- 2026-07-11 (audit): RSK-5 implemented as `dd_budget_from_mc(p95) = p95×1.25`
+  (`rsk_5_*`), consuming the SIM-9 Monte-Carlo `p95_max_dd`. RSK-8's
+  `SizingTrace` (already produced with every `SizedOrder`) now has an ID-named
+  test proving the terms recompose the formula (`rsk_8_*`). Remaining before
+  `implemented`: RSK-6 `risk.toml` parsing + change journaling, RSK-7 regime
+  de-weighting from live features.
 
 ## Open questions
 - Correlation window (60d) vs strategy holding periods — calibrate during

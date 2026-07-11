@@ -374,3 +374,36 @@ fn fea_6_materialize_versions_on_params_change_never_overwrites() {
     );
     assert_eq!(read_features(&p0).unwrap(), rows);
 }
+
+#[test]
+fn sto_4_dataset_streams_events_in_global_recv_order() {
+    let root = tmp("sto4order");
+    let (syms, btc) = table();
+    // Written unsorted on purpose: the reader must come back recv-ordered.
+    let events = vec![
+        trade(btc, 30, 3, 99.5),
+        trade(btc, 10, 1, 100.0),
+        trade(btc, 20, 2, 101.0),
+    ];
+    let mut sorted = events.clone();
+    sorted.sort_by_key(|e| e.recv_ts_ns);
+    compact_day(
+        &root,
+        Venue::Bybit,
+        "2026-07-11",
+        0,
+        DAY,
+        sorted, // compactor contract: input already recv-sorted per day
+        &syms,
+        "h4",
+        "g",
+        0,
+    )
+    .unwrap();
+    let ds = Dataset::open(&root);
+    let got = ds
+        .trades_day(Venue::Bybit, "BTCUSDT", "2026-07-11")
+        .unwrap();
+    assert_eq!(got.len(), 3);
+    assert!(got.windows(2).all(|w| w[0].recv_ts_ns <= w[1].recv_ts_ns));
+}

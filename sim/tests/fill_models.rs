@@ -393,3 +393,34 @@ fn sim_12_optimistic_maker_fills_are_tracked_separately() {
     // number, since attribution is on the closing fill's own tag).
     let _ = bt.metrics().maker_expectancy();
 }
+
+// ---- SIM-3: latency injection defers fills ---------------------------------
+
+#[test]
+fn sim_3_fill_waits_for_configured_latency() {
+    let mut bt = Backtester::new(
+        engine(),
+        Box::new(OneShot {
+            fired: false,
+            kind: OrderKind::Market,
+            side: Side::Buy,
+            qty: 1.0,
+        }),
+        SimConfig {
+            fill_model: FillModel::L1TopOfBook,
+            latency_ns: 200 * MS,
+            slip_frac: 0.0,
+            ..SimConfig::default()
+        },
+        1,
+    );
+    bt.run(&[
+        trade(0, 100.0, 1.0, Side::Buy),        // intent at t=0
+        trade(100 * MS, 101.0, 1.0, Side::Buy), // t=100ms < 200ms: must NOT fill
+    ])
+    .unwrap();
+    assert_eq!(bt.position(SYM), 0.0, "fill before latency elapsed");
+    bt.run(&[trade(250 * MS, 102.0, 1.0, Side::Buy)]).unwrap(); // t=250ms >= 200ms
+    assert_eq!(bt.position(SYM), 1.0);
+    assert_eq!(bt.avg_cost(SYM), 102.0, "fills at the post-latency print");
+}

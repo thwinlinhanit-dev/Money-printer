@@ -187,3 +187,45 @@ proptest! {
         prop_assert!(w.values().all(|v| v.is_finite() && *v >= 0.0));
     }
 }
+
+#[test]
+fn rsk_5_dd_budget_defaults_to_p95_mc_times_1_25() {
+    use mp_risk::dd_budget_from_mc;
+    // The sizing input is p95(maxDD) from the Monte-Carlo harness (SIM-9).
+    assert!((dd_budget_from_mc(1_000.0) - 1_250.0).abs() < 1e-9);
+    // Degenerate inputs never produce a negative budget.
+    assert_eq!(dd_budget_from_mc(-5.0), 0.0);
+}
+
+#[test]
+fn rsk_8_sizing_trace_exposes_every_term_of_the_formula() {
+    use mp_risk::{size, SizingInputs, SizingParams};
+    let sized = size(
+        &SizingParams {
+            per_trade_risk_pct: 0.005,
+        },
+        &SizingInputs {
+            risk_units: 1.0,
+            equity: 100_000.0,
+            alloc_weight: 1.0,
+            instrument_vol_frac: 0.02,
+            mark_price: 100.0,
+            k_stop: 1.5,
+            step_size: 0.0001,
+            min_notional: 5.0,
+        },
+    );
+    // explain(intent) -> SizingTrace (RSK-8): every term of the formula is
+    // present and consistent — the trace IS the audit trail for a sized order.
+    let t = sized.trace;
+    assert!((t.risk_capital - 100_000.0).abs() < 1e-9); // equity x weight
+    assert!((t.per_unit_risk - 500.0).abs() < 1e-9); // 0.5% of risk capital
+    assert!((t.dollar_vol_per_contract - 2.0).abs() < 1e-9); // 2% of 100
+    assert!(t.raw_contracts > 0.0);
+    assert!((t.rounded_contracts - sized.qty_contracts).abs() < 1e-12);
+    assert!(!t.floored_to_zero);
+    // The terms recompose the formula exactly:
+    // raw = risk_units x per_unit_risk / (k_stop x dollar_vol).
+    let recomposed = 1.0 * t.per_unit_risk / (1.5 * t.dollar_vol_per_contract);
+    assert!((t.raw_contracts - recomposed).abs() < 1e-9);
+}

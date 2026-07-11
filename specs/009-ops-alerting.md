@@ -96,11 +96,11 @@ the human reads it — the report is for the owner, not for the machine.
   W-6); process logs 30 days rotated.
 
 ## Acceptance criteria
-- [x] Dead-man fires only after the missed-beat deadline and escalates P2→P1 for a critical proc in live mode (OPS-2). `ops2_deadman_fires_after_three_missed_beats_and_escalates_in_live`. (The literal `kill -9`→restart supervision is systemd's `Restart=always` in `ops/systemd/*.service`, exercised at deploy time per OPS-8, not in-crate.)
-- [x] `/kill` latch → real `mp_risk::evaluate` rejects the next intent with the RG-10 `KillSwitchTripped` verdict, independent of oms (OPS-3). `ops3_kill_latch_makes_the_real_gate_reject_with_rg10` (plus `ops3_kill_latch_roundtrips_and_trips_kill_switches`, `ops3_flatten_is_global_kill`).
-- [x] Alert-without-runbook fails CI (OPS-4). `ops4_every_catalog_alert_has_a_runbook_file` + the guardrails lint (verified to exit non-zero on a removed runbook).
-- [x] Alert dedupe + quiet-hours P3 batching with P1/P2 breakthrough (OPS-4/9). `ops4_alert_dedupes_within_window_then_fires_again`, `ops9_quiet_hours_batch_p3_but_p1_breaks_through`.
-- [x] Monthly report generates from fixture inputs with all §13 sections + the required benchmark row, numbers grounded (OPS-6). `ops6_report_has_all_sections_and_benchmark_row`, `ops6_report_numbers_are_grounded_not_invented`.
+- [x] Dead-man fires only after the missed-beat deadline and escalates P2→P1 for a critical proc in live mode (OPS-2). `ops_2_deadman_fires_after_three_missed_beats_and_escalates_in_live`. (The literal `kill -9`→restart supervision is systemd's `Restart=always` in `ops/systemd/*.service`, exercised at deploy time per OPS-8, not in-crate.)
+- [x] `/kill` latch → real `mp_risk::evaluate` rejects the next intent with the RG-10 `KillSwitchTripped` verdict, independent of oms (OPS-3). `ops_3_kill_latch_makes_the_real_gate_reject_with_rg10` (plus `ops_3_kill_latch_roundtrips_and_trips_kill_switches`, `ops_3_flatten_is_global_kill`).
+- [x] Alert-without-runbook fails CI (OPS-4). `ops_4_every_catalog_alert_has_a_runbook_file` + the guardrails lint (verified to exit non-zero on a removed runbook).
+- [x] Alert dedupe + quiet-hours P3 batching with P1/P2 breakthrough (OPS-4/9). `ops_4_alert_dedupes_within_window_then_fires_again`, `ops_9_quiet_hours_batch_p3_but_p1_breaks_through`.
+- [x] Monthly report generates from fixture inputs with all §13 sections + the required benchmark row, numbers grounded (OPS-6). `ops_6_report_has_all_sections_and_benchmark_row`, `ops_6_report_numbers_are_grounded_not_invented`.
 - [ ] Restore-drill script exercised against a real off-host backup tarball (OPS-5) — `ops/restore-drill.sh` is implemented (decrypt → extract → golden-sim replay), but a true end-to-end pass needs an actual encrypted backup, which is an operational step, not a unit test.
 
 ## Decisions
@@ -124,12 +124,21 @@ the human reads it — the report is for the owner, not for the machine.
   `to_scope()` conversion — the latch format stays decoupled from internal
   types. Latches remain one-way; only a human clears the file (EXE-7).
 - 2026-07-11: OPS-4 "alert without a runbook fails CI" is enforced two ways:
-  an in-crate test (`ops4_every_catalog_alert_has_a_runbook_file`) and a
+  an in-crate test (`ops_4_every_catalog_alert_has_a_runbook_file`) and a
   guardrails lint that extracts every `alert!("id", …)` from the registry and
   checks `ops/runbooks/{id}.md` exists (verified it fails CI when a runbook is
   removed). The 11 P1/P2 alert ids from the policy table each have a runbook
   (symptoms/diagnosis/remediation/escalation); remediation steps are risk-off
   only (never widen a limit, PD-1).
+- 2026-07-11 (audit): `Alert.dedupe_key` added — dead-man alerts dedupe per
+  process, so one process's death never suppresses another's
+  (`regression_audit3_*`, docs/AUDIT-2026-07-11.md). OPS-7 decision functions
+  implemented (`watch.rs`: disk/clock-skew/keyfile checks, alert-only, W-6)
+  and deployment artifacts pinned by tests (`ops_1/5/8/10_*`). Test names
+  normalized to `ops_N_*` for CONV-21 traceability. Remaining before
+  `implemented`: the live Telegram command loop (OPS-3's command surface,
+  owner allowlist, command journaling) and the opsd host-sampling loop that
+  feeds `watch.rs`.
 
 ## Open questions
 - Phone-call escalation provider for P1 (Twilio vs a healthchecks add-on) —

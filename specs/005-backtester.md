@@ -185,6 +185,23 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
   (`sim wf|plateau|mc|replay-live`) and its `runs/` file writes — a
   binary-edge concern with no new decision logic. 10 new tests in
   `sim/tests/harness.rs`.
+- 2026-07-11 (audit): four fixes from the honesty audit (docs/AUDIT-2026-07-11.md):
+  (1) per-trade P&L for metrics is now NET of costs — `Accountant::apply_fill`
+  returns a `FillOutcome` attributing the closing fee + pro-rata released
+  entry fees, so expectancy and the SIM-8 2×-stress column genuinely price
+  costs (`regression_audit1_*`); the accounting identity keeps gross realized
+  + separate fee term, unchanged. (2) trade-print rule is strictly-through —
+  at-price prints are touches and do not fill (`regression_audit2_*`).
+  (3) SIM-5 made real: the sim now runs the PRODUCTION `mp_risk::evaluate` on
+  every sized intent (RG-2 allowlist = the feed's universe, Paper-mode
+  semantics since RG-1's mode check governs live processes, RG-8/9 vs
+  day-start equity, RG-10 kill switches tripable via `kill_switches_mut`);
+  verdicts are recorded into the decision-log hash (SIM-7). Sim-default
+  `RiskLimits` are backtest-scale and documented as never feeding live
+  (`risk.toml` owns live limits). (4) SIM-3 latency now has an ID-named test.
+  Remaining before `implemented`: the `sim wf|plateau|mc|replay-live` CLI
+  binaries (SIM-9's letter) and recording consumed feature updates in the
+  decision log (SIM-7's letter).
 
 ## Open questions
 - None.

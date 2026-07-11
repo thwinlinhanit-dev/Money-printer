@@ -45,7 +45,10 @@ impl Severity {
 }
 
 /// A raised alert. `runbook` is the `ops/runbooks/{id}.md` link every P1/P2
-/// MUST have (OPS-4, enforced by the guardrails lint).
+/// MUST have (OPS-4, enforced by the guardrails lint). `dedupe_key` defaults
+/// to the id; alerts that fan out per entity (one dead-man id across many
+/// processes) MUST set a per-entity key so one entity's alert never suppresses
+/// another's (regression_audit3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Alert {
     pub id: String,
@@ -53,6 +56,7 @@ pub struct Alert {
     pub dedupe_window_ns: i64,
     pub runbook: String,
     pub detail: String,
+    pub dedupe_key: String,
 }
 
 impl Alert {
@@ -65,12 +69,19 @@ impl Alert {
         let id = id.into();
         let runbook = format!("ops/runbooks/{id}.md");
         Alert {
+            dedupe_key: id.clone(),
             id,
             severity,
             dedupe_window_ns,
             runbook,
             detail: detail.into(),
         }
+    }
+
+    /// Scope dedupe to an entity within this alert id (e.g. one process).
+    pub fn with_dedupe_key(mut self, key: impl Into<String>) -> Self {
+        self.dedupe_key = key.into();
+        self
     }
 }
 
@@ -136,14 +147,16 @@ impl AlertRouter {
     }
 
     /// Route one raised alert at `now_ns`. Dedupe wins first; then P3 during
-    /// quiet hours batches; everything else sends immediately.
+    /// quiet hours batches; everything else sends immediately. Dedupe is per
+    /// `dedupe_key` (defaults to the id) so per-entity alerts sharing an id
+    /// never suppress each other (regression_audit3).
     pub fn route(&mut self, alert: &Alert, now_ns: i64) -> RouteOutcome {
-        if let Some(&last) = self.last_fired.get(&alert.id) {
+        if let Some(&last) = self.last_fired.get(&alert.dedupe_key) {
             if now_ns.saturating_sub(last) < alert.dedupe_window_ns {
                 return RouteOutcome::Deduped;
             }
         }
-        self.last_fired.insert(alert.id.clone(), now_ns);
+        self.last_fired.insert(alert.dedupe_key.clone(), now_ns);
 
         let dispatch = Dispatch {
             id: alert.id.clone(),

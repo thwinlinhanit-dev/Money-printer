@@ -52,3 +52,11 @@ pub fn kelly_cap(params: &KellyParams, stats: &KellyStats) -> f64 {
     }
     (params.kelly_fraction.max(0.0) * full_kelly(stats)).max(0.0)
 }
+
+/// RSK-5: default drawdown budget for a strategy entering LiveSmall, sized
+/// from the Monte-Carlo distribution (SIM-9): `p95(maxDD_mc) × 1.25`. The
+/// margin covers the bootstrap's own uncertainty; the owner may only set a
+/// TIGHTER budget than this default without a new decision (safety asymmetry).
+pub fn dd_budget_from_mc(p95_max_dd: f64) -> f64 {
+    p95_max_dd.max(0.0) * 1.25
+}

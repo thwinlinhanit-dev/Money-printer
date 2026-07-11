@@ -19,12 +19,15 @@ use crate::account::Accountant;
 use crate::decision_log::DecisionLog;
 use crate::error::SimError;
 use crate::metrics::Metrics;
+use mp_core::Venue;
 use mp_core::{
     BookMirror, Clock, EventEnvelope, Fill, Liquidity, MarketEvent, OrderIntent, OrderKind, Side,
     SimClock, SizeUnit, SymbolId,
 };
 use mp_features::{BarBuilder, FeatureEngine};
-use mp_risk::{size, SizingInputs, SizingParams};
+use mp_risk::{
+    evaluate, size, GateInput, KillSwitches, Mode, RiskLimits, SizingInputs, SizingParams, Verdict,
+};
 use mp_strategies::strategy::{Ctx, TimerId};
 use mp_strategies::Strategy;
 use std::collections::BTreeMap;
@@ -72,6 +75,10 @@ pub struct SimConfig {
     /// seen before the run refuses to report (funding cost would be a silent
     /// zero otherwise).
     pub funding_check_interval_ns: i64,
+    /// SIM-5: risk-gate limits the sim evaluates every sized intent against —
+    /// the PRODUCTION `mp_risk::evaluate`, not a copy. Defaults are sized for
+    /// a 100k backtest (live limits come from `risk.toml`, never from here).
+    pub limits: RiskLimits,
 }
 
 impl Default for SimConfig {
@@ -92,6 +99,19 @@ impl Default for SimConfig {
             min_notional: 5.0,
             min_coverage: 0.995,
             funding_check_interval_ns: 28_800_000_000_000, // 8h
+            limits: RiskLimits {
+                // Backtest-scale limits (documented in spec 005 Decisions):
+                // wide enough that RG-3/4/5/7 don't bind a 100k sim by
+                // default, tight enough that RG-6 price sanity and RG-10
+                // kill switches stay live. Live limits are risk.toml's.
+                max_order_notional: 1_000_000.0,
+                max_position_notional: 5_000_000.0,
+                max_gross_portfolio: 10_000_000.0,
+                max_px_dev_frac: 0.05,
+                max_orders_per_min: 1_000,
+                strategy_daily_loss_budget: f64::INFINITY,
+                portfolio_daily_loss_budget: f64::INFINITY,
+            },
         }
     }
 }
@@ -160,6 +180,14 @@ pub struct Backtester {
     funding_seen: BTreeMap<SymbolId, i64>,
     run_start_ns: Option<i64>,
     trade_pnls: Vec<(i64, f64)>,
+    /// SIM-5: production kill switches — RG-10 works in sim too.
+    kills: KillSwitches,
+    /// RG-2 allow-list: a backtest may trade exactly what its feed contains.
+    allowed: Vec<(Venue, SymbolId)>,
+    /// Intent timestamps in the trailing minute (RG-7 rate limit, event time).
+    intent_ts: Vec<i64>,
+    /// (utc_day, equity at day start) for RG-8/9 daily-loss checks.
+    day_start: Option<(i64, f64)>,
     rng: u64,
     seq: u64,
     next_intent: u128,
@@ -183,6 +211,10 @@ impl Backtester {
             funding_seen: BTreeMap::new(),
             run_start_ns: None,
             trade_pnls: Vec::new(),
+            kills: KillSwitches::new(),
+            allowed: Vec::new(),
+            intent_ts: Vec::new(),
+            day_start: None,
             rng: seed,
             seq: 0,
             next_intent: 0,
@@ -277,7 +309,24 @@ impl Backtester {
         Ok(())
     }
 
+    /// Kill switches used by the in-sim gate (RG-10). Tests and paper runners
+    /// trip these; resets still require a human (EXE-7 asymmetry).
+    pub fn kill_switches_mut(&mut self) -> &mut KillSwitches {
+        &mut self.kills
+    }
+
     fn on_event(&mut self, ev: &EventEnvelope) {
+        // RG-2: the feed defines the tradeable universe.
+        if !self.allowed.contains(&(ev.venue, ev.symbol)) {
+            self.allowed.push((ev.venue, ev.symbol));
+        }
+        // RG-8/9: roll the daily-loss baseline at UTC day boundaries.
+        let day = ev.recv_ts_ns.div_euclid(86_400_000_000_000);
+        match self.day_start {
+            Some((d, _)) if d == day => {}
+            _ => self.day_start = Some((day, self.acct.equity())),
+        }
+
         self.books.entry(ev.symbol).or_default().apply(&ev.body);
 
         match &ev.body {
@@ -378,6 +427,55 @@ impl Backtester {
         if qty <= 0.0 {
             return;
         }
+
+        // SIM-5: every sized intent passes the PRODUCTION risk gate before it
+        // may reach the fill model — same `mp_risk::evaluate`, no copy. The
+        // gate runs with Paper semantics (RG-1's mode check governs live
+        // processes; the sim's job is to exercise RG-2..11).
+        self.intent_ts.retain(|&t| now - t < 60_000_000_000);
+        let price = match kind {
+            PendingKind::Limit(px) => px,
+            PendingKind::Market => mark,
+        };
+        let day_start_equity = self
+            .day_start
+            .map(|(_, e)| e)
+            .unwrap_or(self.cfg.start_cash);
+        let daily_pnl = self.acct.equity() - day_start_equity;
+        let gross: f64 = self
+            .acct
+            .positions()
+            .iter()
+            .map(|(s, q)| q.abs() * self.latest_mark.get(s).copied().unwrap_or(0.0))
+            .sum();
+        let verdict = evaluate(
+            &self.cfg.limits,
+            &self.kills,
+            &GateInput {
+                mode: Mode::Paper,
+                venue: intent.venue,
+                symbol: intent.symbol,
+                strategy: intent.strategy.clone(),
+                side: intent.side,
+                qty,
+                price,
+                mark,
+                current_position_qty: self.acct.position(intent.symbol),
+                gross_exposure_notional: gross,
+                orders_last_min: self.intent_ts.len() as u32,
+                strategy_daily_pnl: daily_pnl,
+                portfolio_daily_pnl: daily_pnl,
+                reconciler_clean: true, // sim has no venue to diverge from
+                allowed: &self.allowed,
+            },
+        );
+        self.intent_ts.push(now);
+        self.seq += 1;
+        self.log.record_verdict(self.seq, intent.intent_id, verdict);
+        if !matches!(verdict, Verdict::Pass) {
+            return; // rejected intents never reach the fill model
+        }
+
         self.pending.push(Pending {
             symbol: intent.symbol,
             side: intent.side,
@@ -542,9 +640,12 @@ impl Backtester {
                 still.push(p);
                 continue;
             };
+            // STRICTLY through the price: a print exactly AT the limit is a
+            // touch, and touching is not filling (SIM-2 normative;
+            // regression_audit2). Pessimistic by construction.
             let crosses = match (p.side, aggr) {
-                (Side::Buy, Side::Sell) => trade_px <= limit_px,
-                (Side::Sell, Side::Buy) => trade_px >= limit_px,
+                (Side::Buy, Side::Sell) => trade_px < limit_px,
+                (Side::Sell, Side::Buy) => trade_px > limit_px,
                 _ => false,
             };
             if p.symbol != symbol || p.ready_ns > now || !crosses {
@@ -599,18 +700,20 @@ impl Backtester {
             Side::Buy => qty,
             Side::Sell => -qty,
         };
-        let before = self.acct.realized();
-        self.acct.apply_fill(symbol, signed, price, fee);
-        let realized_delta = self.acct.realized() - before;
-        if optimistic_maker {
-            self.metrics.record_maker_trade(realized_delta);
-        } else {
-            self.metrics.record_trade(realized_delta);
-        }
-        // Per-trade P&L sequence with timestamps (feeds the Monte-Carlo block
-        // bootstrap, SIM-9). Only realized (position-reducing) fills count.
-        if realized_delta != 0.0 {
-            self.trade_pnls.push((self.clock.now_ns(), realized_delta));
+        let outcome = self.acct.apply_fill(symbol, signed, price, fee);
+        // Per-trade P&L is NET of costs: gross realized minus this fill's
+        // closing fee and the pro-rata entry fees it released. Expectancy is
+        // after costs or it lies (spec 005 §Metrics; regression_audit1).
+        let net = outcome.realized_gross - outcome.attributed_fees;
+        if outcome.closed_qty > 0.0 {
+            if optimistic_maker {
+                self.metrics.record_maker_trade(net);
+            } else {
+                self.metrics.record_trade(net);
+            }
+            // Per-trade P&L sequence with timestamps (feeds the Monte-Carlo
+            // block bootstrap, SIM-9).
+            self.trade_pnls.push((self.clock.now_ns(), net));
         }
 
         self.seq += 1;

@@ -292,3 +292,70 @@ fn sim_11_length_mismatch_with_shared_prefix_diverges() {
     assert_eq!(a.first_divergence(&b), Some(1));
     assert_eq!(b.first_divergence(&a), Some(1));
 }
+
+// ---- SIM-5: the sim runs the PRODUCTION risk gate --------------------------
+
+#[test]
+fn sim_5_production_risk_gate_gates_every_sized_intent() {
+    use mp_risk::RiskLimits;
+    let events = feed(100);
+
+    // Default (backtest-scale) limits: CoinFlip trades freely.
+    let mut open = Backtester::new(
+        engine(),
+        Box::new(CoinFlipStrategy::new()),
+        SimConfig {
+            latency_ns: 50 * MS,
+            ..SimConfig::default()
+        },
+        42,
+    );
+    open.run(&events).unwrap();
+    assert!(open.decision_log().fill_count() > 0);
+
+    // A max_order_notional below any sized order: the SAME production gate
+    // (mp_risk::evaluate) rejects every intent — zero fills, and the verdicts
+    // change the decision-log hash (gate decisions are decisions, SIM-7).
+    let mut shut = Backtester::new(
+        engine(),
+        Box::new(CoinFlipStrategy::new()),
+        SimConfig {
+            latency_ns: 50 * MS,
+            limits: RiskLimits {
+                max_order_notional: 0.01,
+                ..SimConfig::default().limits
+            },
+            ..SimConfig::default()
+        },
+        42,
+    );
+    shut.run(&events).unwrap();
+    assert_eq!(
+        shut.decision_log().fill_count(),
+        0,
+        "RG-3 must block all fills"
+    );
+    assert!(
+        shut.decision_log().intent_count() > 0,
+        "intents were still emitted"
+    );
+    assert_ne!(open.decision_log().hash(), shut.decision_log().hash());
+
+    // RG-10: a tripped kill switch blocks fills through the same gate.
+    let mut killed = Backtester::new(
+        engine(),
+        Box::new(CoinFlipStrategy::new()),
+        SimConfig {
+            latency_ns: 50 * MS,
+            ..SimConfig::default()
+        },
+        42,
+    );
+    killed.kill_switches_mut().trip(mp_risk::Scope::Global);
+    killed.run(&events).unwrap();
+    assert_eq!(
+        killed.decision_log().fill_count(),
+        0,
+        "RG-10 must block all fills"
+    );
+}

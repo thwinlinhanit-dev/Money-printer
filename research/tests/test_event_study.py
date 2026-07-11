@@ -16,7 +16,7 @@ def _excess():
     }
 
 
-def test_res4_car_averages_then_cumsums_across_events():
+def test_res_4_car_averages_then_cumsums_across_events():
     events = [Event(10), Event(20)]
     curve = car(events, _excess(), bar_ns=1, pre=1, post=1)
     # per-offset avg = [(0+0)/2, (0.02+0.04)/2, (0.01+0.03)/2] = [0, 0.03, 0.02]
@@ -24,14 +24,14 @@ def test_res4_car_averages_then_cumsums_across_events():
     assert curve == [0.0, 0.03, 0.05]
 
 
-def test_res4_incomplete_windows_are_dropped():
+def test_res_4_incomplete_windows_are_dropped():
     events = [Event(10), Event(999)]  # 999 has no bars in the map
     curve = car(events, _excess(), bar_ns=1, pre=1, post=1)
     # Only event 10 contributes: [0, 0.02, 0.03] cumulative.
     assert curve == [0.0, 0.02, 0.03]
 
 
-def test_res4_bootstrap_ci_is_seeded_and_reproducible():
+def test_res_4_bootstrap_ci_is_seeded_and_reproducible():
     events = [Event(10), Event(20)]
     ex = _excess()
     a = bootstrap_ci(events, ex, 1, 1, 1, seed=42, n_boot=500)
@@ -44,7 +44,7 @@ def test_res4_bootstrap_ci_is_seeded_and_reproducible():
     assert 0.03 <= lo <= hi <= 0.07
 
 
-def test_res4_regime_slicing_splits_by_tag():
+def test_res_4_regime_slicing_splits_by_tag():
     events = [Event(10, regime="chop"), Event(20, regime="trend")]
     by = car_by_regime(events, _excess(), 1, 1, 1)
     assert set(by.keys()) == {"chop", "trend"}
@@ -53,7 +53,7 @@ def test_res4_regime_slicing_splits_by_tag():
     assert by["trend"] == [0.0, 0.04, 0.07]
 
 
-def test_res4_run_study_produces_record_with_ci_and_summary():
+def test_res_4_run_study_produces_record_with_ci_and_summary():
     events = [Event(10), Event(20)]
     rec = run_study("liq-cluster", events, _excess(), 1, 1, 1, seed=7, n_boot=200)
     assert rec.n_events == 2

@@ -16,9 +16,11 @@ pub mod deadman;
 pub mod latch;
 pub mod registry;
 pub mod report;
+pub mod watch;
 
 pub use alert::{Alert, AlertRouter, Channel, Dispatch, QuietHours, RouteOutcome, Severity};
 pub use deadman::DeadMan;
 pub use latch::{KillLatch, LatchError, LatchScope};
 pub use registry::{runbook_path, spec_for, AlertSpec, ALERTS};
 pub use report::{Benchmark, CostBreakdown, FunnelEvent, MonthlyReport, StrategyRow, TrackingRow};
+pub use watch::{clock_skew_alert, disk_alert, keyfile_perms_alert};

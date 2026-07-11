@@ -6,7 +6,7 @@ import pytest
 from mp_data import Coverage, CoverageGap, Interval
 
 
-def test_res1_coverage_finds_the_gap_between_covered_ranges():
+def test_res_1_coverage_finds_the_gap_between_covered_ranges():
     cov = Coverage([Interval(0, 100), Interval(200, 300)])
     assert cov.gaps(50, 250) == [Interval(100, 200)]
     assert not cov.is_complete(50, 250)
@@ -15,18 +15,18 @@ def test_res1_coverage_finds_the_gap_between_covered_ranges():
     assert cov.gaps(10, 90) == []
 
 
-def test_res1_leading_and_trailing_gaps_are_reported():
+def test_res_1_leading_and_trailing_gaps_are_reported():
     cov = Coverage([Interval(100, 200)])
     # Query starts before coverage and ends after it ⇒ two gaps.
     assert cov.gaps(0, 300) == [Interval(0, 100), Interval(200, 300)]
 
 
-def test_res1_overlapping_inputs_are_merged():
+def test_res_1_overlapping_inputs_are_merged():
     cov = Coverage([Interval(0, 100), Interval(50, 150), Interval(150, 160)])
     assert cov.covered == [Interval(0, 160)]
 
 
-def test_res1_refuse_raises_warn_returns_gaps():
+def test_res_1_refuse_raises_warn_returns_gaps():
     cov = Coverage([Interval(0, 100)])
     # warn: returns the gaps for the caller to log, no raise.
     assert cov.check(0, 200, mode="warn") == [Interval(100, 200)]
@@ -37,7 +37,7 @@ def test_res1_refuse_raises_warn_returns_gaps():
     assert cov.check(0, 100, mode="refuse") == []
 
 
-def test_res1_bad_interval_and_mode_rejected():
+def test_res_1_bad_interval_and_mode_rejected():
     with pytest.raises(ValueError):
         Interval(100, 50)
     with pytest.raises(ValueError):

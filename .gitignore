@@ -24,3 +24,5 @@ secrets*
 
 # Local scratch
 /scratch
+__pycache__/
+*.pyc

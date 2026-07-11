@@ -1,5 +1,10 @@
 //! Portfolio accounting (SIM-13). Average-cost positions with an exact identity
 //! asserted at every step: `equity == start_cash + realized + unrealized − fees`.
+//!
+//! `realized` stays GROSS of fees (the identity above needs the separate fee
+//! term); per-trade NET P&L for metrics comes from [`FillOutcome`], which
+//! attributes each closing fill's own fee plus the pro-rata share of the entry
+//! fees it releases — so expectancy is genuinely after costs (spec 005).
 
 use mp_core::SymbolId;
 use std::collections::BTreeMap;
@@ -8,6 +13,21 @@ use std::collections::BTreeMap;
 struct Position {
     qty: f64, // signed: long +, short −
     avg: f64,
+    /// Fees paid opening the currently-held quantity (released pro-rata as the
+    /// position reduces, so closed-trade P&L can be reported net of ALL costs).
+    fees_open: f64,
+}
+
+/// What one fill did, for metrics attribution.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FillOutcome {
+    /// Realized P&L from the position reduction, GROSS of fees.
+    pub realized_gross: f64,
+    /// Quantity closed by this fill (0.0 for a pure open/add).
+    pub closed_qty: f64,
+    /// Costs attributable to the closed quantity: the closing portion of this
+    /// fill's fee + the pro-rata entry fees released from the position.
+    pub attributed_fees: f64,
 }
 
 /// Tracks cash, positions, realized/unrealized P&L, and fees.
@@ -59,8 +79,16 @@ impl Accountant {
         }
     }
 
-    /// Apply a fill. `signed_qty` is +qty for a buy, −qty for a sell.
-    pub fn apply_fill(&mut self, symbol: SymbolId, signed_qty: f64, price: f64, fee: f64) {
+    /// Apply a fill. `signed_qty` is +qty for a buy, −qty for a sell. Returns
+    /// the [`FillOutcome`] so callers can report NET per-trade P&L
+    /// (gross − attributed entry+exit fees) — expectancy after costs.
+    pub fn apply_fill(
+        &mut self,
+        symbol: SymbolId,
+        signed_qty: f64,
+        price: f64,
+        fee: f64,
+    ) -> FillOutcome {
         self.cash -= price * signed_qty;
         self.cash -= fee;
         self.fees += fee;
@@ -70,26 +98,41 @@ impl Accountant {
         if p.qty == 0.0 {
             p.qty = signed_qty;
             p.avg = price;
-            return;
+            p.fees_open = fee;
+            return FillOutcome::default();
         }
         if p.qty.signum() == signed_qty.signum() {
-            // Increase same side: weighted average.
+            // Increase same side: weighted average; entry fee accrues.
             let nq = p.qty + signed_qty;
             p.avg = (p.avg * p.qty + price * signed_qty) / nq;
             p.qty = nq;
+            p.fees_open += fee;
+            return FillOutcome::default();
+        }
+        // Reduce/close/flip.
+        let reduce = signed_qty.abs().min(p.qty.abs());
+        let realized_gross = reduce * (price - p.avg) * p.qty.signum();
+        self.realized += realized_gross;
+        // Pro-rata entry fees released by this reduction + the closing share
+        // of this fill's own fee (a flip's opening share stays with the new
+        // position).
+        let released_entry = p.fees_open * (reduce / p.qty.abs());
+        let closing_fee = fee * (reduce / signed_qty.abs());
+        let nq = p.qty + signed_qty;
+        if nq == 0.0 {
+            *p = Position::default();
+        } else if nq.signum() == p.qty.signum() {
+            p.qty = nq; // partial reduce, avg unchanged
+            p.fees_open -= released_entry;
         } else {
-            // Reduce/close/flip.
-            let reduce = signed_qty.abs().min(p.qty.abs());
-            self.realized += reduce * (price - p.avg) * p.qty.signum();
-            let nq = p.qty + signed_qty;
-            if nq == 0.0 {
-                *p = Position::default();
-            } else if nq.signum() == p.qty.signum() {
-                p.qty = nq; // partial reduce, avg unchanged
-            } else {
-                p.qty = nq; // flipped
-                p.avg = price;
-            }
+            p.qty = nq; // flipped: remaining fee opens the new side
+            p.avg = price;
+            p.fees_open = fee - closing_fee;
+        }
+        FillOutcome {
+            realized_gross,
+            closed_qty: reduce,
+            attributed_fees: released_entry + closing_fee,
         }
     }
 

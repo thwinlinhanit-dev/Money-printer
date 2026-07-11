@@ -13,7 +13,7 @@ const MIN: i64 = 60 * S;
 // ---- Alert framework (OPS-4, OPS-9) -------------------------------------
 
 #[test]
-fn ops4_alert_dedupes_within_window_then_fires_again() {
+fn ops_4_alert_dedupes_within_window_then_fires_again() {
     let mut r = AlertRouter::new(None);
     let a = Alert::new("stream-gap", Severity::P2, 5 * MIN, "BTCUSDT gap 6m");
     // First fire sends; runbook link is derived.
@@ -31,7 +31,7 @@ fn ops4_alert_dedupes_within_window_then_fires_again() {
 }
 
 #[test]
-fn ops9_quiet_hours_batch_p3_but_p1_breaks_through() {
+fn ops_9_quiet_hours_batch_p3_but_p1_breaks_through() {
     // Quiet 22:00–07:00 UTC.
     let quiet = QuietHours {
         start_min: 22 * 60,
@@ -63,7 +63,7 @@ fn ops9_quiet_hours_batch_p3_but_p1_breaks_through() {
 // ---- Dead-man switch (OPS-2) --------------------------------------------
 
 #[test]
-fn ops2_deadman_fires_after_three_missed_beats_and_escalates_in_live() {
+fn ops_2_deadman_fires_after_three_missed_beats_and_escalates_in_live() {
     // 30s interval, 3 missed ⇒ 90s deadline.
     let mut dm = DeadMan::new(30 * S);
     dm.register("collector-bybit", false, 0);
@@ -90,7 +90,7 @@ fn ops2_deadman_fires_after_three_missed_beats_and_escalates_in_live() {
 // ---- Kill-latch bridge (OPS-3, RG-10) -----------------------------------
 
 #[test]
-fn ops3_kill_latch_roundtrips_and_trips_kill_switches() {
+fn ops_3_kill_latch_roundtrips_and_trips_kill_switches() {
     let latch = KillLatch::new("manual /kill from phone", 1234)
         .kill(LatchScope::Venue { venue: Venue::Okx })
         .kill(LatchScope::Strategy {
@@ -113,7 +113,7 @@ fn ops3_kill_latch_roundtrips_and_trips_kill_switches() {
 }
 
 #[test]
-fn ops3_flatten_is_global_kill() {
+fn ops_3_flatten_is_global_kill() {
     let latch = KillLatch::global("/flatten double-confirmed", 9);
     let kills = latch.to_kill_switches();
     // Global latch blocks every venue/strategy.
@@ -163,7 +163,7 @@ fn fixture_report() -> MonthlyReport {
 }
 
 #[test]
-fn ops6_report_has_all_sections_and_benchmark_row() {
+fn ops_6_report_has_all_sections_and_benchmark_row() {
     let md = fixture_report().render_markdown();
     for header in [
         "## Equity & Drawdown",
@@ -182,7 +182,7 @@ fn ops6_report_has_all_sections_and_benchmark_row() {
 }
 
 #[test]
-fn ops6_report_numbers_are_grounded_not_invented() {
+fn ops_6_report_numbers_are_grounded_not_invented() {
     // Every percent token in the report must trace to an input figure — a
     // spot-check that the renderer computes nothing on its own (PD-5 honesty).
     let r = fixture_report();
@@ -198,10 +198,30 @@ fn ops6_report_numbers_are_grounded_not_invented() {
     assert!(md2.contains("_no data_"));
 }
 
+/// Audit bug 3: all dead-man alerts share the id "process-deadman", and the
+/// router deduped per id — so process B dying inside process A's dedupe
+/// window was silently suppressed. Dedupe is now per entity key.
+#[test]
+fn regression_audit3_deadman_alerts_not_cross_deduped() {
+    let mut dm = DeadMan::new(30 * S);
+    dm.register("collector-bybit", false, 0);
+    dm.register("oms", true, 0);
+    let alerts = dm.check(100 * S, false);
+    assert_eq!(alerts.len(), 2);
+
+    let mut r = AlertRouter::new(None);
+    // Both silent processes must alert — the second is a different entity,
+    // not a duplicate of the first.
+    assert!(matches!(r.route(&alerts[0], 0), RouteOutcome::Sent(_)));
+    assert!(matches!(r.route(&alerts[1], 0), RouteOutcome::Sent(_)));
+    // The SAME process re-alerting inside the window is still deduped.
+    assert_eq!(r.route(&alerts[0], 10 * S), RouteOutcome::Deduped);
+}
+
 // ---- OPS-3 end-to-end: /kill latch → real risk gate RG-10 verdict --------
 
 #[test]
-fn ops3_kill_latch_makes_the_real_gate_reject_with_rg10() {
+fn ops_3_kill_latch_makes_the_real_gate_reject_with_rg10() {
     use mp_core::{Side, StrategyId, SymbolId};
     use mp_risk::{evaluate, GateInput, Mode, RejectReason, RiskLimits, Verdict};
 
@@ -254,7 +274,7 @@ fn ops3_kill_latch_makes_the_real_gate_reject_with_rg10() {
 // ---- Registry ↔ runbooks (OPS-4) ----------------------------------------
 
 #[test]
-fn ops4_every_catalog_alert_has_a_runbook_file() {
+fn ops_4_every_catalog_alert_has_a_runbook_file() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for spec in mp_ops::ALERTS {
         let path = root.join("runbooks").join(format!("{}.md", spec.id));
@@ -266,4 +286,77 @@ fn ops4_every_catalog_alert_has_a_runbook_file() {
             path.display()
         );
     }
+}
+
+// ---- OPS-7: host-health watch checks --------------------------------------
+
+#[test]
+fn ops_7_disk_clock_and_keyfile_checks_alert_past_thresholds() {
+    use mp_ops::{clock_skew_alert, disk_alert, keyfile_perms_alert};
+    // Disk: 86% > 85% budget fires disk-high; 84% does not. Alert only — the
+    // checker can never delete data (W-6).
+    let a = disk_alert(0.86, 0.85, MIN).expect("fires past budget");
+    assert_eq!(a.id, "disk-high");
+    assert_eq!(a.severity, Severity::P2);
+    assert!(disk_alert(0.84, 0.85, MIN).is_none());
+
+    // Clock: 150ms skew fires; 50ms does not; sign is irrelevant.
+    assert!(clock_skew_alert(150_000_000, MIN).is_some());
+    assert!(clock_skew_alert(-150_000_000, MIN).is_some());
+    assert!(clock_skew_alert(50_000_000, MIN).is_none());
+
+    // Key files: group/other-readable fires per-file; 0600 passes.
+    let k = keyfile_perms_alert("/etc/mp/ops.env", 0o644, MIN).expect("fires");
+    assert_eq!(k.id, "keyfile-perms");
+    assert_eq!(k.dedupe_key, "keyfile-perms//etc/mp/ops.env");
+    assert!(keyfile_perms_alert("/etc/mp/ops.env", 0o600, MIN).is_none());
+}
+
+// ---- OPS-1/5/8/10: deployment artifacts are present and well-formed --------
+
+#[test]
+fn ops_1_systemd_units_pin_restart_and_resource_limits() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for unit in ["systemd/collector@.service", "systemd/opsd.service"] {
+        let text = std::fs::read_to_string(root.join(unit)).expect(unit);
+        assert!(
+            text.contains("Restart=always"),
+            "{unit}: restart=always (OPS-1)"
+        );
+        assert!(text.contains("MemoryMax="), "{unit}: memory limit (OPS-1)");
+        assert!(text.contains("CPUQuota="), "{unit}: cpu limit (OPS-1)");
+    }
+}
+
+#[test]
+fn ops_5_restore_drill_script_exists_and_refuses_without_backup() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("restore-drill.sh");
+    assert!(script.exists(), "ops/restore-drill.sh must exist (OPS-5)");
+    // No backup argument ⇒ usage error (exit 2), never a fake PASS.
+    let out = std::process::Command::new("bash")
+        .arg(&script)
+        .output()
+        .expect("run script");
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn ops_8_deploy_doc_and_compose_are_checked_in() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(root.join("deploy.md").exists(), "ops/deploy.md (OPS-8)");
+    let compose = std::fs::read_to_string(root.join("compose.yaml")).expect("compose");
+    assert!(
+        compose.contains("restart: always"),
+        "compose restart policy (OPS-1)"
+    );
+}
+
+#[test]
+fn ops_10_process_log_rotation_is_configured() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let compose = std::fs::read_to_string(root.join("compose.yaml")).expect("compose");
+    // Process logs are bounded/rotated (journals are append-only forever, W-6).
+    assert!(compose.contains("max-size"), "log rotation bound (OPS-10)");
+    assert!(compose.contains("max-file"), "log rotation count (OPS-10)");
 }

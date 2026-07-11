@@ -65,13 +65,18 @@ impl DeadMan {
                 } else {
                     Severity::P2
                 };
-                out.push(Alert::new(
-                    "process-deadman",
-                    sev,
-                    // Dedupe on the beat interval so we don't spam every check.
-                    self.interval_ns,
-                    format!("process '{proc}' silent for {silent_for}ns (> {deadline}ns)"),
-                ));
+                out.push(
+                    Alert::new(
+                        "process-deadman",
+                        sev,
+                        // Dedupe on the beat interval so we don't spam every check.
+                        self.interval_ns,
+                        format!("process '{proc}' silent for {silent_for}ns (> {deadline}ns)"),
+                    )
+                    // Per-process dedupe: process B dying must never be
+                    // suppressed because process A died first (regression_audit3).
+                    .with_dedupe_key(format!("process-deadman/{proc}")),
+                );
             }
         }
         out

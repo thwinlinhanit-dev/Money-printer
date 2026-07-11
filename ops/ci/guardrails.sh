@@ -89,7 +89,9 @@ if [ -f specs/README.md ]; then
     ids=$(grep -oE '\*\*[A-Z]{3,4}-[0-9]+\*\*' "specs/$spec" | tr -d '*' | sort -u)
     for id in $ids; do
       needle=$(echo "$id" | tr 'A-Z-' 'a-z_')
-      if ! tracked '*.rs' '*.py' 2>/dev/null | xargs -r grep -lE "fn ${needle}[a-z0-9_]*|def ${needle}[a-z0-9_]*" >/dev/null 2>&1; then
+      # Python arm accepts pytest's mandatory test_ prefix (def test_res_5_…);
+      # the bare `def res_5` form could never match a collectible pytest test.
+      if ! tracked '*.rs' '*.py' 2>/dev/null | xargs -r grep -lE "fn ${needle}[a-z0-9_]*|def (test_)?${needle}[a-z0-9_]*" >/dev/null 2>&1; then
         err "CONV-21: $spec is 'implemented' but no test name embeds ${id} (expected fn/def ${needle}_*)"
       fi
     done

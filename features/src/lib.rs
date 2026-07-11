@@ -18,5 +18,5 @@ pub mod screener;
 
 pub use bar::{Bar, BarBuilder};
 pub use config::{ConfigError, FeaturesConfig};
-pub use engine::{BarFeature, FeatureEngine, FeatureUpdate, TickFeature};
+pub use engine::{BarFeature, FeatureEngine, FeatureUpdate, Locality, TickFeature};
 pub use screener::{Cond, Op, Rule, Screener, ScreenerHit};
