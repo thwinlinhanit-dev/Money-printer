@@ -1,0 +1,27 @@
+[package]
+name = "mp-sim"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Backtester & simulation — spec 005 (event replay, fills, accounting, determinism)"
+
+[lib]
+name = "mp_sim"
+path = "src/lib.rs"
+
+[dependencies]
+mp-core = { path = "../core" }
+mp-features = { path = "../features" }
+mp-strategies = { path = "../strategies" }
+mp-risk = { path = "../risk" }
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Runs the PRODUCTION feature engine, strategy, and sizing crates unmodified
+# (SIM-5) — only the clock and fill model differ from live. No network.
+
+[lints]
+workspace = true

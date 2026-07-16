@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rulebook guardrails (PD-1..4, W-7, CONV-21)
+        run: bash ops/ci/guardrails.sh
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect workspace
+        id: detect
+        run: |
+          if [ -f Cargo.toml ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Install Rust
+        if: steps.detect.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        if: steps.detect.outputs.present == 'true'
+      - name: fmt
+        if: steps.detect.outputs.present == 'true'
+        run: cargo fmt --check
+      - name: clippy
+        if: steps.detect.outputs.present == 'true'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test (CONV-24; no network per CONV-23)
+        if: steps.detect.outputs.present == 'true'
+        run: cargo test --workspace
+      - name: feature-gated builds compile (live-ws / live-http)
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          cargo clippy -p mp-collectors --features live-ws --all-targets -- -D warnings
+          cargo clippy -p mp-llm --features live-http --all-targets -- -D warnings
+      - name: No workspace yet
+        if: steps.detect.outputs.present == 'false'
+        run: echo "No Cargo.toml — docs/specs-only change, rust job is a no-op."
+
+  research:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: pip install pytest polars
+      - name: Research tests (RES-1..6, pure stdlib)
+        run: cd research && python -m pytest -q

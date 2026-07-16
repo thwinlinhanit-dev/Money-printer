@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Real config & secrets (only *.example.* is committed) — PD-2
+*.env
+.env
+.env.*
+!.env.example
+!*.example.toml
+config.toml
+secrets*
+
+# Recorded market data & run artifacts — W-6 (never commit data)
+/data
+/raw
+/cold
+/warm
+/runs
+/journal/briefs
+*.parquet
+*.ndjson.zst
+*.log
+
+# Local scratch
+/scratch
+__pycache__/
+*.pyc

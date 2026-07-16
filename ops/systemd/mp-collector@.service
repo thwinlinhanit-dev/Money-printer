@@ -1,0 +1,24 @@
+# Templated collector unit (SPEC-011): `systemctl enable --now mp-collector@BTCUSDT`.
+# Public market data only (PD-1) — no order path, no auth here.
+# %I expands to the symbol (e.g. BTCUSDT). Venue is hardcoded to bybit.
+[Unit]
+Description=Money Printer collector for bybit/%i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printer
+Group=printer
+EnvironmentFile=/etc/money-printer/venues.env
+ExecStart=/opt/money-printer/bin/mp-collector --venue bybit --symbol %I
+Restart=always
+RestartSec=5
+MemoryMax=512M
+CPUQuota=50%
+LimitNOFILE=65536
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/data
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

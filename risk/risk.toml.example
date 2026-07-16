@@ -1,0 +1,10 @@
+# Risk limits (RSK-6) — EXAMPLE. Copy to risk.toml on the host; changing
+# DEFAULTS is owner-only (CLAUDE.md). Every applied change is journaled
+# old->new with timestamp and actor. deny_unknown_fields: typos are errors.
+max_order_notional = 500.0
+max_position_notional = 2000.0
+max_gross_portfolio = 300000.0
+max_px_dev_frac = 0.02
+max_orders_per_min = 30
+strategy_daily_loss_budget = 1000.0
+portfolio_daily_loss_budget = 3000.0

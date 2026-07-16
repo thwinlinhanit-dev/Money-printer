@@ -1,0 +1,23 @@
+# Feature catalog params (FEA-7) — EXAMPLE. Copy to features.toml and edit.
+# All catalog params live here, in ONE file, parsed with deny_unknown_fields
+# (a mistyped key is an error, not a silent default). This file's canonical
+# hash is written into every materialized feature's Parquet footer (FEA-6);
+# changing any value forces a new `ver=N` feature-store directory — recorded
+# feature data is never overwritten (W-6).
+
+# Bar timeframe for bar-derived features, in nanoseconds (default 60s).
+bar_tf_ns = 60000000000
+
+[cvd]
+# Per-venue cumulative volume delta is computed for these venue slugs.
+venues = ["bybit", "okx", "binance"]
+
+[whale_print]
+# A single trade at or above this notional is a whale print.
+min_notional = 250000.0
+
+[liq_cluster]
+# Liquidations within this window (ns) summing to >= min_cluster_notional
+# form a cluster.
+window_ns = 60000000000
+min_cluster_notional = 5000000.0

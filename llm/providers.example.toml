@@ -1,0 +1,50 @@
+# mp-llm provider config — EXAMPLE (PD-2: no real secrets in the repo).
+#
+# API keys are NEVER stored here. Each provider reads its key from the env var
+# named below; set them in your shell / systemd unit / secret store, off the
+# repo. This file only records model choices and which env var each provider
+# uses, so an operator can see the full map at a glance.
+#
+# LLM output is human-read only and never touches a decision path (spec 010).
+
+[default]
+# Which provider the research agents use by default.
+provider = "anthropic"
+
+# provider slug -> { model override, api_key_env }. Model is optional; when
+# omitted the crate's built-in default (shown) is used.
+[providers.anthropic]
+model   = "claude-opus-4-8"     # repo default; most capable: claude-fable-5
+api_key_env = "ANTHROPIC_API_KEY"
+
+[providers.openai]
+model   = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.gemini]
+model   = "gemini-1.5-pro"
+api_key_env = "GEMINI_API_KEY"
+
+[providers.mistral]
+model   = "mistral-large-latest"
+api_key_env = "MISTRAL_API_KEY"
+
+[providers.cohere]
+model   = "command-r-plus"
+api_key_env = "COHERE_API_KEY"
+
+[providers.deepseek]
+model   = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[providers.groq]
+model   = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
+[providers.xai]
+model   = "grok-2-latest"
+api_key_env = "XAI_API_KEY"
+
+[providers.ollama]
+model   = "llama3.1"
+api_key_env = ""                # local, keyless; default host localhost:11434

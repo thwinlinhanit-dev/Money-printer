@@ -1,0 +1,10 @@
+# RES-2: grading runs weekly (Mon 06:00 UTC), persistent across downtime.
+[Unit]
+Description=Weekly screener grading timer
+
+[Timer]
+OnCalendar=Mon *-*-* 06:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
