@@ -164,7 +164,14 @@ impl<T: Copy> Consumer<T> {
                 }
                 continue;
             }
-            let val = unsafe { *slot.val.get() };
+            let val = unsafe {
+                // Prevent the compiler from reordering the non-atomic read
+                // before the Acquire load of seq (or after the re-check).
+                std::sync::atomic::compiler_fence(Ordering::Acquire);
+                let v = *slot.val.get();
+                std::sync::atomic::compiler_fence(Ordering::Acquire);
+                v
+            };
             // Re-check: if the slot moved while we copied, discard (EVT-7).
             if slot.seq.load(Ordering::Acquire) != self.cursor {
                 continue;

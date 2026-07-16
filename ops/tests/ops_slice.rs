@@ -10,13 +10,23 @@ use mp_ops::{
 const S: i64 = 1_000_000_000; // 1s in ns
 const MIN: i64 = 60 * S;
 
-/// Convert a Windows path to a WSL path via `wslpath -a`.
+/// Convert a Windows path to a WSL path via `wslpath -a`. Falls back to the
+/// raw path on native Linux (e.g. CI runners) where `wslpath` is absent.
 fn wsl(p: &std::path::Path) -> String {
-    let out = std::process::Command::new("bash")
-        .args(["-c", &format!("wslpath -a '{}'", p.display())])
+    let has_wslpath = std::process::Command::new("bash")
+        .args(["-c", "command -v wslpath"])
         .output()
-        .expect("wslpath");
-    String::from_utf8(out.stdout).expect("utf8").trim().to_string()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if has_wslpath {
+        let out = std::process::Command::new("bash")
+            .args(["-c", &format!("wslpath -a '{}'", p.display())])
+            .output()
+            .expect("wslpath");
+        String::from_utf8(out.stdout).expect("utf8").trim().to_string()
+    } else {
+        p.display().to_string()
+    }
 }
 
 // ---- Alert framework (OPS-4, OPS-9) -------------------------------------
