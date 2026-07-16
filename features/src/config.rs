@@ -6,6 +6,7 @@
 //! Pure: parses from a `&str` the caller read at the binary edge — no I/O and
 //! no wall clock here (PD-3).
 
+use mp_core::{fnv1a_absorb, FNV1A_OFFSET};
 use serde::{Deserialize, Serialize};
 
 /// Error parsing `features.toml`.
@@ -34,17 +35,25 @@ impl Default for CvdParams {
     }
 }
 
-/// Params for `whale_print` (large single-trade detector).
+/// Params for `whale_print.{venue}` (large single-trade detector).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WhalePrintParams {
     pub min_notional: f64,
+    /// Venues to track (default: hyperliquid only).
+    #[serde(default = "default_whale_venues")]
+    pub venues: Vec<String>,
+}
+
+fn default_whale_venues() -> Vec<String> {
+    vec!["hyperliquid".into()]
 }
 
 impl Default for WhalePrintParams {
     fn default() -> Self {
         WhalePrintParams {
             min_notional: 250_000.0,
+            venues: default_whale_venues(),
         }
     }
 }
@@ -109,11 +118,7 @@ impl FeaturesConfig {
     /// the Parquet footer and the `ver=N` marker.
     pub fn params_hash(&self) -> Result<String, ConfigError> {
         let canonical = toml::to_string(self).map_err(|e| ConfigError::Serialize(e.to_string()))?;
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in canonical.as_bytes() {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        let h = fnv1a_absorb(FNV1A_OFFSET, canonical.as_bytes());
         Ok(format!("{h:016x}"))
     }
 }

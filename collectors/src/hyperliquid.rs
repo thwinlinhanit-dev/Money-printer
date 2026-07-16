@@ -8,10 +8,9 @@
 use crate::json::*;
 use crate::normalize::{NormError, Normalizer};
 use mp_core::{
-    EventEnvelope, Level, Levels, MarketEvent, Side, SnapshotReason, SymbolId, SymbolTable, Venue,
+    EventEnvelope, Levels, MarketEvent, Side, SnapshotReason, SymbolId, SymbolTable, Venue,
 };
 use serde_json::Value;
-use smallvec::SmallVec;
 
 #[derive(Default)]
 pub struct HyperliquidNormalizer {
@@ -37,15 +36,8 @@ impl HyperliquidNormalizer {
 }
 
 fn hl_levels(v: Option<&Value>) -> Result<Levels, NormError> {
-    let mut out: Levels = SmallVec::new();
-    if let Some(arr) = v.and_then(|x| x.as_array()) {
-        for lvl in arr {
-            let px = f64_field(lvl, "px").unwrap_or(0.0);
-            let sz = f64_field(lvl, "sz").unwrap_or(0.0);
-            out.push((px, sz) as Level);
-        }
-    }
-    Ok(out)
+    // Skip invalid levels rather than inventing price 0 (honesty: zeros look real).
+    parse_obj_levels(v, "px", "sz")
 }
 
 impl Normalizer for HyperliquidNormalizer {

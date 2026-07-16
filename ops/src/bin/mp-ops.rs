@@ -1,11 +1,12 @@
 //! `mp-ops` — operational CLI for the Money Printer system (SPEC-011).
 //!
 //! Subcommands:
-//!   compact --date YYYYMMDD --venue bybit --symbol BTCUSDT
+//!   compact --date YYYY-MM-DD --venue bybit --symbol BTCUSDT
 //!           Compacts a raw event log into partitioned Parquet files.
+//!           Date also accepts YYYYMMDD (backward compatible).
 //!
 //! Usage:
-//!   cargo run --package mp-ops --bin mp-ops -- compact --date 20260715 --venue bybit --symbol BTCUSDT
+//!   cargo run --package mp-ops --bin mp-ops -- compact --date 2026-07-15 --venue bybit --symbol BTCUSDT
 
 use mp_core::log::LogReader;
 use mp_core::{EventEnvelope, SymbolTable, Venue};
@@ -39,12 +40,14 @@ fn parse_venue(s: &str) -> Result<Venue, String> {
 }
 
 fn date_to_nanos(date: &str) -> Result<(i64, i64), String> {
-    if date.len() != 8 {
-        return Err("date must be YYYYMMDD".into());
+    // Accept both YYYYMMDD and YYYY-MM-DD.
+    let norm = date.replace('-', "");
+    if norm.len() != 8 {
+        return Err("date must be YYYYMMDD or YYYY-MM-DD".into());
     }
-    let y: i64 = date[0..4].parse().map_err(|_| "bad year")?;
-    let m: u32 = date[4..6].parse().map_err(|_| "bad month")?;
-    let d: u32 = date[6..8].parse().map_err(|_| "bad day")?;
+    let y: i64 = norm[0..4].parse().map_err(|_| "bad year")?;
+    let m: u32 = norm[4..6].parse().map_err(|_| "bad month")?;
+    let d: u32 = norm[6..8].parse().map_err(|_| "bad day")?;
 
     // Days since Unix epoch for this date
     let days = days_from_epoch(y, m, d);
@@ -90,12 +93,18 @@ fn read_log_with_symbols(path: &Path) -> Result<(Vec<EventEnvelope>, SymbolTable
 }
 
 fn cmd_compact(args: &[String]) -> Result<String, String> {
-    let date = need(args, "--date")?;
+    let date_raw = need(args, "--date")?;
+    // Normalize: strip dashes for raw log filename, build dashed for partition paths.
+    let date_flat = date_raw.replace('-', "");
+    if date_flat.len() != 8 {
+        return Err("date must be YYYYMMDD or YYYY-MM-DD".into());
+    }
+    let date_dashed = format!("{}-{}-{}", &date_flat[0..4], &date_flat[4..6], &date_flat[6..8]);
     let venue_str = need(args, "--venue")?;
     let symbol = need(args, "--symbol")?;
     let venue = parse_venue(&venue_str)?;
 
-    let raw_path = Path::new("data").join("raw").join(format!("{date}_{venue_str}_{symbol}.log"));
+    let raw_path = Path::new("data").join("raw").join(format!("{date_flat}_{venue_str}_{symbol}.log"));
     let cold_root = Path::new("data").join("cold");
 
     if !raw_path.exists() {
@@ -104,7 +113,7 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
 
     tracing::info!(path = %raw_path.display(), "compacting raw log");
 
-    let (day_start_ns, day_end_ns) = date_to_nanos(&date)?;
+    let (day_start_ns, day_end_ns) = date_to_nanos(&date_flat)?;
     let source_hash = compute_source_hash(&raw_path)?;
     let (events, symbols) = read_log_with_symbols(&raw_path)?;
 
@@ -118,7 +127,7 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
     let stats = compactor::compact_day(
         &cold_root,
         venue,
-        &date,
+        &date_dashed,
         day_start_ns,
         day_end_ns,
         events,

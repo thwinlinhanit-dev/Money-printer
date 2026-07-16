@@ -17,6 +17,7 @@ pub mod account;
 pub mod decision_log;
 pub mod engine;
 pub mod error;
+pub mod fills;
 pub mod gates;
 pub mod harness;
 pub mod metrics;
@@ -24,8 +25,9 @@ pub mod tracker;
 
 pub use account::Accountant;
 pub use decision_log::DecisionLog;
-pub use engine::{Backtester, FillModel, SimConfig};
+pub use engine::{Backtester, SimConfig};
 pub use error::SimError;
+pub use fills::{FillModel, FillOptimism};
 pub use gates::{evaluate_g1, G1Params, G1Result};
 pub use harness::{
     monte_carlo, plateau_ok, walk_forward, McResult, MetricsSummary, WalkForwardParams,

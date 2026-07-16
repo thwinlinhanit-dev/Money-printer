@@ -40,6 +40,10 @@ def today_utc_str() -> str:
     return now_utc().strftime("%Y%m%d")
 
 
+def today_parquet_str() -> str:
+    return now_utc().strftime("%Y-%m-%d")
+
+
 def md5_file(path: Path) -> str:
     h = hashlib.md5()
     with open(path, "rb") as f:
@@ -143,6 +147,7 @@ def upload_with_retry(
 
 def main() -> None:
     today = today_utc_str()
+    today_dashed = today_parquet_str()
     data_dir = Path(os.environ.get("DATA_DIR", "./data")).resolve()
 
     endpoint_url = os.environ.get("AWS_ENDPOINT_URL", "")
@@ -175,7 +180,7 @@ def main() -> None:
         logger.info("No cold directory at %s; nothing to archive", cold_dir)
         sys.exit(0)
 
-    parquet_files = find_old_parquet_files(cold_dir, today)
+    parquet_files = find_old_parquet_files(cold_dir, today_dashed)
     if not parquet_files:
         logger.info("No old parquet files to archive (today=%s)", today)
     else:

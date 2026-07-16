@@ -52,15 +52,34 @@ fn fea_1_cvd_accumulates_signed_volume() {
     assert_eq!(value(&u2, "cvd.bybit"), Some(1.5));
 }
 
+fn trade_hl(recv: i64, price: f64, qty: f64, side: Side) -> EventEnvelope {
+    EventEnvelope::new(
+        Venue::Hyperliquid,
+        SymbolId(0),
+        recv,
+        recv,
+        0,
+        MarketEvent::Trade {
+            price,
+            qty,
+            side,
+            trade_id: 0,
+        },
+    )
+}
+
 #[test]
 fn fea_1_whale_print_thresholds_notional() {
     let mut e = FeatureEngine::new(SEC);
+    // Product default: Hyperliquid whale tracker.
     e.register_tick(|| Box::new(WhalePrint::new(100_000.0)));
+    // Bybit trade must not emit on the HL-scoped feature.
+    assert!(e.on_event(&trade(1, 100.0, 2000.0, Side::Sell)).is_empty());
     // 100 * 500 = 50k < 100k → no emit.
-    assert!(e.on_event(&trade(1, 100.0, 500.0, Side::Buy)).is_empty());
+    assert!(e.on_event(&trade_hl(1, 100.0, 500.0, Side::Buy)).is_empty());
     // 100 * 2000 = 200k ≥ 100k, sell → negative signed notional.
-    let u = e.on_event(&trade(2, 100.0, 2000.0, Side::Sell));
-    assert_eq!(value(&u, "whale_print"), Some(-200_000.0));
+    let u = e.on_event(&trade_hl(2, 100.0, 2000.0, Side::Sell));
+    assert_eq!(value(&u, "whale_print.hyperliquid"), Some(-200_000.0));
 }
 
 #[test]

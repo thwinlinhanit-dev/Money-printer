@@ -3,7 +3,7 @@
 
 use crate::bar::Bar;
 use crate::engine::{BarFeature, TickFeature};
-use mp_core::{BookMirror, EventEnvelope, MarketEvent, Side};
+use mp_core::{BookMirror, EventEnvelope, MarketEvent, Side, Venue};
 use std::collections::VecDeque;
 
 // ---- order flow -------------------------------------------------------------
@@ -38,20 +38,37 @@ impl TickFeature for Cvd {
     }
 }
 
-/// `whale_print` — emits signed notional for trades ≥ `floor_usd`.
+/// `whale_print.{venue}` — signed notional for trades ≥ `floor_usd` on one venue.
+/// Default venue is Hyperliquid (large prints / liquidations edge on HL tape).
 pub struct WhalePrint {
     floor_usd: f64,
+    venue: Venue,
 }
 impl WhalePrint {
+    /// Hyperliquid whale tracker (product default).
     pub fn new(floor_usd: f64) -> Self {
-        Self { floor_usd }
+        Self::for_venue(floor_usd, Venue::Hyperliquid)
+    }
+    pub fn for_venue(floor_usd: f64, venue: Venue) -> Self {
+        Self { floor_usd, venue }
     }
 }
 impl TickFeature for WhalePrint {
     fn id(&self) -> String {
-        "whale_print".into()
+        let slug = match self.venue {
+            Venue::Hyperliquid => "hyperliquid",
+            Venue::BinanceFutures => "binance",
+            Venue::Bybit => "bybit",
+            Venue::Okx => "okx",
+            Venue::Coinbase => "coinbase",
+            Venue::KrakenFutures => "kraken",
+        };
+        format!("whale_print.{slug}")
     }
     fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if ev.venue != self.venue {
+            return None;
+        }
         if let MarketEvent::Trade {
             price, qty, side, ..
         } = ev.body

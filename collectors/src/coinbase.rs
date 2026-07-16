@@ -103,8 +103,12 @@ impl Normalizer for CoinbaseNormalizer {
                     let mut asks: Levels = SmallVec::new();
                     if let Some(updates) = ev.get("updates").and_then(|u| u.as_array()) {
                         for u in updates {
-                            let px = f64_field(u, "price_level").unwrap_or(0.0);
-                            let qty = f64_field(u, "new_quantity").unwrap_or(0.0);
+                            let Some(px) = f64_field(u, "price_level").filter(|p| *p > 0.0) else {
+                                continue;
+                            };
+                            let Some(qty) = f64_field(u, "new_quantity") else {
+                                continue;
+                            };
                             match str_field(u, "side") {
                                 Some("bid") => bids.push((px, qty) as Level),
                                 Some("offer") | Some("ask") => asks.push((px, qty) as Level),

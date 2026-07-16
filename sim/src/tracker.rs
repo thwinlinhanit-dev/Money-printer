@@ -5,16 +5,12 @@
 //! production) so this crate stays wall-clock-free (PD-3).
 
 use crate::harness::MetricsSummary;
+use mp_core::fnv1a_64;
 
 /// Non-cryptographic FNV-1a content hash used for config/manifest identity
 /// (matches the decision-log hash family; sufficient for "have we tried this?").
 pub fn content_hash(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+    fnv1a_64(bytes)
 }
 
 /// One tracked run.

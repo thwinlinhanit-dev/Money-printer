@@ -2,7 +2,7 @@
 //! numbers as strings (mostly) or numbers; these read either.
 
 use crate::normalize::NormError;
-use mp_core::{Level, Levels};
+use mp_core::{fnv1a_64_str, Level, Levels};
 use serde_json::Value;
 use smallvec::SmallVec;
 
@@ -38,18 +38,17 @@ pub fn ms_to_ns(ms: i64) -> i64 {
     ms.saturating_mul(1_000_000)
 }
 
-/// Stable 64-bit FNV-1a hash for string ids (spec 001 Decision: hash string
-/// trade ids to `u64` at the collector boundary).
+/// Stable 64-bit FNV-1a hash for string ids (canonical: `mp_core::fnv1a_64_str`).
 pub fn hash_str(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+    fnv1a_64_str(s)
 }
 
-/// Parse `[["price","size"], ...]` book levels (string pairs).
+/// Required f64 field — missing/invalid is a parse error, never invent 0.0.
+pub fn require_f64(v: &Value, k: &str) -> Result<f64, NormError> {
+    f64_field(v, k).ok_or_else(|| NormError::Parse(format!("missing or bad f64 field {k}")))
+}
+
+/// Parse `[["price","size"], ...]` book levels (string pairs). Skip bad levels.
 pub fn parse_pair_levels(v: Option<&Value>) -> Result<Levels, NormError> {
     let mut out: Levels = SmallVec::new();
     let Some(arr) = v.and_then(|v| v.as_array()) else {
@@ -67,7 +66,9 @@ pub fn parse_pair_levels(v: Option<&Value>) -> Result<Levels, NormError> {
             .get(1)
             .and_then(pair_num)
             .ok_or_else(|| NormError::Parse("bad level qty".into()))?;
-        out.push((p, q) as Level);
+        if p > 0.0 && q.is_finite() {
+            out.push((p, q) as Level);
+        }
     }
     Ok(out)
 }
@@ -80,7 +81,7 @@ fn pair_num(v: &Value) -> Option<f64> {
     }
 }
 
-/// Parse `[{"price":..,"qty":..}, ...]` object levels (Kraken/Hyperliquid style).
+/// Parse `[{"price":..,"qty":..}, ...]` object levels. Skip invalid levels.
 pub fn parse_obj_levels(
     v: Option<&Value>,
     px_key: &str,
@@ -91,11 +92,15 @@ pub fn parse_obj_levels(
         return Ok(out);
     };
     for lvl in arr {
-        let p =
-            f64_field(lvl, px_key).ok_or_else(|| NormError::Parse("bad obj level price".into()))?;
-        let q =
-            f64_field(lvl, sz_key).ok_or_else(|| NormError::Parse("bad obj level qty".into()))?;
-        out.push((p, q) as Level);
+        let Some(p) = f64_field(lvl, px_key) else {
+            continue;
+        };
+        let Some(q) = f64_field(lvl, sz_key) else {
+            continue;
+        };
+        if p > 0.0 && q.is_finite() {
+            out.push((p, q) as Level);
+        }
     }
     Ok(out)
 }

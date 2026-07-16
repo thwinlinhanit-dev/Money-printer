@@ -6,7 +6,7 @@
 //! Deterministic: the Monte-Carlo RNG is a seeded splitmix64 (CONV-11), so a
 //! resampled DD distribution is reproducible from its seed.
 
-use mp_core::EventEnvelope;
+use mp_core::{EventEnvelope, SplitMix64};
 
 /// A compact, copyable snapshot of one run's metrics for cross-window tables.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,14 +102,6 @@ pub struct McResult {
     pub resamples: u32,
 }
 
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
 /// Block-bootstrap the trade P&L sequence (block = `block_ns`, default 1 day):
 /// resample whole daily blocks with replacement to a path of ≥ the original
 /// trade count, walk the equity curve, record its max drawdown, repeat
@@ -142,7 +134,7 @@ pub fn monte_carlo(
         };
     }
     let target = trade_pnls.len();
-    let mut state = seed;
+    let mut rng = SplitMix64::new(seed);
     let mut dds: Vec<f64> = Vec::with_capacity(resamples as usize);
     for _ in 0..resamples {
         // Build a resampled path of whole blocks until we cover ≥ target trades.
@@ -151,7 +143,7 @@ pub fn monte_carlo(
         let mut max_dd = 0.0_f64;
         let mut n = 0usize;
         while n < target {
-            let idx = (splitmix64(&mut state) % blocks.len() as u64) as usize;
+            let idx = rng.below(blocks.len() as u64) as usize;
             for &pnl in &blocks[idx] {
                 equity += pnl;
                 peak = peak.max(equity);

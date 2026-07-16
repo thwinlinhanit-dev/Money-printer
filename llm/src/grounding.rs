@@ -9,16 +9,12 @@
 //!    decision type. The guarantee is structural, not a comment.
 
 use crate::provider::{Completion, Provider};
+use mp_core::fnv1a_64;
 
 /// Deterministic 64-bit FNV-1a content hash of an input bundle. Non-crypto,
 /// sufficient for archival identity in v1 (documented in spec 010 Decisions).
 pub fn bundle_hash(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+    fnv1a_64(bytes)
 }
 
 /// The exact bytes fed to the model, plus their hash. Construct from the

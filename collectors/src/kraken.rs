@@ -121,8 +121,12 @@ impl Normalizer for KrakenNormalizer {
                     .ok_or_else(|| NormError::Parse("kr product_id".into()))?;
                 let id = self.sym(sym);
                 let seq_id = u64_field(&d, "seq").unwrap_or(0);
-                let px = f64_field(&d, "price").unwrap_or(0.0);
-                let qty = f64_field(&d, "qty").unwrap_or(0.0);
+                let Some(px) = f64_field(&d, "price").filter(|p| *p > 0.0) else {
+                    return Ok(());
+                };
+                let Some(qty) = f64_field(&d, "qty") else {
+                    return Ok(());
+                };
                 let is_bid = str_field(&d, "side").unwrap_or("buy") != "sell";
                 let mut bids: Levels = SmallVec::new();
                 let mut asks: Levels = SmallVec::new();

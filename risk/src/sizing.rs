@@ -39,6 +39,9 @@ pub struct SizingInputs {
     pub step_size: f64,
     /// Minimum notional; below this, no trade (not a tiny trade).
     pub min_notional: f64,
+    /// Contract multiplier (e.g. 0.001 for Bitcoin futures where 1 contract
+    /// = 0.001 BTC). Default 1.0 for spot/linear contracts.
+    pub contract_multiplier: f64,
 }
 
 /// Every term of the sizing formula, for journaling (RSK-8).
@@ -73,7 +76,7 @@ fn round_down(x: f64, step: f64) -> f64 {
 pub fn size(params: &SizingParams, inp: &SizingInputs) -> SizedOrder {
     let risk_capital = (inp.equity * inp.alloc_weight).max(0.0);
     let per_unit_risk = risk_capital * params.per_trade_risk_pct;
-    let dollar_vol = inp.instrument_vol_frac * inp.mark_price;
+    let dollar_vol = inp.instrument_vol_frac * inp.mark_price * inp.contract_multiplier;
 
     let denom = inp.k_stop * dollar_vol;
     let raw = if denom > 0.0 && inp.risk_units.is_finite() && per_unit_risk.is_finite() {
@@ -84,7 +87,7 @@ pub fn size(params: &SizingParams, inp: &SizingInputs) -> SizedOrder {
     let raw = if raw.is_finite() { raw } else { 0.0 };
 
     let rounded = round_down(raw, inp.step_size);
-    let notional = rounded * inp.mark_price;
+    let notional = rounded * inp.mark_price * inp.contract_multiplier;
     let floored = notional < inp.min_notional;
     let qty = if floored { 0.0 } else { rounded };
 

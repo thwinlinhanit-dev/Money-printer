@@ -1078,6 +1078,7 @@ dependencies = [
 name = "mp-llm"
 version = "0.1.0"
 dependencies = [
+ "mp-core",
  "reqwest",
  "serde",
  "serde_json",

@@ -6,7 +6,7 @@ set -euo pipefail
 
 export PATH="/usr/local/bin:/usr/bin:/bin"
 
-YESTERDAY=$(date -u -d "yesterday" +%Y%m%d)
+YESTERDAY=$(date -u -d "yesterday" +%Y-%m-%d)
 LOG_DIR="/opt/money-printer/data"
 BIN_DIR="/opt/money-printer/bin"
 SCRIPT_DIR="/opt/money-printer/ops/scripts"

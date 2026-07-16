@@ -17,6 +17,7 @@ fn base_inputs() -> SizingInputs {
         k_stop: 1.5,
         step_size: 0.001,
         min_notional: 5.0,
+        contract_multiplier: 1.0,
     }
 }
 
@@ -213,6 +214,7 @@ fn rsk_8_sizing_trace_exposes_every_term_of_the_formula() {
             k_stop: 1.5,
             step_size: 0.0001,
             min_notional: 5.0,
+            contract_multiplier: 1.0,
         },
     );
     // explain(intent) -> SizingTrace (RSK-8): every term of the formula is
