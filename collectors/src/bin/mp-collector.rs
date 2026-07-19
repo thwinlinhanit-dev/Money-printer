@@ -80,16 +80,18 @@ mod inner {
             )],
             "binance" => {
                 let s = symbol.to_lowercase();
-                let stream = format!("{s}@aggTrade/{s}@markPrice@1s/{s}@forceOrder");
                 vec![format!(
-                    r#"{{"method":"SUBSCRIBE","params":["{stream}"],"id":1}}"#
+                    r#"{{"method":"SUBSCRIBE","params":["{s}@aggTrade","{s}@markPrice@1s","{s}@depth@100ms"],"id":1}}"#
                 )]
             }
             "hyperliquid" => {
                 let coin = hl_coin(symbol);
-                vec![format!(
-                    r#"{{"method":"subscribe","subscription":{{"type":"trades","coin":"{coin}"}}}}"#
-                )]
+                // Subscribe to all channels the normalizer supports
+                vec![
+                    format!(r#"{{"method":"subscribe","subscription":{{"type":"trades","coin":"{coin}"}}}}"#),
+                    format!(r#"{{"method":"subscribe","subscription":{{"type":"l2Book","coin":"{coin}"}}}}"#),
+                    format!(r#"{{"method":"subscribe","subscription":{{"type":"activeAssetCtx","coin":"{coin}"}}}}"#),
+                ]
             }
             "okx" => vec![format!(
                 r#"{{"op":"subscribe","args":[{{"channel":"trades","instId":"{symbol}"}}]}}"#

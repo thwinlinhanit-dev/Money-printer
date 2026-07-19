@@ -302,7 +302,8 @@ impl Backtester {
         for u in ups {
             self.seq += 1;
             self.log.record_feature(self.seq, &u);
-            if u.feature.starts_with("vol.rv") {
+            let feat_name = self.fe.resolve_name(u.feature);
+            if feat_name.starts_with("vol.rv") {
                 self.latest_vol.insert(u.symbol, u.value);
             }
             let intents = self.dispatch_strategy(now, |s, ctx| s.on_feature(&u, ctx));

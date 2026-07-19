@@ -137,11 +137,37 @@ pub fn scan_valid_len(path: &Path) -> Result<u64, LogError> {
     Ok(valid)
 }
 
+// ---- fsync policy (spec 014) -------------------------------------------------
+
+/// Configurable fsync policy for the event log (FSP-1).
+#[derive(Debug, Clone, Copy)]
+pub struct FsyncPolicy {
+    /// Fsync every N events (0 = disabled).
+    pub every_n_events: u64,
+    /// Fsync every N nanoseconds (0 = disabled).
+    pub every_ns: i64,
+    /// Fsync on graceful shutdown (SIGTERM).
+    pub on_sigterm: bool,
+}
+
+impl Default for FsyncPolicy {
+    fn default() -> Self {
+        Self {
+            every_n_events: 1000,
+            every_ns: 10_000_000_000, // 10s
+            on_sigterm: true,
+        }
+    }
+}
+
 // ---- writer -----------------------------------------------------------------
 
 /// Append-only event-log writer (EVT-4). Recovers a torn tail on open.
 pub struct EventLogWriter {
     file: BufWriter<File>,
+    fsync_policy: FsyncPolicy,
+    events_since_fsync: u64,
+    last_fsync_ns: i64,
 }
 
 impl EventLogWriter {
@@ -173,9 +199,17 @@ impl EventLogWriter {
         Ok((
             Self {
                 file: BufWriter::new(file),
+                fsync_policy: FsyncPolicy::default(),
+                events_since_fsync: 0,
+                last_fsync_ns: 0,
             },
             truncated,
         ))
+    }
+
+    /// Set the fsync policy (spec 014). Must be called before appending events.
+    pub fn set_fsync_policy(&mut self, policy: FsyncPolicy) {
+        self.fsync_policy = policy;
     }
 
     /// Persist a symbol-table snapshot (EVT-8). Write this before the events
@@ -187,11 +221,29 @@ impl EventLogWriter {
         Ok(())
     }
 
-    /// Append one event.
+    /// Append one event. Auto-fsyncs if policy thresholds are crossed (FSP-3).
     pub fn append(&mut self, e: &EventEnvelope) -> Result<(), LogError> {
         let mut payload = e.schema_ver.to_le_bytes().to_vec();
         payload.extend_from_slice(&codec::encode_event(e)?);
         self.file.write_all(&encode_frame(FRAME_EVENT, &payload))?;
+
+        self.events_since_fsync += 1;
+        let p = self.fsync_policy;
+        let should_fsync = p.every_n_events > 0 && self.events_since_fsync >= p.every_n_events;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i64;
+        let should_fsync_time = p.every_ns > 0
+            && self.last_fsync_ns > 0
+            && (now - self.last_fsync_ns) >= p.every_ns;
+        if should_fsync || should_fsync_time {
+            self.file.flush()?;
+            // Use sync_data (faster) — metadata sync not needed for append-only (FSP-5).
+            self.file.get_ref().sync_data()?;
+            self.events_since_fsync = 0;
+            self.last_fsync_ns = now;
+        }
         Ok(())
     }
 
@@ -201,8 +253,15 @@ impl EventLogWriter {
         Ok(())
     }
 
-    /// Flush and fsync to durable storage.
+    /// Flush and fsync with sync_data (fast path, FSP-5).
     pub fn sync(&mut self) -> Result<(), LogError> {
+        self.file.flush()?;
+        self.file.get_ref().sync_data()?;
+        Ok(())
+    }
+
+    /// Flush and fsync fully (sync_all — slower, includes metadata).
+    pub fn sync_all(&mut self) -> Result<(), LogError> {
         self.file.flush()?;
         self.file.get_ref().sync_all()?;
         Ok(())

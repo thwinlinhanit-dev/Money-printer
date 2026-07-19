@@ -20,6 +20,33 @@ pub enum Venue {
     KrakenFutures,
 }
 
+impl Venue {
+    /// Short lower-case slug for display and feature names.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Venue::BinanceFutures => "binance",
+            Venue::Bybit => "bybit",
+            Venue::Okx => "okx",
+            Venue::Hyperliquid => "hyperliquid",
+            Venue::Coinbase => "coinbase",
+            Venue::KrakenFutures => "kraken",
+        }
+    }
+
+    /// Parse a venue from its slug.
+    pub fn from_slug(s: &str) -> Option<Self> {
+        Some(match s {
+            "binance" | "binancefutures" => Venue::BinanceFutures,
+            "bybit" => Venue::Bybit,
+            "okx" => Venue::Okx,
+            "hyperliquid" => Venue::Hyperliquid,
+            "coinbase" => Venue::Coinbase,
+            "kraken" | "krakenfutures" => Venue::KrakenFutures,
+            _ => return None,
+        })
+    }
+}
+
 /// Aggressor side for trades/liquidations; resting side for book context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
@@ -59,6 +86,11 @@ pub enum StatusKind {
     Throttled,
     VenueHalt,
     Stale,
+    /// One or more frames were dropped due to backpressure (spec 013).
+    BackpressureDrop {
+        /// Number of frames dropped in this batch.
+        dropped: u64,
+    },
 }
 
 /// The normalized market event body (EVT-1).

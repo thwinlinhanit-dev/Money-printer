@@ -39,7 +39,7 @@ fn feed() -> Vec<EventEnvelope> {
 
 fn engine() -> FeatureEngine {
     let mut e = FeatureEngine::new(1_000_000_000);
-    e.register_tick(|| Box::new(Cvd::new("bybit")));
+    e.register_tick(|| Box::new(Cvd::new(Venue::Bybit)));
     e
 }
 

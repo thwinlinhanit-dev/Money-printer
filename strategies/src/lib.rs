@@ -6,10 +6,12 @@
 //! crate has no oms/collectors/network dependency, enforced by the guardrail.
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod carry_v1;
 pub mod examples;
 pub mod funnel;
 pub mod strategy;
 
+pub use carry_v1::{CarryConfig, CarryV1};
 pub use examples::{CoinFlipStrategy, NullStrategy};
 pub use funnel::{
     Actor, Autopsy, EvidenceRef, FunnelError, FunnelState, Stage, Transition, EVIDENCE_MAX_AGE_NS,

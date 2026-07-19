@@ -111,8 +111,9 @@ async fn run(
 pub mod endpoints {
     /// Bybit v5 linear public stream.
     pub const BYBIT_LINEAR: &str = "wss://stream.bybit.com/v5/public/linear";
-    /// Binance USDⓈ-M Futures combined stream base.
-    pub const BINANCE_FUTURES: &str = "wss://fstream.binance.com/stream";
+    /// Binance combined stream base (spot endpoint — futures trades
+    /// are geo-restricted in some regions).
+    pub const BINANCE_FUTURES: &str = "wss://stream.binance.com:9443/stream";
     /// OKX v5 public.
     pub const OKX_PUBLIC: &str = "wss://ws.okx.com:8443/ws/v5/public";
     /// Coinbase Advanced Trade market data.

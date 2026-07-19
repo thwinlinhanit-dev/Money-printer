@@ -14,6 +14,7 @@
 pub mod alert;
 pub mod bot;
 pub mod deadman;
+pub mod journal;
 pub mod latch;
 pub mod registry;
 pub mod report;

@@ -2,7 +2,7 @@
 
 use mp_core::{EventEnvelope, MarketEvent, Side, SnapshotReason, SymbolId, Venue};
 use mp_features::catalog::*;
-use mp_features::{Cond, FeatureEngine, Op, Rule, Screener};
+use mp_features::{Cond, FeatureEngine, FeatureUpdate, Op, Rule, Screener};
 use smallvec::smallvec;
 
 const SEC: i64 = 1_000_000_000;
@@ -25,7 +25,7 @@ fn trade(recv: i64, price: f64, qty: f64, side: Side) -> EventEnvelope {
 
 fn engine_with_all() -> FeatureEngine {
     let mut e = FeatureEngine::new(SEC); // 1s bars
-    e.register_tick(|| Box::new(Cvd::new("bybit")))
+    e.register_tick(|| Box::new(Cvd::new(Venue::Bybit)))
         .register_tick(|| Box::new(WhalePrint::new(100_000.0)))
         .register_tick(|| Box::new(OiDelta::new()))
         .register_tick(|| Box::new(FundingPassthrough::new("bybit")))
@@ -35,21 +35,22 @@ fn engine_with_all() -> FeatureEngine {
     e
 }
 
-fn value(ups: &[mp_features::FeatureUpdate], feat: &str) -> Option<f64> {
+fn value(engine: &FeatureEngine, ups: &[FeatureUpdate], feat: &str) -> Option<f64> {
+    let id = engine.name_to_id(feat)?;
     ups.iter()
         .rev()
-        .find(|u| u.feature == feat)
+        .find(|u| u.feature == id)
         .map(|u| u.value)
 }
 
 #[test]
 fn fea_1_cvd_accumulates_signed_volume() {
     let mut e = FeatureEngine::new(SEC);
-    e.register_tick(|| Box::new(Cvd::new("bybit")));
+    e.register_tick(|| Box::new(Cvd::new(Venue::Bybit)));
     let u1 = e.on_event(&trade(1, 100.0, 2.0, Side::Buy));
-    assert_eq!(value(&u1, "cvd.bybit"), Some(2.0));
+    assert_eq!(value(&e, &u1, "cvd.bybit"), Some(2.0));
     let u2 = e.on_event(&trade(2, 100.0, 0.5, Side::Sell));
-    assert_eq!(value(&u2, "cvd.bybit"), Some(1.5));
+    assert_eq!(value(&e, &u2, "cvd.bybit"), Some(1.5));
 }
 
 fn trade_hl(recv: i64, price: f64, qty: f64, side: Side) -> EventEnvelope {
@@ -79,7 +80,7 @@ fn fea_1_whale_print_thresholds_notional() {
     assert!(e.on_event(&trade_hl(1, 100.0, 500.0, Side::Buy)).is_empty());
     // 100 * 2000 = 200k ≥ 100k, sell → negative signed notional.
     let u = e.on_event(&trade_hl(2, 100.0, 2000.0, Side::Sell));
-    assert_eq!(value(&u, "whale_print.hyperliquid"), Some(-200_000.0));
+    assert_eq!(value(&e, &u, "whale_print.hyperliquid"), Some(-200_000.0));
 }
 
 #[test]
@@ -100,7 +101,7 @@ fn fea_1_liq_cluster_sums_within_window() {
     assert!(e.on_event(&liq(1, 30_000.0, 20.0, Side::Sell)).is_empty());
     // Second within window: +600k more ⇒ 1.2M ≥ threshold, negative (longs).
     let u = e.on_event(&liq(2, 30_000.0, 20.0, Side::Sell));
-    assert_eq!(value(&u, "liq.cluster"), Some(-1_200_000.0));
+    assert_eq!(value(&e, &u, "liq.cluster"), Some(-1_200_000.0));
 }
 
 #[test]
@@ -123,7 +124,7 @@ fn fea_1_oi_delta_and_funding_passthrough() {
     };
     assert!(e.on_event(&oi(1, 1000.0)).is_empty()); // first reading: no delta
     let u = e.on_event(&oi(2, 1050.0));
-    assert_eq!(value(&u, "oi.delta"), Some(50.0));
+    assert_eq!(value(&e, &u, "oi.delta"), Some(50.0));
 
     let f = EventEnvelope::new(
         Venue::Bybit,
@@ -137,7 +138,8 @@ fn fea_1_oi_delta_and_funding_passthrough() {
             next_funding_ts_ns: 0,
         },
     );
-    assert_eq!(value(&e.on_event(&f), "funding.bybit"), Some(0.0001));
+    let ups = e.on_event(&f);
+    assert_eq!(value(&e, &ups, "funding.bybit"), Some(0.0001));
 }
 
 #[test]
@@ -148,7 +150,7 @@ fn fea_1_bar_delta_on_close() {
     e.on_event(&trade(0, 100.0, 3.0, Side::Buy));
     e.on_event(&trade(SEC / 2, 100.0, 1.0, Side::Sell));
     let u = e.on_event(&trade(SEC + 1, 100.0, 1.0, Side::Buy)); // closes bar 0
-    assert_eq!(value(&u, "delta.bar.1s"), Some(2.0)); // 3 buy - 1 sell
+    assert_eq!(value(&e, &u, "delta.bar.1s"), Some(2.0)); // 3 buy - 1 sell
 }
 
 #[test]
@@ -162,8 +164,8 @@ fn fea_3_realized_vol_and_breakout_warmup_suppressed() {
     }
     // RealizedVol(w=2) warms only after 2 returns; breakout(n=3) after 3 bars.
     // With 5 closed bars there should be at least one rv and one breakout value.
-    assert!(value(&all, "vol.rv.1s.2").is_some(), "rv should warm");
-    assert!(value(&all, "breakout.3").is_some(), "breakout should warm");
+    assert!(value(&e, &all, "vol.rv.1s.2").is_some(), "rv should warm");
+    assert!(value(&e, &all, "breakout.3").is_some(), "breakout should warm");
 }
 
 #[test]
@@ -175,7 +177,7 @@ fn fea_3_no_output_before_warmup() {
     for i in 0..3 {
         ups.extend(e.on_event(&trade(i * SEC + 1, 100.0, 1.0, Side::Buy)));
     }
-    assert!(value(&ups, "breakout.3").is_none());
+    assert!(value(&e, &ups, "breakout.3").is_none());
 }
 
 #[test]
@@ -225,7 +227,7 @@ fn fea_8_book_feature_silent_while_stale() {
     );
     let u = e.on_event(&snap);
     // imbalance = (6-2)/(6+2) = 0.5
-    assert_eq!(value(&u, "imbalance.top"), Some(0.5));
+    assert_eq!(value(&e, &u, "imbalance.top"), Some(0.5));
 
     // A gap delta makes the book stale → feature must go silent (FEA-8).
     let gap = EventEnvelope::new(
@@ -241,13 +243,14 @@ fn fea_8_book_feature_silent_while_stale() {
             last_seq: 105,
         },
     );
-    assert!(value(&e.on_event(&gap), "imbalance.top").is_none());
+    let ups = e.on_event(&gap);
+    assert!(value(&e, &ups, "imbalance.top").is_none());
 }
 
 #[test]
 fn fea_10_screener_edge_triggers_with_snapshot() {
     let mut e = FeatureEngine::new(SEC);
-    e.register_tick(|| Box::new(Cvd::new("bybit")));
+    e.register_tick(|| Box::new(Cvd::new(Venue::Bybit)));
     let mut screener = Screener::new(vec![Rule {
         id: "cvd_breakout".into(),
         conds: vec![Cond {
@@ -256,13 +259,17 @@ fn fea_10_screener_edge_triggers_with_snapshot() {
             threshold: 5.0,
         }],
     }]);
+    // Evaluate every tick for this test (minimum clamped to 100ms).
+    screener.set_eval_interval_ns(1);
+    // Pre-populate SymbolId → name mapping from the engine
+    screener.set_name_map(e.name_map().clone());
 
     let mut hits = Vec::new();
     for u in e.on_event(&trade(1, 100.0, 3.0, Side::Buy)) {
         hits.extend(screener.on_update(&u)); // cvd=3, below 5
     }
     assert!(hits.is_empty());
-    for u in e.on_event(&trade(2, 100.0, 4.0, Side::Buy)) {
+    for u in e.on_event(&trade(200_000_000, 100.0, 4.0, Side::Buy)) {
         hits.extend(screener.on_update(&u)); // cvd=7 ≥ 5 → fire
     }
     assert_eq!(hits.len(), 1);
@@ -271,7 +278,7 @@ fn fea_10_screener_edge_triggers_with_snapshot() {
 
     // Still true next tick → edge-triggered, no re-fire.
     let mut hits2 = Vec::new();
-    for u in e.on_event(&trade(3, 100.0, 1.0, Side::Buy)) {
+    for u in e.on_event(&trade(400_000_000, 100.0, 1.0, Side::Buy)) {
         hits2.extend(screener.on_update(&u)); // cvd=8, still ≥5
     }
     assert!(hits2.is_empty(), "edge-triggered: fires once");
@@ -340,7 +347,7 @@ fn fea_5_non_finite_outputs_are_suppressed_and_counted() {
     // The NaN never reaches downstream (fail-closed), and the suppression is
     // COUNTED — visible to the ops layer, not silent (FEA-5/CONV-8).
     assert!(ups.iter().all(|u| u.value.is_finite()));
-    assert!(!ups.iter().any(|u| u.feature == "nan.test"));
+    assert!(!ups.iter().any(|u| e.resolve_name(u.feature) == "nan.test"));
     assert_eq!(e.nan_suppressed(), 1);
 }
 
@@ -362,7 +369,7 @@ fn fea_9_offline_only_features_are_flagged_for_live_refusal() {
         }
     }
     let mut e = FeatureEngine::new(1_000_000_000);
-    e.register_tick(|| Box::new(Cvd::new("bybit"))); // online-capable
+    e.register_tick(|| Box::new(Cvd::new(Venue::Bybit))); // online-capable
     e.register_tick(|| Box::new(LeadLag)); // offline-only
                                            // The live runner MUST call this after registration and refuse to start
                                            // if it is non-empty (FEA-9): leadlag never runs on the live path.
@@ -371,7 +378,7 @@ fn fea_9_offline_only_features_are_flagged_for_live_refusal() {
         vec!["leadlag.bybit.okx".to_string()]
     );
     let mut clean = FeatureEngine::new(1_000_000_000);
-    clean.register_tick(|| Box::new(Cvd::new("bybit")));
+    clean.register_tick(|| Box::new(Cvd::new(Venue::Bybit)));
     assert!(clean.offline_only_features().is_empty());
 }
 

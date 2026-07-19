@@ -34,6 +34,7 @@ pub use compactor::{compact_day, CompactStats};
 pub use dataset::Dataset;
 pub use feature_store::{
     materialize, read_feature_meta, read_features, resolve_version, FeatureMeta, FeatureRow,
+    StreamingFeatureStore,
 };
 pub use manifest::{derive_manifest, Gap, GapKind, QualityManifest, StreamStats};
 pub use prune::{verify_prunable, PruneRefusal};

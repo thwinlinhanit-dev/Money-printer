@@ -16,6 +16,9 @@ path = "src/lib.rs"
 # Off by default so the pure normalization/logic builds with no network stack.
 # PD-1: public data only — this transport never sends orders or auth.
 live-ws = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:url", "dep:rustls"]
+# Live HTTP client for REST snapshot fetches (spec 020). Separate from live-ws
+# so snapshot fetch can be added independently.
+live-http = ["dep:reqwest"]
 
 [dependencies]
 mp-core = { path = "../core" }
@@ -29,6 +32,7 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"], 
 rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 futures-util = { version = "0.3", optional = true }
 url = { version = "2", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints]

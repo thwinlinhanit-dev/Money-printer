@@ -10,20 +10,17 @@ use std::collections::VecDeque;
 
 /// `cvd.{venue}` — cumulative signed trade quantity (buy +qty, sell −qty).
 pub struct Cvd {
-    venue_slug: String,
+    venue: Venue,
     cvd: f64,
 }
 impl Cvd {
-    pub fn new(venue_slug: &str) -> Self {
-        Self {
-            venue_slug: venue_slug.to_owned(),
-            cvd: 0.0,
-        }
+    pub fn new(venue: Venue) -> Self {
+        Self { venue, cvd: 0.0 }
     }
 }
 impl TickFeature for Cvd {
     fn id(&self) -> String {
-        format!("cvd.{}", self.venue_slug)
+        format!("cvd.{}", self.venue.slug())
     }
     fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
         if let MarketEvent::Trade { qty, side, .. } = ev.body {
@@ -55,15 +52,7 @@ impl WhalePrint {
 }
 impl TickFeature for WhalePrint {
     fn id(&self) -> String {
-        let slug = match self.venue {
-            Venue::Hyperliquid => "hyperliquid",
-            Venue::BinanceFutures => "binance",
-            Venue::Bybit => "bybit",
-            Venue::Okx => "okx",
-            Venue::Coinbase => "coinbase",
-            Venue::KrakenFutures => "kraken",
-        };
-        format!("whale_print.{slug}")
+        format!("whale_print.{}", self.venue.slug())
     }
     fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
         if ev.venue != self.venue {

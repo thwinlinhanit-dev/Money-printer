@@ -11,6 +11,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod backoff;
+pub mod backpressure;
 pub mod binance;
 pub mod book_sync;
 pub mod bybit;
@@ -30,6 +31,7 @@ pub mod transport;
 pub mod ws;
 
 pub use backoff::Backoff;
+pub use backpressure::BackpressurePolicy;
 pub use binance::BinanceNormalizer;
 pub use bybit::BybitNormalizer;
 pub use coinbase::CoinbaseNormalizer;

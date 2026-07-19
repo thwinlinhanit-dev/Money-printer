@@ -15,7 +15,7 @@
 //! so this binary reads no wall clock at all (PD-3, even at the edge).
 
 use mp_core::log::LogReader;
-use mp_core::EventEnvelope;
+use mp_core::{EventEnvelope, Venue};
 use mp_features::catalog::Cvd;
 use mp_features::FeatureEngine;
 use mp_sim::{
@@ -55,7 +55,7 @@ fn strategy_named(name: &str) -> Result<Box<dyn Strategy>, String> {
 
 fn engine() -> FeatureEngine {
     let mut e = FeatureEngine::new(1_000_000_000);
-    e.register_tick(|| Box::new(Cvd::new("bybit")));
+    e.register_tick(|| Box::new(Cvd::new(Venue::Bybit)));
     e
 }
 

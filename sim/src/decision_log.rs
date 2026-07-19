@@ -59,7 +59,7 @@ impl DecisionLog {
     pub fn record_feature(&mut self, seq: u64, u: &mp_features::FeatureUpdate) {
         let s = format!(
             "U|{seq}|{}|{:?}|{}|{}|{}|{}",
-            u.feature,
+            u.feature.0,
             u.venue,
             u.symbol.0,
             u.ts_ns,

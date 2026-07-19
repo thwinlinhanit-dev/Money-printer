@@ -41,6 +41,36 @@ impl BinanceNormalizer {
     }
 }
 
+/// REST depth snapshot for Binance (spec 020). Fetched once on WebSocket
+/// connect to seed book state, avoiding synthetic-seeding from the first delta.
+#[cfg(feature = "live-http")]
+pub async fn fetch_depth_snapshot(
+    symbol: &str,
+    limit: u16,
+    is_futures: bool,
+) -> Result<MarketEvent, Box<dyn std::error::Error + Send + Sync>> {
+    let base = if is_futures { "https://fapi.binance.com" } else { "https://api.binance.com" };
+    let url = format!("{base}/fapi/v1/depth?symbol={symbol}&limit={limit}");
+    let resp = reqwest::get(&url).await?;
+    let raw: serde_json::Value = resp.json().await?;
+    let bids = parse_pair_levels(raw.get("bids"))?;
+    let asks = parse_pair_levels(raw.get("asks"))?;
+    let last_update_id = raw.get("lastUpdateId").and_then(|v| v.as_u64()).unwrap_or(0);
+    Ok(MarketEvent::BookSnapshot {
+        bids,
+        asks,
+        seq: last_update_id,
+        depth: limit,
+        reason: SnapshotReason::Init,
+    })
+}
+
+/// Validate delta continuity against a snapshot's lastUpdateId (COL-23).
+/// Returns true if the delta is contiguous with the snapshot, false otherwise.
+pub fn check_delta_continuity(first_delta_u: u64, snapshot_last_update_id: u64) -> bool {
+    first_delta_u == snapshot_last_update_id + 1
+}
+
 impl Normalizer for BinanceNormalizer {
     fn venue(&self) -> Venue {
         Venue::BinanceFutures

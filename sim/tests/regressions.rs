@@ -31,7 +31,7 @@ fn trade(recv: i64, price: f64, qty: f64, side: Side) -> EventEnvelope {
 
 fn engine() -> FeatureEngine {
     let mut e = FeatureEngine::new(1_000_000_000);
-    e.register_tick(|| Box::new(Cvd::new("bybit")));
+    e.register_tick(|| Box::new(Cvd::new(Venue::Bybit)));
     e
 }
 

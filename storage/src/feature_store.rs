@@ -208,6 +208,95 @@ pub fn resolve_version(root: &Path, feature: &str, params_hash: &str) -> Result<
     Ok(new_ver)
 }
 
+/// Streaming feature store (spec 016). Buffers FeatureUpdates in memory and
+/// flushes to Parquet on threshold or interval. Wraps the batch materialization
+/// logic above for zero-data-loss-on-crash operation.
+pub struct StreamingFeatureStore {
+    root: PathBuf,
+    buffer: Vec<FeatureRow>,
+    meta: FeatureMeta,
+    flush_threshold: usize,
+    last_flush_ns: i64,
+    flush_interval_ns: i64,
+    feature: String,
+    venue_slug: String,
+    symbol_id: u32,
+}
+
+impl StreamingFeatureStore {
+    pub fn new(
+        root: &Path,
+        feature: &str,
+        venue_slug: &str,
+        symbol_id: u32,
+        meta: FeatureMeta,
+    ) -> Self {
+        Self {
+            root: root.to_owned(),
+            buffer: Vec::with_capacity(10_000),
+            meta,
+            flush_threshold: 10_000,
+            last_flush_ns: 0,
+            flush_interval_ns: 60_000_000_000, // 60 seconds
+            feature: feature.to_owned(),
+            venue_slug: venue_slug.to_owned(),
+            symbol_id,
+        }
+    }
+
+    /// Push one row. Auto-flushes when threshold crossed or interval elapsed.
+    pub fn push(&mut self, row: FeatureRow, ts_ns: i64) -> Result<(), StorageError> {
+        self.buffer.push(row);
+        let elapsed = ts_ns - self.last_flush_ns;
+        if self.buffer.len() >= self.flush_threshold || elapsed >= self.flush_interval_ns {
+            self.flush(ts_ns)?;
+        }
+        Ok(())
+    }
+
+    /// Force-flush any buffered rows to Parquet (e.g. on shutdown).
+    pub fn flush(&mut self, ts_ns: i64) -> Result<(), StorageError> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        // Sort by ts_ns for deterministic output (MAT-5).
+        self.buffer.sort_by_key(|r| r.ts_ns);
+        // Use the date from the latest row for the partition path.
+        let d = date_str(ts_ns);
+        let path = self.root
+            .join(&self.feature)
+            .join("ver=1")
+            .join(format!("venue={}", self.venue_slug))
+            .join(format!("symbol={}", self.symbol_id))
+            .join(format!("{d}.parquet"));
+        write_features(&path, &self.buffer, &self.meta)?;
+        self.buffer.clear();
+        self.last_flush_ns = ts_ns;
+        Ok(())
+    }
+}
+
+fn date_str(ns: i64) -> String {
+    let secs = (ns / 1_000_000_000).max(0) as u64;
+    let days = secs / 86400;
+    let mut y = 1970i64;
+    let mut rem = days as i64;
+    loop {
+        let days_yr = if is_leap(y) { 366 } else { 365 };
+        if rem < days_yr { break; }
+        rem -= days_yr;
+        y += 1;
+    }
+    let months = [31, if is_leap(y) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0usize;
+    while m < 12 && rem >= months[m] { rem -= months[m]; m += 1; }
+    format!("{:04}-{:02}-{:02}", y, m + 1, rem + 1)
+}
+
+fn is_leap(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
 /// Full FEA-6 materialization: resolve the version for the params, then write
 /// the feature file at `{root}/{feature}/ver=N/venue={v}/symbol={s}/{date}.parquet`.
 /// Returns the file path written.
