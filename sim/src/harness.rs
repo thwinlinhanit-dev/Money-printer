@@ -7,9 +7,10 @@
 //! resampled DD distribution is reproducible from its seed.
 
 use mp_core::{EventEnvelope, SplitMix64};
+use std::collections::BTreeMap;
 
 /// A compact, copyable snapshot of one run's metrics for cross-window tables.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MetricsSummary {
     pub trades: u64,
     pub expectancy: f64,
@@ -35,7 +36,38 @@ pub struct WindowResult {
     pub oos: MetricsSummary,
 }
 
-fn slice_by_recv(events: &[EventEnvelope], start_ns: i64, end_ns: i64) -> &[EventEnvelope] {
+/// Generate the cartesian product of all param grid values.
+/// Each element is a param_name→value map for one grid point.
+pub fn param_combinations(grid: &BTreeMap<String, Vec<f64>>) -> Vec<BTreeMap<String, f64>> {
+    let mut out = Vec::new();
+    if grid.is_empty() {
+        out.push(BTreeMap::new());
+        return out;
+    }
+    let keys: Vec<&String> = grid.keys().collect();
+    fn recurse(
+        keys: &[&String],
+        grid: &BTreeMap<String, Vec<f64>>,
+        idx: usize,
+        cur: &mut BTreeMap<String, f64>,
+        out: &mut Vec<BTreeMap<String, f64>>,
+    ) {
+        if idx == keys.len() {
+            out.push(cur.clone());
+            return;
+        }
+        for v in &grid[keys[idx]] {
+            cur.insert(keys[idx].clone(), *v);
+            recurse(keys, grid, idx + 1, cur, out);
+            cur.remove(keys[idx]);
+        }
+    }
+    recurse(&keys, grid, 0, &mut BTreeMap::new(), &mut out);
+    out
+}
+
+/// Slice events by reception-time range [start_ns, end_ns).
+pub fn slice_by_recv(events: &[EventEnvelope], start_ns: i64, end_ns: i64) -> &[EventEnvelope] {
     // Events are in global recv order (SIM-1), so a contiguous window is a
     // sub-slice found by the first/last index in `[start, end)`.
     let lo = events.partition_point(|e| e.recv_ts_ns < start_ns);

@@ -35,6 +35,26 @@ impl TickFeature for Cvd {
     }
 }
 
+/// `funding.rate` — passthrough of funding rate events (any venue).
+pub struct FundingRate;
+impl FundingRate {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl TickFeature for FundingRate {
+    fn id(&self) -> String {
+        "funding.rate".into()
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if let MarketEvent::Funding { rate, .. } = ev.body {
+            Some(rate)
+        } else {
+            None
+        }
+    }
+}
+
 /// `whale_print.{venue}` — signed notional for trades ≥ `floor_usd` on one venue.
 /// Default venue is Hyperliquid (large prints / liquidations edge on HL tape).
 pub struct WhalePrint {

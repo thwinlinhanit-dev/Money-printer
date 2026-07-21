@@ -16,12 +16,13 @@
 
 use mp_core::log::LogReader;
 use mp_core::{EventEnvelope, Venue};
-use mp_features::catalog::Cvd;
+use mp_features::catalog::{Cvd, FundingRate};
 use mp_features::FeatureEngine;
 use mp_sim::{
-    monte_carlo, plateau_ok, walk_forward, Backtester, RunRecord, SimConfig, WalkForwardParams,
+    monte_carlo, plateau_ok, Backtester, MetricsSummary, RunRecord, SimConfig, WalkForwardParams,
+    WindowResult,
 };
-use mp_strategies::{CoinFlipStrategy, NullStrategy, Strategy};
+use mp_strategies::{CarryV1, CarryConfig, CoinFlipStrategy, NullStrategy, Strategy, Universe};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -45,17 +46,57 @@ fn read_log(path: &str) -> Result<Vec<EventEnvelope>, String> {
     Ok(out)
 }
 
-fn strategy_named(name: &str) -> Result<Box<dyn Strategy>, String> {
+fn universe_from_events(events: &[EventEnvelope]) -> Universe {
+    let mut venues = Vec::new();
+    let mut symbols = Vec::new();
+    for ev in events {
+        if !venues.contains(&ev.venue) {
+            venues.push(ev.venue);
+        }
+        if !symbols.contains(&ev.symbol) {
+            symbols.push(ev.symbol);
+        }
+        if venues.len() > 3 && symbols.len() > 5 {
+            break;
+        }
+    }
+    Universe { venues, symbols }
+}
+
+fn strategy_named(
+    name: &str,
+    events: &[EventEnvelope],
+    entry_threshold: Option<f64>,
+    exit_threshold: Option<f64>,
+) -> Result<Box<dyn Strategy>, String> {
     match name {
         "coinflip" => Ok(Box::new(CoinFlipStrategy::new())),
         "null" => Ok(Box::new(NullStrategy)),
-        other => Err(format!("unknown strategy: {other} (coinflip|null)")),
+        "carry-v1" => {
+            let uni = universe_from_events(events);
+            let mut cfg = CarryConfig::default();
+            if let Some(et) = entry_threshold {
+                cfg.entry_threshold = et;
+            }
+            if let Some(xt) = exit_threshold {
+                cfg.exit_threshold = xt;
+            } else if entry_threshold.is_some() {
+                cfg.exit_threshold = entry_threshold.unwrap() * 0.2;
+            }
+            Ok(Box::new(CarryV1::new(
+                mp_core::StrategyId::new("carry-v1"),
+                uni,
+                cfg,
+            )))
+        }
+        other => Err(format!("unknown strategy: {other} (coinflip|null|carry-v1)")),
     }
 }
 
 fn engine() -> FeatureEngine {
     let mut e = FeatureEngine::new(1_000_000_000);
     e.register_tick(|| Box::new(Cvd::new(Venue::Bybit)));
+    e.register_tick(|| Box::new(FundingRate::new()));
     e
 }
 
@@ -64,11 +105,18 @@ fn run_backtest(
     strategy: &str,
     seed: u64,
     coverage: f64,
+    carry_entry: Option<f64>,
+    carry_exit: Option<f64>,
 ) -> Result<Backtester, String> {
+    let mut cfg = SimConfig::default();
+    cfg.min_coverage = coverage;
+    cfg.bar_tf_ns = 1_000_000;
+    cfg.latency_ns = 0;
+    cfg.fill_model = mp_sim::FillModel::L0BarFill;
     let mut bt = Backtester::new(
         engine(),
-        strategy_named(strategy)?,
-        SimConfig::default(),
+        strategy_named(strategy, events, carry_entry, carry_exit)?,
+        cfg,
         seed,
     );
     bt.run_checked(events, coverage)
@@ -92,7 +140,13 @@ fn run() -> Result<ExitCode, String> {
             let coverage: f64 = flag(rest, "--coverage")
                 .map_or(Ok(1.0), |c| c.parse())
                 .map_err(|_| "bad --coverage")?;
-            let bt = run_backtest(&events, &strategy, seed, coverage)?;
+            let carry_entry: Option<f64> = flag(rest, "--carry-entry")
+                .map(|v| v.parse().map_err(|_| "bad --carry-entry"))
+                .transpose()?;
+            let carry_exit: Option<f64> = flag(rest, "--carry-exit")
+                .map(|v| v.parse().map_err(|_| "bad --carry-exit"))
+                .transpose()?;
+            let bt = run_backtest(&events, &strategy, seed, coverage, carry_entry, carry_exit)?;
 
             // Tracker record (SIM-10): reproducible from the index alone.
             let run_id = need(rest, "--run-id")?;
@@ -146,33 +200,70 @@ fn run() -> Result<ExitCode, String> {
                     .parse()
                     .map_err(|_| "bad --step-ns")?,
             };
-            let mut err = None;
-            let windows = walk_forward(&events, p, |_train, test| {
-                match run_backtest(test, &strategy, seed, 1.0) {
-                    Ok(bt) => bt.summary(),
-                    Err(e) => {
-                        err.get_or_insert(e);
-                        mp_sim::MetricsSummary {
-                            trades: 0,
-                            expectancy: 0.0,
-                            stress_expectancy_2x: 0.0,
-                            max_drawdown: 0.0,
-                        }
+            // Build default strategy to read its param grid
+            let default_strat = strategy_named(&strategy, &events, None, None)?;
+            let param_space = default_strat.params();
+            let combos = mp_sim::param_combinations(&param_space.grid);
+            println!("param_grid: {} combos from {:?}", combos.len(), param_space.grid.keys().collect::<Vec<_>>());
+
+            // Base sim config (same as run_backtest)
+            let mut base_cfg = SimConfig::default();
+            base_cfg.min_coverage = 1.0;
+            base_cfg.bar_tf_ns = 1_000_000;
+            base_cfg.latency_ns = 0;
+            base_cfg.fill_model = mp_sim::FillModel::L0BarFill;
+
+            let first = events[0].recv_ts_ns;
+            let last = events[events.len() - 1].recv_ts_ns;
+            let mut train_start = first;
+            let mut windows = Vec::new();
+            while train_start + p.train_ns + p.test_ns <= last + 1 {
+                let test_start = train_start + p.train_ns;
+                let test_end = test_start + p.test_ns;
+                let train = mp_sim::slice_by_recv(&events, train_start, test_start);
+                let test = mp_sim::slice_by_recv(&events, test_start, test_end);
+
+                // Grid search on train — pick params with best in-sample expectancy
+                let mut best_exp = f64::NEG_INFINITY;
+                let mut best_params = None;
+                for combo in &combos {
+                    let strat = default_strat.with_params(combo);
+                    let mut bt = Backtester::new(engine(), strat, base_cfg, seed);
+                    if bt.run_checked(train, 1.0).is_err() { continue; }
+                    let exp = bt.summary().expectancy;
+                    if exp > best_exp {
+                        best_exp = exp;
+                        best_params = Some(combo.clone());
                     }
                 }
-            });
-            if let Some(e) = err {
-                return Err(e);
-            }
-            for w in &windows {
+
+                // Run best params on test (OOS)
+                let oos = if let Some(ref bp) = best_params {
+                    let strat = default_strat.with_params(bp);
+                    let mut bt = Backtester::new(engine(), strat, base_cfg, seed);
+                    match bt.run_checked(test, 1.0) {
+                        Ok(()) => bt.summary(),
+                        Err(e) => {
+                            eprintln!("OOS run failed: {e}");
+                            MetricsSummary::default()
+                        }
+                    }
+                } else {
+                    eprintln!("no train window succeeded");
+                    MetricsSummary::default()
+                };
+
                 println!(
-                    "window test=[{},{}): trades={} oos_expectancy={:+.6} stress2x={:+.6}",
-                    w.test_start_ns,
-                    w.test_end_ns,
-                    w.oos.trades,
-                    w.oos.expectancy,
-                    w.oos.stress_expectancy_2x
+                    "window test=[{},{}): in_exp={:+.6} best_params={:?} oos_trades={} oos_exp={:+.6} oos_stress2x={:+.6}",
+                    test_start, test_end, best_exp, best_params, oos.trades, oos.expectancy, oos.stress_expectancy_2x
                 );
+                windows.push(WindowResult {
+                    train_start_ns: train_start,
+                    test_start_ns: test_start,
+                    test_end_ns: test_end,
+                    oos,
+                });
+                train_start += p.step_ns;
             }
             println!("windows={}", windows.len());
             Ok(ExitCode::SUCCESS)
@@ -207,11 +298,20 @@ fn run() -> Result<ExitCode, String> {
             let resamples: u32 = flag(rest, "--resamples")
                 .map_or(Ok(1000), |r| r.parse())
                 .map_err(|_| "bad --resamples")?;
-            let bt = run_backtest(&events, &strategy, seed, 1.0)?;
-            let mc = monte_carlo(bt.trade_pnls(), resamples, seed, 86_400_000_000_000);
+            let block_ns: i64 = flag(rest, "--block-ns")
+                .map_or(Ok(86_400_000_000_000), |b| b.parse())
+                .map_err(|_| "bad --block-ns")?;
+            let carry_entry: Option<f64> = flag(rest, "--carry-entry")
+                .map(|v| v.parse().map_err(|_| "bad --carry-entry"))
+                .transpose()?;
+            let carry_exit: Option<f64> = flag(rest, "--carry-exit")
+                .map(|v| v.parse().map_err(|_| "bad --carry-exit"))
+                .transpose()?;
+            let bt = run_backtest(&events, &strategy, seed, 1.0, carry_entry, carry_exit)?;
+            let mc = monte_carlo(bt.trade_pnls(), resamples, seed, block_ns);
             println!(
-                "mc: resamples={} p50_maxDD={:.4} p95_maxDD={:.4} worst={:.4}",
-                mc.resamples, mc.p50_max_dd, mc.p95_max_dd, mc.worst_max_dd
+                "mc: resamples={} block_ns={} p50_maxDD={:.4} p95_maxDD={:.4} worst={:.4}",
+                mc.resamples, block_ns, mc.p50_max_dd, mc.p95_max_dd, mc.worst_max_dd
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -220,8 +320,8 @@ fn run() -> Result<ExitCode, String> {
             let replay = read_log(&need(rest, "--log-b")?)?;
             let strategy = need(rest, "--strategy")?;
             let seed: u64 = need(rest, "--seed")?.parse().map_err(|_| "bad --seed")?;
-            let a = run_backtest(&live, &strategy, seed, 1.0)?;
-            let b = run_backtest(&replay, &strategy, seed, 1.0)?;
+            let a = run_backtest(&live, &strategy, seed, 1.0, None, None)?;
+            let b = run_backtest(&replay, &strategy, seed, 1.0, None, None)?;
             match a.decision_log().first_divergence(b.decision_log()) {
                 None => {
                     println!(

@@ -29,6 +29,9 @@ impl Strategy for NullStrategy {
     fn on_feature(&mut self, _u: &FeatureUpdate, _ctx: &mut dyn Ctx) -> Vec<OrderIntent> {
         Vec::new()
     }
+    fn with_params(&self, _params: &std::collections::BTreeMap<String, f64>) -> Box<dyn Strategy> {
+        Box::new(NullStrategy)
+    }
 }
 
 /// Trades a market order on a seeded coin flip. No edge — its purpose is to be
@@ -79,5 +82,8 @@ impl Strategy for CoinFlipStrategy {
             reduce_only: false,
             tag: "coinflip".into(),
         }]
+    }
+    fn with_params(&self, _params: &std::collections::BTreeMap<String, f64>) -> Box<dyn Strategy> {
+        Box::new(CoinFlipStrategy::new())
     }
 }

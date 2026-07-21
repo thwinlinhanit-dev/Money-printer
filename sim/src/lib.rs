@@ -30,8 +30,8 @@ pub use error::SimError;
 pub use fills::{FillModel, FillOptimism};
 pub use gates::{evaluate_g1, G1Params, G1Result};
 pub use harness::{
-    monte_carlo, plateau_ok, walk_forward, McResult, MetricsSummary, WalkForwardParams,
-    WindowResult,
+    monte_carlo, param_combinations, plateau_ok, slice_by_recv, walk_forward, McResult,
+    MetricsSummary, WalkForwardParams, WindowResult,
 };
 pub use metrics::Metrics;
 pub use tracker::{content_hash, RunRecord};

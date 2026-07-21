@@ -75,6 +75,12 @@ impl Strategy for Scripted {
             tag: "scripted".into(),
         }]
     }
+    fn with_params(&self, _params: &std::collections::BTreeMap<String, f64>) -> Box<dyn Strategy> {
+        Box::new(Scripted {
+            script: self.script.clone(),
+            next: 0,
+        })
+    }
 }
 
 /// Audit bug 1: expectancy was computed GROSS of fees while the metrics doc

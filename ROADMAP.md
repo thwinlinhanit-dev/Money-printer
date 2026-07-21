@@ -24,5 +24,6 @@ evidence links).
 - New ideas do not jump the queue: they enter `docs/BACKLOG.md`, get a spec,
   then get built. (This file changes rarely; the backlog changes often.)
 
-**Current status:** pre-Phase-0. Next action: run the `bootstrap-workspace`
-skill, then `implement-spec` for spec 001, then 002 (Bybit).
+**Current status:** Phase 0 in progress — workspace + collectors + sim/research
+stack built; live Binance Futures recorder running (BTCUSDT). Validation gate
+(7 clean multi-symbol days, manifests ≥ 0.995) not yet met. Capital at risk: $0.

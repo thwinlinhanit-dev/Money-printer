@@ -110,8 +110,9 @@ impl CarryV1 {
                     || now_ns - entry_ts_ns > self.config.max_hold_ns
                     || cumulative_funding.abs() > self.config.max_adverse_funding
                 {
+                    let exit_side = match direction { Side::Buy => Side::Sell, Side::Sell => Side::Buy };
                     self.state = CarryState::ExitSignaled;
-                    return vec![self.make_intent(direction, "carry-v1 exit")];
+                    return vec![self.make_intent(exit_side, "carry-v1 exit")];
                 }
                 Vec::new()
             }
@@ -171,6 +172,13 @@ impl Strategy for CarryV1 {
         p.grid.insert("entry_threshold".into(), vec![0.00005, 0.0001, 0.0002]);
         p.grid.insert("exit_threshold".into(), vec![0.00001, 0.00002, 0.00005]);
         p
+    }
+
+    fn with_params(&self, params: &std::collections::BTreeMap<String, f64>) -> Box<dyn Strategy> {
+        let mut cfg = self.config;
+        if let Some(&v) = params.get("entry_threshold") { cfg.entry_threshold = v; }
+        if let Some(&v) = params.get("exit_threshold") { cfg.exit_threshold = v; }
+        Box::new(CarryV1::new(self.id.clone(), self.universe.clone(), cfg))
     }
 }
 

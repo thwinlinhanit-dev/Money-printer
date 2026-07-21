@@ -10,7 +10,9 @@ mod inner {
     use mp_collectors::{Backoff, Collector, CollectorConfig, DriveOutcome, Normalizer};
     use mp_core::log::EventLogWriter;
     use mp_core::{EventEnvelope, Venue};
-    use std::path::Path;
+    use std::fs::{File, OpenOptions};
+    use std::io::{self, Write};
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn flag(args: &[String], name: &str) -> Option<String> {
@@ -21,6 +23,87 @@ mod inner {
 
     fn has_flag(args: &[String], name: &str) -> bool {
         args.iter().any(|a| a == name)
+    }
+
+    /// Process-lifetime exclusive lock so two collectors cannot write the same
+    /// `{venue}_{symbol}` log. Held open for the whole run; released on exit.
+    struct InstanceLock {
+        _file: File,
+        path: PathBuf,
+    }
+
+    impl InstanceLock {
+        fn acquire(raw_dir: &Path, venue: &str, symbol: &str) -> io::Result<Self> {
+            std::fs::create_dir_all(raw_dir)?;
+            let path = raw_dir.join(format!(".lock_{venue}_{symbol}"));
+            let mut file = exclusive_lock_file(&path).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "another mp-collector already owns {venue}/{symbol} \
+                         (lock {}): {e}",
+                        path.display()
+                    ),
+                )
+            })?;
+            let _ = writeln!(file, "pid={} venue={venue} symbol={symbol}", std::process::id());
+            let _ = file.flush();
+            Ok(Self { _file: file, path })
+        }
+    }
+
+    impl Drop for InstanceLock {
+        fn drop(&mut self) {
+            // Best-effort cleanup; exclusive handle release is the real unlock.
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn exclusive_lock_file(path: &Path) -> io::Result<File> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // share_mode(0) = exclusive; second process gets ERROR_SHARING_VIOLATION.
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .share_mode(0)
+                .open(path)
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // O_EXCL|O_CREAT when missing; if exists, try open + fail if stale
+            // not recoverable without flock — remove stale only if create_new works
+            // after a failed exclusive create by rewriting via create_new on a
+            // temp and rename is racy. Prefer: open existing exclusive via
+            // flock(LOCK_EX|LOCK_NB) using libc when available; without libc,
+            // use create_new and refuse if the file already exists (operator
+            // deletes stale lock after crash).
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .open(path)
+            {
+                Ok(f) => Ok(f),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "lock file exists — another collector is running, or a stale \
+                     lock remains after a crash (delete the .lock_* file if sure)",
+                )),
+                Err(e) => Err(e),
+            }
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+        }
     }
 
     fn utc_date_str() -> String {
@@ -80,8 +163,10 @@ mod inner {
             )],
             "binance" => {
                 let s = symbol.to_lowercase();
+                // Futures streams: trades, L2 depth, mark+funding (1s), liquidations.
+                // OI is REST-only on Binance — enable whale (HL) or a future REST poller.
                 vec![format!(
-                    r#"{{"method":"SUBSCRIBE","params":["{s}@aggTrade","{s}@markPrice@1s","{s}@depth@100ms"],"id":1}}"#
+                    r#"{{"method":"SUBSCRIBE","params":["{s}@aggTrade","{s}@markPrice@1s","{s}@depth@100ms","{s}@forceOrder"],"id":1}}"#
                 )]
             }
             "hyperliquid" => {
@@ -216,6 +301,9 @@ mod inner {
 
         let raw_dir = Path::new("data").join("raw");
         std::fs::create_dir_all(&raw_dir)?;
+        // Held for process lifetime — prevents dual-writer log corruption.
+        let _instance_lock = InstanceLock::acquire(&raw_dir, &venue, &symbol)?;
+        tracing::info!(venue = %venue, symbol = %symbol, "instance lock acquired");
 
         let mut current_date = String::new();
         let mut log_writer: Option<EventLogWriter> = None;

@@ -85,4 +85,9 @@ pub trait Strategy {
     fn params(&self) -> ParamSpace {
         ParamSpace::default()
     }
+
+    /// Return a new instance with the given walk-forward param overrides.
+    /// Default impl: returns a new instance with default params (override for
+    /// strategies that have a param grid).
+    fn with_params(&self, _params: &BTreeMap<String, f64>) -> Box<dyn Strategy>;
 }

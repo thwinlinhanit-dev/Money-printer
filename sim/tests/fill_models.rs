@@ -117,6 +117,14 @@ impl Strategy for OneShot {
             tag: "oneshot".into(),
         }]
     }
+    fn with_params(&self, _params: &std::collections::BTreeMap<String, f64>) -> Box<dyn Strategy> {
+        Box::new(OneShot {
+            fired: false,
+            kind: self.kind,
+            side: self.side,
+            qty: self.qty,
+        })
+    }
 }
 
 fn cfg(fill_model: FillModel) -> SimConfig {
