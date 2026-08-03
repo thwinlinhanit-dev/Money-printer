@@ -22,7 +22,7 @@ use mp_sim::{
     monte_carlo, plateau_ok, Backtester, MetricsSummary, RunRecord, SimConfig, WalkForwardParams,
     WindowResult,
 };
-use mp_strategies::{CarryV1, CarryConfig, CoinFlipStrategy, NullStrategy, Strategy, Universe};
+use mp_strategies::{CarryConfig, CarryV1, CoinFlipStrategy, NullStrategy, Strategy, Universe};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -89,7 +89,9 @@ fn strategy_named(
                 cfg,
             )))
         }
-        other => Err(format!("unknown strategy: {other} (coinflip|null|carry-v1)")),
+        other => Err(format!(
+            "unknown strategy: {other} (coinflip|null|carry-v1)"
+        )),
     }
 }
 
@@ -204,7 +206,11 @@ fn run() -> Result<ExitCode, String> {
             let default_strat = strategy_named(&strategy, &events, None, None)?;
             let param_space = default_strat.params();
             let combos = mp_sim::param_combinations(&param_space.grid);
-            println!("param_grid: {} combos from {:?}", combos.len(), param_space.grid.keys().collect::<Vec<_>>());
+            println!(
+                "param_grid: {} combos from {:?}",
+                combos.len(),
+                param_space.grid.keys().collect::<Vec<_>>()
+            );
 
             // Base sim config (same as run_backtest)
             let mut base_cfg = SimConfig::default();
@@ -229,7 +235,9 @@ fn run() -> Result<ExitCode, String> {
                 for combo in &combos {
                     let strat = default_strat.with_params(combo);
                     let mut bt = Backtester::new(engine(), strat, base_cfg, seed);
-                    if bt.run_checked(train, 1.0).is_err() { continue; }
+                    if bt.run_checked(train, 1.0).is_err() {
+                        continue;
+                    }
                     let exp = bt.summary().expectancy;
                     if exp > best_exp {
                         best_exp = exp;

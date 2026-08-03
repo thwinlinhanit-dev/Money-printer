@@ -82,8 +82,8 @@ impl Default for CarryConfig {
             z_flip: 2.0,
             z_window: 24,
             z_min_obs: 8,
-            vol_target: 0.15,        // 15% annualized
-            max_gross_exposure: 0.1, // 10% of portfolio
+            vol_target: 0.15,                         // 15% annualized
+            max_gross_exposure: 0.1,                  // 10% of portfolio
             max_hold_ns: 14 * 86_400 * 1_000_000_000, // 14 days
             max_adverse_funding: 0.02,
             signal_timeout_ns: 60 * 1_000_000_000, // 60 seconds
@@ -125,7 +125,9 @@ struct FundingState {
 
 impl FundingState {
     fn new() -> Self {
-        Self { rates: VecDeque::new() }
+        Self {
+            rates: VecDeque::new(),
+        }
     }
 
     fn push(&mut self, rate: f64, window: usize) {
@@ -187,7 +189,13 @@ impl CarryV1 {
         (self.config.vol_target / PER_RISK_UNIT_PCT).clamp(1.0, self.config.max_risk_units)
     }
 
-    fn make_intent(&mut self, venue: Venue, symbol: SymbolId, side: Side, tag: &str) -> OrderIntent {
+    fn make_intent(
+        &mut self,
+        venue: Venue,
+        symbol: SymbolId,
+        side: Side,
+        tag: &str,
+    ) -> OrderIntent {
         let iid = self.next_intent;
         self.next_intent += 1;
         OrderIntent {
@@ -312,11 +320,21 @@ impl CarryV1 {
 }
 
 impl Strategy for CarryV1 {
-    fn id(&self) -> StrategyId { self.id.clone() }
-    fn universe(&self) -> Universe { self.universe.clone() }
-    fn subscriptions(&self) -> Vec<String> { vec!["funding.*".into()] }
-    fn warmup_ns(&self) -> i64 { 60_000_000_000 }
-    fn declared_regime(&self) -> RegimeMask { RegimeMask::of(&["chop", "range-bound"]) }
+    fn id(&self) -> StrategyId {
+        self.id.clone()
+    }
+    fn universe(&self) -> Universe {
+        self.universe.clone()
+    }
+    fn subscriptions(&self) -> Vec<String> {
+        vec!["funding.*".into()]
+    }
+    fn warmup_ns(&self) -> i64 {
+        60_000_000_000
+    }
+    fn declared_regime(&self) -> RegimeMask {
+        RegimeMask::of(&["chop", "range-bound"])
+    }
 
     fn on_feature(&mut self, u: &FeatureUpdate, ctx: &mut dyn Ctx) -> Vec<OrderIntent> {
         // Audit C1: this strategy trades funding — never interpret any other
@@ -325,12 +343,20 @@ impl Strategy for CarryV1 {
         if !u.name.starts_with("funding.") {
             return Vec::new();
         }
-        let venue = self.universe.venues.first().copied().unwrap_or(Venue::Hyperliquid);
+        let venue = self
+            .universe
+            .venues
+            .first()
+            .copied()
+            .unwrap_or(Venue::Hyperliquid);
         if u.venue != venue || !self.universe.symbols.contains(&u.symbol) {
             return Vec::new();
         }
         let (z, warm) = {
-            let st = self.funding.entry((u.venue, u.symbol)).or_insert_with(FundingState::new);
+            let st = self
+                .funding
+                .entry((u.venue, u.symbol))
+                .or_insert_with(FundingState::new);
             // z is the new observation's extreme-ness against the PRIOR
             // window — push after computing, or the point is its own baseline.
             let z = st.z(u.value);
@@ -374,17 +400,25 @@ impl Strategy for CarryV1 {
 
     fn params(&self) -> ParamSpace {
         let mut p = ParamSpace::default();
-        p.grid.insert("entry_threshold".into(), vec![0.00005, 0.0001, 0.0002]);
-        p.grid.insert("exit_threshold".into(), vec![0.00001, 0.00002, 0.00005]);
+        p.grid
+            .insert("entry_threshold".into(), vec![0.00005, 0.0001, 0.0002]);
+        p.grid
+            .insert("exit_threshold".into(), vec![0.00001, 0.00002, 0.00005]);
         p.grid.insert("z_entry".into(), vec![1.5, 2.0, 2.5]);
         p
     }
 
     fn with_params(&self, params: &std::collections::BTreeMap<String, f64>) -> Box<dyn Strategy> {
         let mut cfg = self.config;
-        if let Some(&v) = params.get("entry_threshold") { cfg.entry_threshold = v; }
-        if let Some(&v) = params.get("exit_threshold") { cfg.exit_threshold = v; }
-        if let Some(&v) = params.get("z_entry") { cfg.z_entry = v; }
+        if let Some(&v) = params.get("entry_threshold") {
+            cfg.entry_threshold = v;
+        }
+        if let Some(&v) = params.get("exit_threshold") {
+            cfg.exit_threshold = v;
+        }
+        if let Some(&v) = params.get("z_entry") {
+            cfg.z_entry = v;
+        }
         Box::new(CarryV1::new(self.id.clone(), self.universe.clone(), cfg))
     }
 }
@@ -394,13 +428,28 @@ mod tests {
     use super::*;
     use crate::strategy::{Ctx, TimerId};
 
-    struct TestCtx { now: i64, equity: f64, count: u64 }
+    struct TestCtx {
+        now: i64,
+        equity: f64,
+        count: u64,
+    }
     impl Ctx for TestCtx {
-        fn now_ns(&self) -> i64 { self.now }
-        fn position(&self, _: SymbolId) -> f64 { 0.0 }
-        fn equity_allocated(&self) -> f64 { self.equity }
-        fn next_u64(&mut self) -> u64 { self.count += 1; self.count }
-        fn set_timer(&mut self, _: i64) -> TimerId { TimerId(0) }
+        fn now_ns(&self) -> i64 {
+            self.now
+        }
+        fn position(&self, _: SymbolId) -> f64 {
+            0.0
+        }
+        fn equity_allocated(&self) -> f64 {
+            self.equity
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.count += 1;
+            self.count
+        }
+        fn set_timer(&mut self, _: i64) -> TimerId {
+            TimerId(0)
+        }
         fn log(&mut self, _: &str) {}
     }
 
@@ -431,7 +480,10 @@ mod tests {
     fn strat() -> CarryV1 {
         CarryV1::new(
             StrategyId::new("carry-v1"),
-            Universe { venues: vec![Venue::Hyperliquid], symbols: vec![SymbolId(1)] },
+            Universe {
+                venues: vec![Venue::Hyperliquid],
+                symbols: vec![SymbolId(1)],
+            },
             CarryConfig::default(),
         )
     }
@@ -439,10 +491,21 @@ mod tests {
     #[test]
     fn str_9_carry_emits_intent_on_funding_extreme() {
         let mut s = strat();
-        let mut ctx = TestCtx { now: 1_000_000_000, equity: 1_000_000.0, count: 0 };
+        let mut ctx = TestCtx {
+            now: 1_000_000_000,
+            equity: 1_000_000.0,
+            count: 0,
+        };
         // Warm the window with sub-threshold ticks before the extreme.
-        for (i, r) in [0.00001, 0.00002, 0.00001, 0.00002, 0.00001, 0.00002, 0.00001, 0.00002].iter().enumerate() {
-            assert!(s.on_feature(&make_update(*r, 1_000_000_000 + i as i64), &mut ctx).is_empty());
+        for (i, r) in [
+            0.00001, 0.00002, 0.00001, 0.00002, 0.00001, 0.00002, 0.00001, 0.00002,
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(s
+                .on_feature(&make_update(*r, 1_000_000_000 + i as i64), &mut ctx)
+                .is_empty());
         }
         let intents = s.on_feature(&make_update(0.0002, 2_000_000_000), &mut ctx);
         assert!(!intents.is_empty(), "should emit entry intent");
@@ -453,7 +516,14 @@ mod tests {
     #[test]
     fn str_10_carry_exits_on_normalization() {
         let mut s = strat();
-        s.on_feature(&make_update(0.0002, 1_000_000_000), &mut TestCtx { now: 1_000_000_000, equity: 1_000_000.0, count: 0 });
+        s.on_feature(
+            &make_update(0.0002, 1_000_000_000),
+            &mut TestCtx {
+                now: 1_000_000_000,
+                equity: 1_000_000.0,
+                count: 0,
+            },
+        );
         s.state = CarryState::Entered {
             venue: Venue::Hyperliquid,
             symbol: SymbolId(1),
@@ -462,7 +532,11 @@ mod tests {
             entry_ts_ns: 1_000_000_000,
             cumulative_funding: 0.0,
         };
-        let mut ctx = TestCtx { now: 2_000_000_000, equity: 1_000_000.0, count: 0 };
+        let mut ctx = TestCtx {
+            now: 2_000_000_000,
+            equity: 1_000_000.0,
+            count: 0,
+        };
         let exit = s.on_feature(&make_update(0.00001, 2_000_000_000), &mut ctx);
         assert!(!exit.is_empty(), "should exit on normalization");
         assert_eq!(exit[0].tag, "carry-v1 exit");
@@ -471,12 +545,26 @@ mod tests {
     #[test]
     fn str_11_carry_enters_on_negative_funding() {
         let mut s = strat();
-        let mut ctx = TestCtx { now: 1_000_000_000, equity: 1_000_000.0, count: 0 };
-        for (i, r) in [-0.00001, -0.00002, -0.00001, -0.00002, -0.00001, -0.00002, -0.00001, -0.00002].iter().enumerate() {
-            assert!(s.on_feature(&make_update(*r, 1_000_000_000 + i as i64), &mut ctx).is_empty());
+        let mut ctx = TestCtx {
+            now: 1_000_000_000,
+            equity: 1_000_000.0,
+            count: 0,
+        };
+        for (i, r) in [
+            -0.00001, -0.00002, -0.00001, -0.00002, -0.00001, -0.00002, -0.00001, -0.00002,
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(s
+                .on_feature(&make_update(*r, 1_000_000_000 + i as i64), &mut ctx)
+                .is_empty());
         }
         let intents = s.on_feature(&make_update(-0.0002, 2_000_000_000), &mut ctx);
-        assert!(!intents.is_empty(), "should emit entry intent for negative funding");
+        assert!(
+            !intents.is_empty(),
+            "should emit entry intent for negative funding"
+        );
         assert_eq!(intents[0].side, Side::Buy); // negative funding → long
     }
 
@@ -485,9 +573,16 @@ mod tests {
         // Audit C1: a CVD (or any non-funding) update with an extreme value
         // must never be read as a funding rate.
         let mut s = strat();
-        let mut ctx = TestCtx { now: 1_000_000_000, equity: 1_000_000.0, count: 0 };
+        let mut ctx = TestCtx {
+            now: 1_000_000_000,
+            equity: 1_000_000.0,
+            count: 0,
+        };
         let intents = s.on_feature(&make_any_update(0.0002, "cvd.net_volume"), &mut ctx);
-        assert!(intents.is_empty(), "non-funding feature must not trigger carry");
+        assert!(
+            intents.is_empty(),
+            "non-funding feature must not trigger carry"
+        );
         assert_eq!(s.state, CarryState::Idle);
     }
 
@@ -496,11 +591,18 @@ mod tests {
         // Warm window (8 ticks, mean ≈ 0.00025, σ ≈ 5.3e-5): a 0.0005 rate is
         // |z| ≈ 4.7 ≥ z_entry (2.0) → entry. A 0.0003 rate (|z| ≈ 0.9) → none.
         let mut s = strat();
-        let mut ctx = TestCtx { now: 1_000_000_000, equity: 1_000_000.0, count: 0 };
-        let warm = [0.0002, 0.0003, 0.0002, 0.0003, 0.0002, 0.0003, 0.0002, 0.0003];
+        let mut ctx = TestCtx {
+            now: 1_000_000_000,
+            equity: 1_000_000.0,
+            count: 0,
+        };
+        let warm = [
+            0.0002, 0.0003, 0.0002, 0.0003, 0.0002, 0.0003, 0.0002, 0.0003,
+        ];
         for (i, r) in warm.iter().enumerate() {
             assert!(
-                s.on_feature(&make_update(*r, 1_000_000_000 + i as i64 * 1000), &mut ctx).is_empty(),
+                s.on_feature(&make_update(*r, 1_000_000_000 + i as i64 * 1000), &mut ctx)
+                    .is_empty(),
                 "warmup ticks must not enter"
             );
         }
@@ -517,34 +619,56 @@ mod tests {
     fn str_14_carry_adverse_funding_accrues_and_stops() {
         // Audit C1: the funding stop must be live. A short (Sell) pays when
         // rate < 0; two -0.012 updates exceed max_adverse_funding 0.02 → exit.
-        let cfg = CarryConfig { max_adverse_funding: 0.02, z_flip: 1e9, ..Default::default() };
+        let cfg = CarryConfig {
+            max_adverse_funding: 0.02,
+            z_flip: 1e9,
+            ..Default::default()
+        };
         let mut s = CarryV1::new(
             StrategyId::new("carry-v1"),
-            Universe { venues: vec![Venue::Hyperliquid], symbols: vec![SymbolId(1)] },
+            Universe {
+                venues: vec![Venue::Hyperliquid],
+                symbols: vec![SymbolId(1)],
+            },
             cfg,
         );
-        let mut ctx = TestCtx { now: 1_000_000_000, equity: 1_000_000.0, count: 0 };
-        for (i, r) in [0.00001, 0.00002, 0.00001, 0.00002, 0.00001, 0.00002, 0.00001, 0.00002].iter().enumerate() {
+        let mut ctx = TestCtx {
+            now: 1_000_000_000,
+            equity: 1_000_000.0,
+            count: 0,
+        };
+        for (i, r) in [
+            0.00001, 0.00002, 0.00001, 0.00002, 0.00001, 0.00002, 0.00001, 0.00002,
+        ]
+        .iter()
+        .enumerate()
+        {
             s.on_feature(&make_update(*r, 1_000_000_000 + i as i64), &mut ctx);
         }
         s.on_feature(&make_update(0.0002, 2_000_000_000), &mut ctx); // entry signal
-        s.on_fill(&mp_core::Fill {
-            intent_id: IntentId(1),
-            symbol: SymbolId(1),
-            side: Side::Sell,
-            price: 100.0,
-            qty: 1.0,
-            fee: 0.0,
-            liquidity: mp_core::Liquidity::Taker,
-            ts_ns: 2_000_000_000,
-        }, &mut ctx);
+        s.on_fill(
+            &mp_core::Fill {
+                intent_id: IntentId(1),
+                symbol: SymbolId(1),
+                side: Side::Sell,
+                price: 100.0,
+                qty: 1.0,
+                fee: 0.0,
+                liquidity: mp_core::Liquidity::Taker,
+                ts_ns: 2_000_000_000,
+            },
+            &mut ctx,
+        );
         assert_eq!(
             s.on_feature(&make_update(-0.012, 3_000_000_000), &mut ctx),
             Vec::new(),
             "below the 0.02 adverse cap"
         );
         let exit = s.on_feature(&make_update(-0.012, 4_000_000_000), &mut ctx);
-        assert!(!exit.is_empty(), "adverse funding accumulation must stop the trade");
+        assert!(
+            !exit.is_empty(),
+            "adverse funding accumulation must stop the trade"
+        );
         assert_eq!(exit[0].tag, "carry-v1 exit");
     }
 
@@ -556,9 +680,19 @@ mod tests {
         assert!((units - (0.15 / PER_RISK_UNIT_PCT).min(16.0)).abs() < 1e-9);
         let big = CarryV1::new(
             StrategyId::new("carry-v1"),
-            Universe { venues: vec![Venue::Hyperliquid], symbols: vec![SymbolId(1)] },
-            CarryConfig { vol_target: 0.30, max_risk_units: 64.0, ..Default::default() },
+            Universe {
+                venues: vec![Venue::Hyperliquid],
+                symbols: vec![SymbolId(1)],
+            },
+            CarryConfig {
+                vol_target: 0.30,
+                max_risk_units: 64.0,
+                ..Default::default()
+            },
         );
-        assert!(big.risk_units() > units, "higher vol_target must request more units");
+        assert!(
+            big.risk_units() > units,
+            "higher vol_target must request more units"
+        );
     }
 }

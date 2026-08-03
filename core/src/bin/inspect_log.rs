@@ -1,11 +1,14 @@
-use mp_core::log::LogReader;
 use mp_core::event::MarketEvent;
+use mp_core::log::LogReader;
 use std::collections::BTreeMap;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let path_str = args.get(1).map(|s| s.as_str()).unwrap_or("data/collected.eventlog");
+    let path_str = args
+        .get(1)
+        .map(|s| s.as_str())
+        .unwrap_or("data/collected.eventlog");
     let path = Path::new(path_str);
 
     if !path.exists() {
@@ -51,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nSummary:");
     println!("Total Events: {}", event_count);
-    
+
     println!("\nEvent Types:");
     for (k, v) in &type_counts {
         println!("  {:.<15} {}", k, v);
@@ -72,7 +75,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Earliest: {} ns", earliest_ts);
         println!("  Latest:   {} ns", latest_ts);
         let duration_ms = (latest_ts - earliest_ts) as f64 / 1_000_000.0;
-        println!("  Duration: {:.2} ms ({:.2} seconds)", duration_ms, duration_ms / 1000.0);
+        println!(
+            "  Duration: {:.2} ms ({:.2} seconds)",
+            duration_ms,
+            duration_ms / 1000.0
+        );
     }
 
     Ok(())

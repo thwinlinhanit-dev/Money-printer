@@ -28,7 +28,11 @@ fn main() -> ExitCode {
         let noise = ((rng_state >> 33) as f64 / u32::MAX as f64 - 0.5) * 50.0;
         let price = (base_price + noise).max(60_000.0);
 
-        let side = if rng_state % 2 == 0 { Side::Buy } else { Side::Sell };
+        let side = if rng_state % 2 == 0 {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
         let qty = 0.001 + (rng_state % 100) as f64 * 0.001;
         let ts = i as i64 * 36 * SEC; // ~36s apart → 200 events over 2 hours
 

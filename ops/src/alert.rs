@@ -205,7 +205,9 @@ impl AlertRouter {
             .filter(|_| !url.starts_with("https")) // https would need TLS; refuse honestly
             .and_then(|rest| rest.split_once('/'))
             .map(|(host, rest)| (host.to_string(), format!("/{rest}")))
-            .ok_or_else(|| "MP_OPS_P1_WEBHOOK must be an http:// host[:port]/path URL".to_string())?;
+            .ok_or_else(|| {
+                "MP_OPS_P1_WEBHOOK must be an http:// host[:port]/path URL".to_string()
+            })?;
         let request = format!(
             "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -220,16 +222,18 @@ impl AlertRouter {
         stream
             .set_write_timeout(Some(std::time::Duration::from_secs(5)))
             .map_err(|e| e.to_string())?;
-        stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
-        stream.take(8192).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+        stream
+            .take(8192)
+            .read_to_end(&mut buf)
+            .map_err(|e| e.to_string())?;
         let text = String::from_utf8_lossy(&buf);
         // Fail closed on anything but a 2xx: an alert sink that "accepted" a
         // 500 would be worse than the honest warn-only fallback.
-        let status = text
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or_default();
+        let status = text.split_whitespace().nth(1).unwrap_or_default();
         if status.starts_with('2') {
             Ok(())
         } else {

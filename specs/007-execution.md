@@ -118,7 +118,7 @@ can't verify via venue API-key info endpoints).
 - **EXE-11** Every order, fill, verdict, recon diff, and kill event MUST be
   journaled (jsonl, schema_ver'd) — the journal is the input for G4 evidence
   and the monthly report (spec 009).
-- **EXE-12** First trading venue: Bybit testnet, then Bybit live-small.
+- **EXE-12** First trading venue: Binance testnet, then Binance live-small.
   Adapter fixture tests per COL-13 pattern for the private streams.
 
 ## Acceptance criteria
@@ -134,6 +134,10 @@ can't verify via venue API-key info endpoints).
 - 2026-07-10: auto_flatten ships OFF; alert-only until the owner has watched
   the reconciler behave for a month.
 - 2026-07-10: venue #1 = Bybit (matches collector decision, testnet exists).
+- 2026-08-03: **venue #1 = Binance** — owner correction: the deployed
+  collector is Binance-only (`binance-btcusdt.example.toml`), so the first
+  trading venue is Binance testnet → Binance live-small. EXE-12 updated above;
+  the 2026-07-10 Bybit entry is superseded.
 - 2026-07-10 (impl): risk gate + kill switches live in `mp-risk` (repo map);
   OMS state machine + reconciler in the new `mp-oms` crate. Gate is a pure
   ordered function RG-1..11 returning the first failure (verdicts meant to be

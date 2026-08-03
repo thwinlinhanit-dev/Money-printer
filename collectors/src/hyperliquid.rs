@@ -69,8 +69,7 @@ impl Normalizer for HyperliquidNormalizer {
                     // real data once stored).
                     let price =
                         f64_field(t, "px").ok_or_else(|| NormError::Parse("hl px".into()))?;
-                    let qty =
-                        f64_field(t, "sz").ok_or_else(|| NormError::Parse("hl sz".into()))?;
+                    let qty = f64_field(t, "sz").ok_or_else(|| NormError::Parse("hl sz".into()))?;
                     // "B" = buy aggressor, "A" = sell aggressor.
                     let side = match str_field(t, "side") {
                         Some("A") => Side::Sell,

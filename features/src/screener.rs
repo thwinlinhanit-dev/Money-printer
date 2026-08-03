@@ -109,8 +109,11 @@ impl Screener {
     /// configured cadence (FEA-11, FEA-12).
     pub fn on_update(&mut self, u: &FeatureUpdate) -> Vec<ScreenerHit> {
         // Always update the feature name table and snapshot (FEA-12).
-        let feat_name = self.feature_names.entry(u.feature)
-            .or_insert_with(|| format!("feature_{}", u.feature.0)).clone();
+        let feat_name = self
+            .feature_names
+            .entry(u.feature)
+            .or_insert_with(|| format!("feature_{}", u.feature.0))
+            .clone();
         let snap = self.snapshots.entry(u.symbol).or_default();
         snap.insert(feat_name, u.value);
 

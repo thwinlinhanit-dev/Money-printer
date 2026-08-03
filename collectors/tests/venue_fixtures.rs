@@ -93,7 +93,14 @@ fn col_7_binance_depth_seeds_then_deltas() {
         1,
         r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":100,"u":105,"pu":99,"b":[["50000","1"]],"a":[["50001","1"]]}"#,
     );
-    assert!(matches!(s[0].body, MarketEvent::BookDelta { first_seq: 100, last_seq: 105, .. }));
+    assert!(matches!(
+        s[0].body,
+        MarketEvent::BookDelta {
+            first_seq: 100,
+            last_seq: 105,
+            ..
+        }
+    ));
     // Contiguous next update (pu == prev u).
     let d = norm(
         &mut n,

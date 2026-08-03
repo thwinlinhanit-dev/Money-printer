@@ -35,9 +35,7 @@ impl BackpressurePolicy {
     pub fn drop_status(&self, dropped: u64) -> Option<StatusKind> {
         match self {
             Self::Block | Self::Unbounded => None,
-            Self::DropOldest | Self::DropNewest => {
-                Some(StatusKind::BackpressureDrop { dropped })
-            }
+            Self::DropOldest | Self::DropNewest => Some(StatusKind::BackpressureDrop { dropped }),
         }
     }
 }
@@ -57,13 +55,19 @@ mod tests {
     fn bkp_1_block_policy_never_drops() {
         let p = BackpressurePolicy::Block;
         assert!(p.drop_status(5).is_none());
-        assert_eq!(BackpressurePolicy::from_toml("block"), Some(BackpressurePolicy::Block));
+        assert_eq!(
+            BackpressurePolicy::from_toml("block"),
+            Some(BackpressurePolicy::Block)
+        );
     }
 
     #[test]
     fn bkp_2_drop_oldest_favors_recency() {
         let p = BackpressurePolicy::DropOldest;
-        assert_eq!(p.drop_status(5), Some(StatusKind::BackpressureDrop { dropped: 5 }));
+        assert_eq!(
+            p.drop_status(5),
+            Some(StatusKind::BackpressureDrop { dropped: 5 })
+        );
     }
 
     #[test]

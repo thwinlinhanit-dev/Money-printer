@@ -353,6 +353,6 @@ fn regression_rsk_7_regime_fit_fails_closed_on_out_of_range_label() {
     assert_eq!(regime_fit_from_features(&tr, 1.0, 1.0, 0.25), 1.0); // valid control
     assert_eq!(regime_fit_from_features(&tr, 1.0, 0.5, 0.25), 0.25); // fractional label
     assert_eq!(regime_fit_from_features(&tr, 1.0, 7.0, 0.25), 0.25); // out of range
-    // The fail-closed penalty is still clamped to [0,1].
+                                                                     // The fail-closed penalty is still clamped to [0,1].
     assert_eq!(regime_fit_from_features(&hv, 9.9, 0.0, 4.0), 1.0); // penalty clamped
 }

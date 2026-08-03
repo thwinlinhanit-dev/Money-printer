@@ -3,7 +3,7 @@
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = "wss://fstream.binance.com/ws";
     println!("Connecting to {}...", url);
-    
+
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     match tokio_tungstenite::connect_async(url).await {

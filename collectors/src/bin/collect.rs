@@ -2,14 +2,18 @@
 //! Prefer: `cargo run -p mp-collectors --features live-ws --bin mp-collector`.
 
 fn main() {
-    eprintln!("note: `collect` is an alias of `mp-collector` (default: venue=binance, symbol=BTCUSDT)");
+    eprintln!(
+        "note: `collect` is an alias of `mp-collector` (default: venue=binance, symbol=BTCUSDT)"
+    );
     // Re-invoke logic by exec'ing the same crate binary path is awkward; share
     // by including the same main path. For simplicity, document and exit with
     // the same feature gate message if live-ws is off; when live-ws is on,
     // call the same run entry via re-export is not available — spawn same code.
     #[cfg(not(feature = "live-ws"))]
     {
-        eprintln!("Enable live-ws: cargo run -p mp-collectors --features live-ws --bin mp-collector");
+        eprintln!(
+            "Enable live-ws: cargo run -p mp-collectors --features live-ws --bin mp-collector"
+        );
         std::process::exit(1);
     }
     #[cfg(feature = "live-ws")]

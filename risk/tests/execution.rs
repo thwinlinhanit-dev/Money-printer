@@ -173,7 +173,7 @@ fn regression_gate_reduce_only_flip_capped() {
     flip.reduce_only = true;
     flip.current_position_qty = 1.0; // long 1
     flip.qty = 4.0; // sell 4 → flips to −3 (short); not a reduction
-    // Pre-load gross just under the cap so the FULL flip notional tips it over.
+                    // Pre-load gross just under the cap so the FULL flip notional tips it over.
     flip.gross_exposure_notional = 300_000.0 - 100.0; // + 400 (full notional) > 300k
     assert_eq!(reject(&flip), RejectReason::GrossTooLarge);
 }

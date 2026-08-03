@@ -68,15 +68,40 @@ impl<'a> HitJournal<'a> {
         let mut y = 1970i64;
         let mut rem = days as i64;
         loop {
-            let days_yr = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
-            if rem < days_yr { break; }
+            let days_yr = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                366
+            } else {
+                365
+            };
+            if rem < days_yr {
+                break;
+            }
             rem -= days_yr;
             y += 1;
         }
-        let months = [31, if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 29 } else { 28 },
-            31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let months = [
+            31,
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                29
+            } else {
+                28
+            },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
         let mut m = 0usize;
-        while m < 12 && rem >= months[m] { rem -= months[m]; m += 1; }
+        while m < 12 && rem >= months[m] {
+            rem -= months[m];
+            m += 1;
+        }
         format!("{:04}-{:02}-{:02}", y, m + 1, rem + 1)
     }
 
@@ -91,7 +116,10 @@ impl<'a> HitJournal<'a> {
                 w.get_ref().sync_data()?;
             }
             let path = self.dir.join(format!("{date}.jsonl"));
-            let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
             self.writer = Some(std::io::BufWriter::new(file));
             self.current_date = date;
         }
@@ -139,7 +167,9 @@ impl<'a> HitJournal<'a> {
                     tracing::warn!(file = %path.display(), corrupt, "corrupt journal lines skipped");
                 }
             }
-            if d.as_str() >= to { break; }
+            if d.as_str() >= to {
+                break;
+            }
             d = next_date(&d);
         }
         Ok(results)
@@ -152,7 +182,10 @@ impl<'a> HitJournal<'a> {
         let dir = self.dir.join("backfill");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{date}.jsonl"));
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
         for r in records {
             writeln!(f, "{}", serde_json::to_string(r)?)?;
         }
@@ -163,15 +196,36 @@ impl<'a> HitJournal<'a> {
 
 fn next_date(d: &str) -> String {
     let parts: Vec<&str> = d.split('-').collect();
-    if parts.len() != 3 { return d.to_string(); }
+    if parts.len() != 3 {
+        return d.to_string();
+    }
     let y: i64 = parts[0].parse().unwrap_or(1970);
     let m: u32 = parts[1].parse().unwrap_or(1);
     let day: u32 = parts[2].parse().unwrap_or(1);
     let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let months = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let (ny, nm, nd) = if day >= months[m as usize - 1] {
-        if m >= 12 { (y + 1, 1u32, 1u32) } else { (y, m + 1, 1u32) }
-    } else { (y, m, day + 1) };
+        if m >= 12 {
+            (y + 1, 1u32, 1u32)
+        } else {
+            (y, m + 1, 1u32)
+        }
+    } else {
+        (y, m, day + 1)
+    };
     format!("{:04}-{:02}-{:02}", ny, nm, nd)
 }
 
@@ -221,7 +275,8 @@ mod tests {
                 symbol: SymbolId(1),
                 ts_ns: 1784456653319497000 + i * 1_000_000_000,
                 snapshot: Default::default(),
-            }).unwrap();
+            })
+            .unwrap();
         }
         let date = HitJournal::date_str_for_ns(FIXED_NS);
         let records = j.read_range(&date, &date).unwrap();
@@ -241,7 +296,8 @@ mod tests {
             symbol: SymbolId(1),
             ts_ns: 1784456653319497000,
             snapshot: Default::default(),
-        }).unwrap();
+        })
+        .unwrap();
         drop(j);
         // Append corrupt lines to the day's file: a torn write must never
         // panic read_range, and must not silently drop the good line either.

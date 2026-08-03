@@ -10,9 +10,7 @@
 use crate::book_sync::{BinanceBookSync, DeltaAction, SnapKind};
 use crate::json::*;
 use crate::normalize::{NormError, Normalizer};
-use mp_core::{
-    EventEnvelope, MarketEvent, Side, StatusKind, SymbolId, SymbolTable, Venue,
-};
+use mp_core::{EventEnvelope, MarketEvent, Side, StatusKind, SymbolId, SymbolTable, Venue};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -88,8 +86,6 @@ pub fn wall_now_ns() -> i64 {
         .as_nanos() as i64
 }
 
-
-
 /// REST depth snapshot for Binance (spec 020). Fetched once on WebSocket
 /// connect to seed book state, avoiding synthetic-seeding from the first delta.
 #[cfg(feature = "live-http")]
@@ -120,8 +116,16 @@ pub async fn fetch_depth_snapshot_budgeted(
             );
         }
     }
-    let path = if is_futures { "/fapi/v1/depth" } else { "/api/v3/depth" };
-    let base = if is_futures { "https://fapi.binance.com" } else { "https://api.binance.com" };
+    let path = if is_futures {
+        "/fapi/v1/depth"
+    } else {
+        "/api/v3/depth"
+    };
+    let base = if is_futures {
+        "https://fapi.binance.com"
+    } else {
+        "https://api.binance.com"
+    };
     let url = format!("{base}{path}?symbol={symbol}&limit={limit}");
     let resp = reqwest::get(&url).await?;
     let status = resp.status();
@@ -133,7 +137,11 @@ pub async fn fetch_depth_snapshot_budgeted(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
-        tracing::warn!(symbol, retry_after_s = wait, "binance depth 429 — RetryAfter");
+        tracing::warn!(
+            symbol,
+            retry_after_s = wait,
+            "binance depth 429 — RetryAfter"
+        );
         return Err(format!("Binance depth rate-limited (429); Retry-After {wait}s").into());
     }
     let raw: serde_json::Value = resp.error_for_status()?.json().await?;
@@ -187,8 +195,16 @@ pub fn fetch_depth_snapshot_blocking_budgeted(
             );
         }
     }
-    let path = if is_futures { "/fapi/v1/depth" } else { "/api/v3/depth" };
-    let base = if is_futures { "https://fapi.binance.com" } else { "https://api.binance.com" };
+    let path = if is_futures {
+        "/fapi/v1/depth"
+    } else {
+        "/api/v3/depth"
+    };
+    let base = if is_futures {
+        "https://fapi.binance.com"
+    } else {
+        "https://api.binance.com"
+    };
     let url = format!("{base}{path}?symbol={symbol}&limit={limit}");
     let resp = reqwest::blocking::get(&url)?;
     let status = resp.status();
@@ -199,7 +215,11 @@ pub fn fetch_depth_snapshot_blocking_budgeted(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
-        tracing::warn!(symbol, retry_after_s = wait, "binance depth 429 — RetryAfter");
+        tracing::warn!(
+            symbol,
+            retry_after_s = wait,
+            "binance depth 429 — RetryAfter"
+        );
         return Err(format!("Binance depth rate-limited (429); Retry-After {wait}s").into());
     }
     let raw: serde_json::Value = resp.error_for_status()?.json()?;
@@ -213,7 +233,10 @@ fn depth_snapshot_from_json(
 ) -> Result<MarketEvent, Box<dyn std::error::Error + Send + Sync>> {
     let bids = parse_pair_levels(raw.get("bids"))?;
     let asks = parse_pair_levels(raw.get("asks"))?;
-    let last_update_id = raw.get("lastUpdateId").and_then(|v| v.as_u64()).unwrap_or(0);
+    let last_update_id = raw
+        .get("lastUpdateId")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     Ok(MarketEvent::BookSnapshot {
         bids,
         asks,
@@ -228,7 +251,7 @@ pub fn fetch_open_interest_blocking(
     symbol: &str,
 ) -> Result<MarketEvent, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol}");
-        let resp = reqwest::blocking::get(&url)?;
+    let resp = reqwest::blocking::get(&url)?;
     let status = resp.status();
     if status.as_u16() == 429 {
         // 429 ⇒ RetryAfter semantics, never a generic error (COL-21).
@@ -238,7 +261,11 @@ pub fn fetch_open_interest_blocking(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
-        tracing::warn!(symbol, retry_after_s = wait, "binance open-interest 429 — RetryAfter");
+        tracing::warn!(
+            symbol,
+            retry_after_s = wait,
+            "binance open-interest 429 — RetryAfter"
+        );
         return Err(format!("Binance OI rate-limited (429); Retry-After {wait}s").into());
     }
     let raw: serde_json::Value = resp.error_for_status()?.json()?;
@@ -252,7 +279,6 @@ pub fn fetch_open_interest_blocking(
         oi_notional: f64::NAN,
     })
 }
-
 
 /// First-delta straddle check (COL-23), wired into
 /// [`crate::book_sync::BinanceBookSync::on_delta`]: a delta whose `U` is at or
@@ -296,10 +322,19 @@ pub fn inject_rest_depth_seed_budgeted(
     use mp_core::SnapshotReason;
 
     let snap = fetch_depth_snapshot_blocking_budgeted(symbol, 100, true, budget)?;
-    let MarketEvent::BookSnapshot { bids, asks, seq, depth, .. } = snap else {
+    let MarketEvent::BookSnapshot {
+        bids,
+        asks,
+        seq,
+        depth,
+        ..
+    } = snap
+    else {
         return Err("expected BookSnapshot from REST depth".into());
     };
-    let id = normalizer.symbols_mut().intern_default(mp_core::Venue::BinanceFutures, symbol);
+    let id = normalizer
+        .symbols_mut()
+        .intern_default(mp_core::Venue::BinanceFutures, symbol);
     let kind = normalizer.seed_book(id, seq);
     out.push(mp_core::EventEnvelope::new(
         mp_core::Venue::BinanceFutures,
@@ -343,7 +378,10 @@ pub fn reseed_if_needed(
         ts => ts,
     };
     inject_rest_depth_seed_budgeted(normalizer, symbol, recv_ts_ns, out, budget)?;
-    tracing::warn!(symbol, "depth book re-seeded from REST after pu gap (COL-24)");
+    tracing::warn!(
+        symbol,
+        "depth book re-seeded from REST after pu gap (COL-24)"
+    );
     Ok(true)
 }
 
@@ -436,9 +474,7 @@ impl Normalizer for BinanceNormalizer {
                             seq,
                             MarketEvent::Status {
                                 kind: StatusKind::GapDetected,
-                                detail: format!(
-                                    "binance depth gap at U={first} u={last} pu={pu}"
-                                ),
+                                detail: format!("binance depth gap at U={first} u={last} pu={pu}"),
                             },
                         ));
                     }
@@ -550,7 +586,9 @@ mod tests {
     /// Uses `seed_book` (no HTTP) so the test is deterministic and offline.
     fn seeded_normalizer(snapshot_last: u64) -> BinanceNormalizer {
         let mut n = BinanceNormalizer::new();
-        let id = n.symbols_mut().intern_default(Venue::BinanceFutures, "BTCUSDT");
+        let id = n
+            .symbols_mut()
+            .intern_default(Venue::BinanceFutures, "BTCUSDT");
         let kind = n.seed_book(id, snapshot_last);
         assert_eq!(kind, crate::book_sync::SnapKind::Init);
         n
@@ -561,19 +599,35 @@ mod tests {
         let mut n = seeded_normalizer(100);
         let mut out = Vec::new();
         // First delta must STRADDLE the snapshot: U <= lastUpdateId <= u.
-        n.normalize(1, depth_payload("BTCUSDT", 100, 105, 99).as_bytes(), &mut out)
-            .unwrap();
+        n.normalize(
+            1,
+            depth_payload("BTCUSDT", 100, 105, 99).as_bytes(),
+            &mut out,
+        )
+        .unwrap();
         assert!(matches!(
             out[0].body,
-            MarketEvent::BookDelta { first_seq: 100, last_seq: 105, .. }
+            MarketEvent::BookDelta {
+                first_seq: 100,
+                last_seq: 105,
+                ..
+            }
         ));
         // Subsequent deltas chain via pu == prev_u.
         out.clear();
-        n.normalize(2, depth_payload("BTCUSDT", 106, 110, 105).as_bytes(), &mut out)
-            .unwrap();
+        n.normalize(
+            2,
+            depth_payload("BTCUSDT", 106, 110, 105).as_bytes(),
+            &mut out,
+        )
+        .unwrap();
         assert!(matches!(
             out[0].body,
-            MarketEvent::BookDelta { first_seq: 106, last_seq: 110, .. }
+            MarketEvent::BookDelta {
+                first_seq: 106,
+                last_seq: 110,
+                ..
+            }
         ));
         assert!(!n.needs_reseed());
     }
@@ -583,17 +637,31 @@ mod tests {
         let mut n = seeded_normalizer(100);
         let mut out = Vec::new();
         // Snapshot says 100; first buffered delta starts at 105 — gap.
-        n.normalize(1, depth_payload("BTCUSDT", 105, 110, 104).as_bytes(), &mut out)
-            .unwrap();
+        n.normalize(
+            1,
+            depth_payload("BTCUSDT", 105, 110, 104).as_bytes(),
+            &mut out,
+        )
+        .unwrap();
         assert!(matches!(
             out[0].body,
-            MarketEvent::Status { kind: StatusKind::GapDetected, .. }
+            MarketEvent::Status {
+                kind: StatusKind::GapDetected,
+                ..
+            }
         ));
-        assert!(n.needs_reseed(), "gap must set the reseed flag for the driver");
+        assert!(
+            n.needs_reseed(),
+            "gap must set the reseed flag for the driver"
+        );
         // While desynced, further deltas drop silently until a re-seed.
         out.clear();
-        n.normalize(2, depth_payload("BTCUSDT", 111, 115, 110).as_bytes(), &mut out)
-            .unwrap();
+        n.normalize(
+            2,
+            depth_payload("BTCUSDT", 111, 115, 110).as_bytes(),
+            &mut out,
+        )
+        .unwrap();
         assert!(out.is_empty());
     }
 
@@ -601,16 +669,27 @@ mod tests {
     fn col_24_pu_mismatch_mid_stream_triggers_gap() {
         let mut n = seeded_normalizer(100);
         let mut out = Vec::new();
-        n.normalize(1, depth_payload("BTCUSDT", 100, 105, 99).as_bytes(), &mut out)
-            .unwrap();
+        n.normalize(
+            1,
+            depth_payload("BTCUSDT", 100, 105, 99).as_bytes(),
+            &mut out,
+        )
+        .unwrap();
         assert!(matches!(out[0].body, MarketEvent::BookDelta { .. }));
         out.clear();
         // pu (109) != prev_u (105) — venue missed a delta.
-        n.normalize(2, depth_payload("BTCUSDT", 110, 115, 109).as_bytes(), &mut out)
-            .unwrap();
+        n.normalize(
+            2,
+            depth_payload("BTCUSDT", 110, 115, 109).as_bytes(),
+            &mut out,
+        )
+        .unwrap();
         assert!(matches!(
             out[0].body,
-            MarketEvent::Status { kind: StatusKind::GapDetected, .. }
+            MarketEvent::Status {
+                kind: StatusKind::GapDetected,
+                ..
+            }
         ));
         assert!(n.needs_reseed());
     }
@@ -619,18 +698,28 @@ mod tests {
     fn col_24_reseed_clears_flag_and_resyncs() {
         let mut n = seeded_normalizer(100);
         let mut out = Vec::new();
-        n.normalize(1, depth_payload("BTCUSDT", 105, 110, 104).as_bytes(), &mut out)
-            .unwrap();
+        n.normalize(
+            1,
+            depth_payload("BTCUSDT", 105, 110, 104).as_bytes(),
+            &mut out,
+        )
+        .unwrap();
         assert!(n.needs_reseed());
         // Driver observes the flag and re-seeds via the same path as startup.
-        let id = n.symbols_mut().intern_default(Venue::BinanceFutures, "BTCUSDT");
+        let id = n
+            .symbols_mut()
+            .intern_default(Venue::BinanceFutures, "BTCUSDT");
         let kind = n.seed_book(id, 500);
         assert_eq!(kind, crate::book_sync::SnapKind::Resync);
         assert!(!n.needs_reseed());
         // And new deltas validate against the new snapshot.
         out.clear();
-        n.normalize(2, depth_payload("BTCUSDT", 500, 505, 499).as_bytes(), &mut out)
-            .unwrap();
+        n.normalize(
+            2,
+            depth_payload("BTCUSDT", 500, 505, 499).as_bytes(),
+            &mut out,
+        )
+        .unwrap();
         assert!(matches!(out[0].body, MarketEvent::BookDelta { .. }));
     }
 
@@ -640,8 +729,15 @@ mod tests {
         // snapshot, depth deltas are dropped (never turned into a fake book).
         let mut n = BinanceNormalizer::new();
         let mut out = Vec::new();
-        n.normalize(1, depth_payload("BTCUSDT", 100, 105, 99).as_bytes(), &mut out)
-            .unwrap();
-        assert!(out.is_empty(), "no snapshot, no depth events before REST seed");
+        n.normalize(
+            1,
+            depth_payload("BTCUSDT", 100, 105, 99).as_bytes(),
+            &mut out,
+        )
+        .unwrap();
+        assert!(
+            out.is_empty(),
+            "no snapshot, no depth events before REST seed"
+        );
     }
 }

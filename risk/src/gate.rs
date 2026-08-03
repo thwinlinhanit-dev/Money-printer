@@ -169,9 +169,7 @@ pub fn evaluate(limits: &RiskLimits, kills: &KillSwitches, i: &GateInput) -> Ver
     }
     // RG-5 gross portfolio exposure. A reducing order subtracts its reduction
     // from gross rather than adding its full notional.
-    let gross_delta = if i.reduce_only
-        && resulting_qty.abs() <= i.current_position_qty.abs()
-    {
+    let gross_delta = if i.reduce_only && resulting_qty.abs() <= i.current_position_qty.abs() {
         -(i.current_position_qty.abs() - resulting_qty.abs()) * i.price * i.contract_multiplier
     } else {
         order_notional

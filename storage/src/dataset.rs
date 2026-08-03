@@ -71,4 +71,3 @@ impl Dataset {
         Ok(m.gaps(stream_key).to_vec())
     }
 }
-

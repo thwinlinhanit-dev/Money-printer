@@ -90,7 +90,8 @@ impl<N: Normalizer> Collector<N> {
                             // COL-6: WARN (never panic, never secrets) + continue
                             // after counting. Payload truncated to keep logs small
                             // and to bound any credential that leaked into a frame.
-                            let snippet = String::from_utf8_lossy(&payload[..payload.len().min(500)]);
+                            let snippet =
+                                String::from_utf8_lossy(&payload[..payload.len().min(500)]);
                             let snippet = snippet.as_ref();
                             tracing::warn!(
                                 venue = ?self.normalizer.venue(),

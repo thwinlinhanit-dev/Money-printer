@@ -203,12 +203,22 @@ mod tests {
         let ev = EventEnvelope::new(
             Venue::Hyperliquid,
             SymbolId(1),
-            1000, 2000, 1,
-            MarketEvent::Trade { price: 50000.0, qty: 1.0, side: Side::Buy, trade_id: 42 },
+            1000,
+            2000,
+            1,
+            MarketEvent::Trade {
+                price: 50000.0,
+                qty: 1.0,
+                side: Side::Buy,
+                trade_id: 42,
+            },
         );
         let r = arena.alloc(&ev).unwrap();
         producer.push(r);
-        let item = consumer.try_recv().unwrap().expect("should receive event ref");
+        let item = consumer
+            .try_recv()
+            .unwrap()
+            .expect("should receive event ref");
         let decoded: EventEnvelope = arena.decode(item).unwrap();
         assert_eq!(ev, decoded);
     }

@@ -63,16 +63,32 @@ impl OpsDaemon {
     /// Ingest collector heartbeat files written by the Windows watchdog path.
     pub fn ingest_heartbeat_files(&mut self, now_ns: i64) {
         let raw_dir = self.data_dir.join("raw");
-        let Ok(entries) = std::fs::read_dir(raw_dir) else { return };
+        let Ok(entries) = std::fs::read_dir(raw_dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) != Some("heartbeat") {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            let Some(seconds) = text.split_whitespace().find_map(|part| part.strip_prefix("ts=")).and_then(|value| value.parse::<i64>().ok()) else { continue };
-            let process = path.file_stem().and_then(|value| value.to_str()).unwrap_or("collector");
-            self.beat(process.to_owned(), seconds.saturating_mul(NS_PER_SEC).min(now_ns));
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(seconds) = text
+                .split_whitespace()
+                .find_map(|part| part.strip_prefix("ts="))
+                .and_then(|value| value.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            let process = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("collector");
+            self.beat(
+                process.to_owned(),
+                seconds.saturating_mul(NS_PER_SEC).min(now_ns),
+            );
         }
     }
 
@@ -109,7 +125,8 @@ impl OpsDaemon {
             .filter_map(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|modified| now_ns.saturating_sub(modified.as_nanos() as i64))
             .min();
-        let manifest_count = files_with_extension(&self.data_dir.join("cold").join("manifests"), "json").len();
+        let manifest_count =
+            files_with_extension(&self.data_dir.join("cold").join("manifests"), "json").len();
         StatusSnapshot {
             now_ns,
             processes,
@@ -123,7 +140,9 @@ impl OpsDaemon {
 
 fn files_with_extension(root: &Path, extension: &str) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(root) else { return files };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return files;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -144,7 +163,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("mp-opsd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("raw")).unwrap();
-        std::fs::write(root.join("raw/mp-collector-binance-BTCUSDT.heartbeat"), "ts=10 pid=1\n").unwrap();
+        std::fs::write(
+            root.join("raw/mp-collector-binance-BTCUSDT.heartbeat"),
+            "ts=10 pid=1\n",
+        )
+        .unwrap();
         let mut daemon = OpsDaemon::new(&root, 30 * NS_PER_SEC);
         daemon.ingest_heartbeat_files(11 * NS_PER_SEC);
         let status = daemon.status(20 * NS_PER_SEC);

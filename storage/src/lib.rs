@@ -29,10 +29,12 @@ pub enum StorageError {
     Parquet(String),
     #[error("arrow: {0}")]
     Arrow(String),
+    #[error("refused: {0}")]
+    Refused(String),
 }
 
-pub use compactor::{compact_day, CompactStats};
 pub use audit::{audit_raw_log, scorecard, AuditConfig, DailyScorecard, RawLogAudit};
+pub use compactor::{compact_day, compact_day_verified, CompactStats};
 pub use dataset::Dataset;
 pub use feature_store::{
     materialize, read_feature_meta, read_features, resolve_version, FeatureMeta, FeatureRow,

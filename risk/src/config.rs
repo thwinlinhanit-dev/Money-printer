@@ -116,7 +116,10 @@ pub fn regime_fit_from_features(
     } else if regime_vol == 2.0 {
         "high_vol"
     } else {
-        tracing::warn!(regime_vol, "invalid regime.vol label (not 0/1/2) → fail-closed penalty (RSK-7)");
+        tracing::warn!(
+            regime_vol,
+            "invalid regime.vol label (not 0/1/2) → fail-closed penalty (RSK-7)"
+        );
         return fallback();
     };
     let trend_label = if regime_trend == 0.0 {
@@ -124,7 +127,10 @@ pub fn regime_fit_from_features(
     } else if regime_trend == 1.0 {
         "trend"
     } else {
-        tracing::warn!(regime_trend, "invalid regime.trend label (not 0/1) → fail-closed penalty (RSK-7)");
+        tracing::warn!(
+            regime_trend,
+            "invalid regime.trend label (not 0/1) → fail-closed penalty (RSK-7)"
+        );
         return fallback();
     };
     let matches = declared.iter().any(|l| l == vol_label || l == trend_label);

@@ -211,16 +211,19 @@ impl FeatureEngine {
         let ticks: Vec<Box<dyn TickFeature>> = self.tick_factories.iter().map(|f| f()).collect();
         let bars: Vec<Box<dyn BarFeature>> = self.bar_factories.iter().map(|f| f()).collect();
         let tf = self.bar_tf_ns;
-        self.per_symbol.insert(sym, SymbolState {
-            ticks,
-            bars,
-            builder: BarBuilder::new(tf),
-            venue,
-            tick_ids,
-            tick_names,
-            bar_ids,
-            bar_names,
-        });
+        self.per_symbol.insert(
+            sym,
+            SymbolState {
+                ticks,
+                bars,
+                builder: BarBuilder::new(tf),
+                venue,
+                tick_ids,
+                tick_names,
+                bar_ids,
+                bar_names,
+            },
+        );
         // SAFETY (CONV-13): we just inserted this key above.
         self.per_symbol.get_mut(&sym).unwrap()
     }

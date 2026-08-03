@@ -70,8 +70,7 @@ impl Normalizer for KrakenNormalizer {
                 // price/qty required on trade events (Major #7).
                 let price =
                     f64_field(&d, "price").ok_or_else(|| NormError::Parse("kr price".into()))?;
-                let qty =
-                    f64_field(&d, "qty").ok_or_else(|| NormError::Parse("kr qty".into()))?;
+                let qty = f64_field(&d, "qty").ok_or_else(|| NormError::Parse("kr qty".into()))?;
                 let side = kr_side(str_field(&d, "side").unwrap_or("buy"));
                 let trade_id = u64_field(&d, "seq").unwrap_or(0);
                 let seq = self.seq();

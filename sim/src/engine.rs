@@ -13,8 +13,8 @@ use mp_core::{
 };
 use mp_features::FeatureEngine;
 use mp_risk::{
-    evaluate, size, trip_on_breach, GateInput, KillSwitches, Mode, RiskLimits, Scope,
-    SizingInputs, SizingParams, TripRequest, Verdict,
+    evaluate, size, trip_on_breach, GateInput, KillSwitches, Mode, RiskLimits, Scope, SizingInputs,
+    SizingParams, TripRequest, Verdict,
 };
 use mp_strategies::strategy::{Ctx, TimerId};
 use mp_strategies::Strategy;
@@ -292,7 +292,9 @@ impl Backtester {
         self.books.entry(ev.symbol).or_default().apply(&ev.body);
 
         match &ev.body {
-            MarketEvent::Trade { price, qty, side, .. } => {
+            MarketEvent::Trade {
+                price, qty, side, ..
+            } => {
                 self.latest_mark.insert(ev.symbol, *price);
                 self.acct.mark(ev.symbol, *price);
                 self.on_trade(ev.symbol, *price, *qty, *side, ev.recv_ts_ns);
@@ -301,7 +303,9 @@ impl Backtester {
                 self.latest_mark.insert(ev.symbol, *mark);
                 self.acct.mark(ev.symbol, *mark);
             }
-            MarketEvent::Funding { rate, interval_s, .. } => {
+            MarketEvent::Funding {
+                rate, interval_s, ..
+            } => {
                 *self.funding_count.entry(ev.symbol).or_insert(0) += 1;
                 self.acct.accrue_funding(ev.symbol, *rate);
                 let _ = interval_s;
@@ -337,7 +341,10 @@ impl Backtester {
         self.fire_timers(now);
 
         let subs = self.strat.subscriptions();
-        let subscribed = |name: &str| subs.iter().any(|s| s == "*" || name.starts_with(s.as_str()));
+        let subscribed = |name: &str| {
+            subs.iter()
+                .any(|s| s == "*" || name.starts_with(s.as_str()))
+        };
 
         let ups = self.fe.on_event(ev);
         for u in ups {
@@ -422,9 +429,9 @@ impl Backtester {
                 .pending
                 .on_trade_l0(params, symbol, price, qty, side, now),
             FillModel::L1TopOfBook | FillModel::L2DepthWalk => {
-                let mut out =
-                    self.pending
-                        .try_fill_limit_trade_print(params, symbol, price, qty, side, now);
+                let mut out = self
+                    .pending
+                    .try_fill_limit_trade_print(params, symbol, price, qty, side, now);
                 out.extend(self.pending.try_fill_market(
                     params,
                     &mut self.books,
@@ -446,7 +453,8 @@ impl Backtester {
         // limit prices are strategy bugs and must not become executed orders.
         if let Err(e) = intent.validate() {
             self.seq += 1;
-            self.log.record_invalid_intent(self.seq, intent.intent_id, &e.to_string());
+            self.log
+                .record_invalid_intent(self.seq, intent.intent_id, &e.to_string());
             return;
         }
         let kind = match intent.kind {
@@ -569,7 +577,9 @@ impl Backtester {
         let outcome = self.acct.apply_fill(p.symbol, signed, p.price, fee);
         let pos = self.acct.position(p.symbol);
         if pos != 0.0 {
-            self.hold_start.entry(p.symbol).or_insert(self.clock.now_ns());
+            self.hold_start
+                .entry(p.symbol)
+                .or_insert(self.clock.now_ns());
         } else {
             self.hold_start.remove(&p.symbol);
         }
@@ -581,7 +591,11 @@ impl Backtester {
 
         self.seq += 1;
         self.next_intent = self.next_intent.max(p.intent_id.0);
-        let strategy = self.intent_strategy.get(&p.intent_id.0).map(String::as_str).unwrap_or("");
+        let strategy = self
+            .intent_strategy
+            .get(&p.intent_id.0)
+            .map(String::as_str)
+            .unwrap_or("");
         let fill = Fill {
             intent_id: p.intent_id,
             symbol: p.symbol,
@@ -592,7 +606,8 @@ impl Backtester {
             liquidity: p.liquidity,
             ts_ns: self.clock.now_ns(),
         };
-        self.log.record_fill_tagged(self.seq, &fill, p.optimism, strategy, p.venue);
+        self.log
+            .record_fill_tagged(self.seq, &fill, p.optimism, strategy, p.venue);
 
         let (follow, logs) = self.dispatch_strategy(now, |s, ctx| s.on_fill(&fill, ctx));
         self.record_dispatch(now, &follow, &logs);

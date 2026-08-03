@@ -166,13 +166,18 @@ impl PendingBook {
         let Some(closed) = closed else {
             return Vec::new();
         };
-        let new_open = self.bars.get(&symbol).map(|b| b.current_open()).unwrap_or(price);
+        let new_open = self
+            .bars
+            .get(&symbol)
+            .map(|b| b.current_open())
+            .unwrap_or(price);
         let close_ts = closed.close_ts_ns;
         let slip = params.slip_frac;
         self.drain(
             |p| p.symbol != symbol || p.ready_ns > close_ts,
             |p| {
-                let fill_px = new_open * (1.0 + slip * if p.side == Side::Buy { 1.0 } else { -1.0 });
+                let fill_px =
+                    new_open * (1.0 + slip * if p.side == Side::Buy { 1.0 } else { -1.0 });
                 Some((fill_px, p.qty, Liquidity::Maker, FillOptimism::None))
             },
         )
@@ -195,23 +200,29 @@ impl PendingBook {
         let part = params.participation;
         self.drain(
             |p| p.symbol != symbol || p.ready_ns > now || p.kind != PendingKind::Market,
-            |p| match model {
-                FillModel::L1TopOfBook => fill_l1_market(books, marks, symbol, p.side, p.qty, slip, part),
-                FillModel::L2DepthWalk => fill_l2_market(books, marks, symbol, p.side, p.qty, slip),
-                FillModel::L0BarFill => None,
-            }
-            .map(|(px, q, tape)| {
-                (
-                    px,
-                    q,
-                    Liquidity::Taker,
-                    if tape {
-                        FillOptimism::Tape
-                    } else {
-                        FillOptimism::None
-                    },
-                )
-            }),
+            |p| {
+                match model {
+                    FillModel::L1TopOfBook => {
+                        fill_l1_market(books, marks, symbol, p.side, p.qty, slip, part)
+                    }
+                    FillModel::L2DepthWalk => {
+                        fill_l2_market(books, marks, symbol, p.side, p.qty, slip)
+                    }
+                    FillModel::L0BarFill => None,
+                }
+                .map(|(px, q, tape)| {
+                    (
+                        px,
+                        q,
+                        Liquidity::Taker,
+                        if tape {
+                            FillOptimism::Tape
+                        } else {
+                            FillOptimism::None
+                        },
+                    )
+                })
+            },
         )
     }
 
@@ -250,12 +261,7 @@ impl PendingBook {
                 if fill_qty <= 0.0 {
                     return None;
                 }
-                Some((
-                    limit_px,
-                    fill_qty,
-                    Liquidity::Maker,
-                    FillOptimism::Maker,
-                ))
+                Some((limit_px, fill_qty, Liquidity::Maker, FillOptimism::Maker))
             },
         )
     }

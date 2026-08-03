@@ -15,7 +15,9 @@ fn now_ns() -> i64 {
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|arg| arg == name).and_then(|index| args.get(index + 1).cloned())
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|index| args.get(index + 1).cloned())
 }
 
 fn respond(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
@@ -26,7 +28,9 @@ fn handle(stream: &mut TcpStream, daemon: &mut OpsDaemon) -> std::io::Result<()>
     let mut request = [0u8; 4096];
     let len = stream.read(&mut request)?;
     let request = String::from_utf8_lossy(&request[..len]);
-    let Some(line) = request.lines().next() else { return respond(stream, "400 Bad Request", r#"{"error":"empty request"}"#) };
+    let Some(line) = request.lines().next() else {
+        return respond(stream, "400 Bad Request", r#"{"error":"empty request"}"#);
+    };
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
@@ -37,7 +41,8 @@ fn handle(stream: &mut TcpStream, daemon: &mut OpsDaemon) -> std::io::Result<()>
     }
     match (method, path) {
         ("GET", "/status") => {
-            let body = serde_json::to_string(&daemon.status(now)).unwrap_or_else(|_| r#"{"error":"status serialization"}"#.into());
+            let body = serde_json::to_string(&daemon.status(now))
+                .unwrap_or_else(|_| r#"{"error":"status serialization"}"#.into());
             respond(stream, "200 OK", &body)
         }
         ("POST", path) if path.starts_with("/beat/") => {

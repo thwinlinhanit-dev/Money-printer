@@ -93,18 +93,31 @@ fn exe_4_unknown_timeout_escalation() {
     store.submit("mp-s-6").apply(OmsEvent::Submit).unwrap();
     let now = 1_000_000_000i64;
     // No ack: Unknown begins timing.
-    store.apply("mp-s-6", OmsEvent::AckTimeout, now).unwrap().unwrap();
-    assert!(store.unknown_expired(now, 60_000_000_000).is_empty(), "not yet expired");
+    store
+        .apply("mp-s-6", OmsEvent::AckTimeout, now)
+        .unwrap()
+        .unwrap();
+    assert!(
+        store.unknown_expired(now, 60_000_000_000).is_empty(),
+        "not yet expired"
+    );
     // Under the 60s unexpired.
-    assert!(store.unknown_expired(now + 59_000_000_000, 60_000_000_000).is_empty());
+    assert!(store
+        .unknown_expired(now + 59_000_000_000, 60_000_000_000)
+        .is_empty());
     // Past the 60s window → escalation set (caller maps to venue kill switch).
     assert_eq!(
         store.unknown_expired(now + 61_000_000_000, 60_000_000_000),
         vec!["mp-s-6".to_string()]
     );
     // Query resolves it: no longer unknown, no longer escalating.
-    store.apply("mp-s-6", OmsEvent::ResolveAcked, now + 61_000_000_000).unwrap().unwrap();
-    assert!(store.unknown_expired(now + 61_000_000_000, 60_000_000_000).is_empty());
+    store
+        .apply("mp-s-6", OmsEvent::ResolveAcked, now + 61_000_000_000)
+        .unwrap()
+        .unwrap();
+    assert!(store
+        .unknown_expired(now + 61_000_000_000, 60_000_000_000)
+        .is_empty());
     assert!(store.unknown_ids().is_empty());
 }
 

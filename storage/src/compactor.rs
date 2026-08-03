@@ -4,6 +4,7 @@
 //! other streams' Parquet is the same pattern (deferred — see spec Decisions),
 //! while the manifest already covers *all* streams.
 
+use crate::audit::RawLogAudit;
 use crate::manifest::{self, QualityManifest};
 use crate::{layout, parquet_trades, StorageError};
 use mp_core::{EventEnvelope, MarketEvent, SymbolTable, Venue};
@@ -16,6 +17,46 @@ pub struct CompactStats {
     pub trades_files_written: u64,
     pub trades_files_skipped: u64,
     pub trade_rows: u64,
+}
+
+/// Compact one venue/day's events, but only when the raw log's audit is clean
+/// (INT-4).  A quarantined log never reaches cold storage: refusal is a hard
+/// error, and no Parquet or manifest is written.
+#[allow(clippy::too_many_arguments)]
+pub fn compact_day_verified(
+    root: &Path,
+    venue: Venue,
+    date: &str,
+    day_start_ns: i64,
+    day_end_ns: i64,
+    events: Vec<EventEnvelope>,
+    symbols: &SymbolTable,
+    source_hash: &str,
+    compactor_version: &str,
+    created_ts_ns: i64,
+    audit: &RawLogAudit,
+) -> Result<CompactStats, StorageError> {
+    if !audit.is_clean() {
+        let codes: Vec<&str> = audit.findings.iter().map(|f| f.code.as_str()).collect();
+        return Err(StorageError::Refused(format!(
+            "audit not clean for {}/{}: {}",
+            layout::venue_slug(venue),
+            date,
+            codes.join(", ")
+        )));
+    }
+    compact_day(
+        root,
+        venue,
+        date,
+        day_start_ns,
+        day_end_ns,
+        events,
+        symbols,
+        source_hash,
+        compactor_version,
+        created_ts_ns,
+    )
 }
 
 /// Compact one venue/day's events. `events` must be the full day for `venue`,

@@ -55,7 +55,10 @@ fn jitter_ms(attempt: u32, salt: u64) -> u64 {
 
 /// One send attempt. Returns the status code and body; non-2xx bodies are
 /// kept because providers encode errors as JSON envelopes we surface.
-fn try_send(client: &reqwest::blocking::Client, req: &HttpRequest) -> Result<(u16, Vec<u8>), LlmError> {
+fn try_send(
+    client: &reqwest::blocking::Client,
+    req: &HttpRequest,
+) -> Result<(u16, Vec<u8>), LlmError> {
     let mut builder = client.post(&req.url).body(req.body.clone());
     for (k, v) in &req.headers {
         builder = builder.header(k.as_str(), v.as_str());
@@ -105,7 +108,10 @@ pub(crate) fn retryable(result: &Result<(u16, Vec<u8>), LlmError>) -> bool {
 
 /// Send a built request with retries and return the raw response body bytes.
 /// The caller hands the bytes to the provider's `parse_response`.
-pub fn send_blocking(client: &reqwest::blocking::Client, req: &HttpRequest) -> Result<Vec<u8>, LlmError> {
+pub fn send_blocking(
+    client: &reqwest::blocking::Client,
+    req: &HttpRequest,
+) -> Result<Vec<u8>, LlmError> {
     // Salt mixes the URL length + body checksum-lite (len) so retries for two
     // different requests in the same process don't share a jitter schedule.
     let salt = (req.url.len() as u64) << 32 | req.body.len() as u64;

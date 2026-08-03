@@ -69,7 +69,20 @@ fn days_from_epoch(y: i64, m: u32, d: u32) -> u64 {
     for year in 1970..y {
         total += if is_leap(year) { 366 } else { 365 };
     }
-    let months = [31, if is_leap(y) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = [
+        31,
+        if is_leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     for month in 0..(m as usize - 1) {
         total += months[month] as u64;
     }
@@ -88,8 +101,7 @@ fn compute_source_hash(path: &Path) -> Result<String, String> {
 }
 
 fn read_log_with_symbols(path: &Path) -> Result<(Vec<EventEnvelope>, SymbolTable), String> {
-    let mut reader =
-        LogReader::open(path).map_err(|e| format!("open log {path:?}: {e}"))?;
+    let mut reader = LogReader::open(path).map_err(|e| format!("open log {path:?}: {e}"))?;
     let mut events = Vec::new();
     for ev in &mut reader {
         events.push(ev.map_err(|e| format!("read log {path:?}: {e}"))?);
@@ -102,13 +114,17 @@ fn read_log_with_symbols(path: &Path) -> Result<(Vec<EventEnvelope>, SymbolTable
 fn audit_config(args: &[String], venue: Venue, symbol: &str) -> Result<AuditConfig, String> {
     let mut config = AuditConfig::single(venue, symbol);
     if let Some(seconds) = flag(args, "--max-gap-sec") {
-        let seconds: i64 = seconds.parse().map_err(|_| "--max-gap-sec must be an integer")?;
+        let seconds: i64 = seconds
+            .parse()
+            .map_err(|_| "--max-gap-sec must be an integer")?;
         if seconds <= 0 {
             return Err("--max-gap-sec must be positive".into());
         }
         config.max_gap_ns = seconds.saturating_mul(1_000_000_000);
     }
-    config.required_streams = flags(args, "--require-stream").into_iter().collect::<BTreeSet<_>>();
+    config.required_streams = flags(args, "--require-stream")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     Ok(config)
 }
 
@@ -134,12 +150,19 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
     if date_flat.len() != 8 {
         return Err("date must be YYYYMMDD or YYYY-MM-DD".into());
     }
-    let date_dashed = format!("{}-{}-{}", &date_flat[0..4], &date_flat[4..6], &date_flat[6..8]);
+    let date_dashed = format!(
+        "{}-{}-{}",
+        &date_flat[0..4],
+        &date_flat[4..6],
+        &date_flat[6..8]
+    );
     let venue_str = need(args, "--venue")?;
     let symbol = need(args, "--symbol")?;
     let venue = parse_venue(&venue_str)?;
 
-    let raw_path = Path::new("data").join("raw").join(format!("{date_flat}_{venue_str}_{symbol}.log"));
+    let raw_path = Path::new("data")
+        .join("raw")
+        .join(format!("{date_flat}_{venue_str}_{symbol}.log"));
     let cold_root = Path::new("data").join("cold");
 
     if !raw_path.exists() {
@@ -192,7 +215,9 @@ fn cmd_audit(args: &[String]) -> Result<String, String> {
     let venue_name = need(args, "--venue")?;
     let symbol = need(args, "--symbol")?;
     let venue = parse_venue(&venue_name)?;
-    let path = Path::new("data").join("raw").join(format!("{date}_{venue_name}_{symbol}.log"));
+    let path = Path::new("data")
+        .join("raw")
+        .join(format!("{date}_{venue_name}_{symbol}.log"));
     let audit = audit_raw_log(&path, &audit_config(args, venue, &symbol)?);
     serde_json::to_string_pretty(&audit).map_err(|error| error.to_string())
 }
@@ -212,7 +237,9 @@ fn cmd_scorecard(args: &[String]) -> Result<String, String> {
             .split_once(':')
             .ok_or_else(|| format!("invalid --required {item}; expected venue:symbol"))?;
         let venue = parse_venue(venue_name)?;
-        let path = Path::new("data").join("raw").join(format!("{date}_{venue_name}_{symbol}.log"));
+        let path = Path::new("data")
+            .join("raw")
+            .join(format!("{date}_{venue_name}_{symbol}.log"));
         let audit = audit_raw_log(&path, &audit_config(args, venue, symbol)?);
         entries.push((venue, symbol.to_owned(), audit));
     }
@@ -255,19 +282,55 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use mp_core::log::EventLogWriter;
-    use mp_core::{EventEnvelope, EventProvenance, InstrumentKind, MarketEvent, Side, SnapshotSource, SymbolId, SymbolMeta};
+    use mp_core::{
+        EventEnvelope, EventProvenance, InstrumentKind, MarketEvent, Side, SnapshotSource,
+        SymbolId, SymbolMeta,
+    };
 
     #[test]
     fn int_4_compaction_refuses_quarantined_log() {
         let path = std::env::temp_dir().join(format!("mp-int-compact-{}.log", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let (mut writer, _) = EventLogWriter::open(&path).unwrap();
-        writer.write_symbols(&[SymbolMeta::new(SymbolId(0), Venue::BinanceFutures, "BTCUSDT", "BTC", "USDT", InstrumentKind::Perp, 0.1, 0.1, 1.0)]).unwrap();
-        let event = EventEnvelope::new(Venue::Hyperliquid, SymbolId(0), 1, 1, 1, MarketEvent::Trade { price: 1.0, qty: 1.0, side: Side::Buy, trade_id: 1 })
-            .with_provenance(EventProvenance { stream: "trade".into(), subscription: "x".into(), connection_id: 1, snapshot_source: SnapshotSource::None });
+        writer
+            .write_symbols(&[SymbolMeta::new(
+                SymbolId(0),
+                Venue::BinanceFutures,
+                "BTCUSDT",
+                "BTC",
+                "USDT",
+                InstrumentKind::Perp,
+                0.1,
+                0.1,
+                1.0,
+            )])
+            .unwrap();
+        let event = EventEnvelope::new(
+            Venue::Hyperliquid,
+            SymbolId(0),
+            1,
+            1,
+            1,
+            MarketEvent::Trade {
+                price: 1.0,
+                qty: 1.0,
+                side: Side::Buy,
+                trade_id: 1,
+            },
+        )
+        .with_provenance(EventProvenance {
+            stream: "trade".into(),
+            subscription: "x".into(),
+            connection_id: 1,
+            snapshot_source: SnapshotSource::None,
+        });
         writer.append(&event).unwrap();
         writer.sync().unwrap();
-        let err = clean_audit(&path, &AuditConfig::single(Venue::BinanceFutures, "BTCUSDT")).unwrap_err();
+        let err = clean_audit(
+            &path,
+            &AuditConfig::single(Venue::BinanceFutures, "BTCUSDT"),
+        )
+        .unwrap_err();
         assert!(err.contains("quarantined raw log"));
         let _ = std::fs::remove_file(path);
     }

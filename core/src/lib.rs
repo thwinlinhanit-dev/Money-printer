@@ -25,8 +25,8 @@ pub const SCHEMA_VER: u16 = 2;
 pub use arena::{Arena, EventRef};
 pub use book::BookMirror;
 pub use event::{
-    EventEnvelope, EventProvenance, Level, Levels, MarketEvent, Side, SmallString,
-    SnapshotReason, SnapshotSource, StatusKind, SymbolId, Venue,
+    EventEnvelope, EventProvenance, Level, Levels, MarketEvent, Side, SmallString, SnapshotReason,
+    SnapshotSource, StatusKind, SymbolId, Venue,
 };
 pub use exec::{
     Fill, IntentError, IntentId, Liquidity, OrderIntent, OrderKind, SizeUnit, StrategyId,

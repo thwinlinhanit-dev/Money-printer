@@ -23,7 +23,10 @@ fn wsl(p: &std::path::Path) -> String {
             .args(["-c", &format!("wslpath -a '{}'", p.display())])
             .output()
             .expect("wslpath");
-        String::from_utf8(out.stdout).expect("utf8").trim().to_string()
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string()
     } else {
         p.display().to_string()
     }
@@ -352,7 +355,10 @@ fn ops_1_systemd_units_pin_restart_and_resource_limits() {
 #[test]
 fn ops_5_restore_drill_script_exists_and_refuses_without_backup() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert!(root.join("restore-drill.sh").exists(), "ops/restore-drill.sh must exist (OPS-5)");
+    assert!(
+        root.join("restore-drill.sh").exists(),
+        "ops/restore-drill.sh must exist (OPS-5)"
+    );
     // No backup argument ⇒ usage error (exit 2), never a fake PASS.
     let out = std::process::Command::new("bash")
         .args(["-c", &format!("'{}'", wsl(&root.join("restore-drill.sh")))])
@@ -479,7 +485,14 @@ fn ops_5_restore_drill_restores_a_backup_and_verifies() {
     // Full restore path with an injected verifier (the default verifier is the
     // sim golden fixture; injecting avoids nesting cargo inside cargo test).
     let ok = std::process::Command::new("bash")
-        .args(["-c", &format!("MP_DRILL_VERIFY_CMD=true '{}' '{}'", wsl(&root.join("restore-drill.sh")), wsl(&tarball))])
+        .args([
+            "-c",
+            &format!(
+                "MP_DRILL_VERIFY_CMD=true '{}' '{}'",
+                wsl(&root.join("restore-drill.sh")),
+                wsl(&tarball)
+            ),
+        ])
         .output()
         .expect("run drill");
     assert!(
@@ -501,7 +514,14 @@ fn ops_5_restore_drill_restores_a_backup_and_verifies() {
         .status()
         .expect("tar bad");
     let fail = std::process::Command::new("bash")
-        .args(["-c", &format!("MP_DRILL_VERIFY_CMD=true '{}' '{}'", wsl(&root.join("restore-drill.sh")), wsl(&bad))])
+        .args([
+            "-c",
+            &format!(
+                "MP_DRILL_VERIFY_CMD=true '{}' '{}'",
+                wsl(&root.join("restore-drill.sh")),
+                wsl(&bad)
+            ),
+        ])
         .output()
         .expect("run drill bad");
     assert!(

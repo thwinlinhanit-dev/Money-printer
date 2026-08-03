@@ -37,10 +37,7 @@ fn engine_with_all() -> FeatureEngine {
 
 fn value(engine: &FeatureEngine, ups: &[FeatureUpdate], feat: &str) -> Option<f64> {
     let id = engine.name_to_id(feat)?;
-    ups.iter()
-        .rev()
-        .find(|u| u.feature == id)
-        .map(|u| u.value)
+    ups.iter().rev().find(|u| u.feature == id).map(|u| u.value)
 }
 
 #[test]
@@ -165,7 +162,10 @@ fn fea_3_realized_vol_and_breakout_warmup_suppressed() {
     // RealizedVol(w=2) warms only after 2 returns; breakout(n=3) after 3 bars.
     // With 5 closed bars there should be at least one rv and one breakout value.
     assert!(value(&e, &all, "vol.rv.1s.2").is_some(), "rv should warm");
-    assert!(value(&e, &all, "breakout.3").is_some(), "breakout should warm");
+    assert!(
+        value(&e, &all, "breakout.3").is_some(),
+        "breakout should warm"
+    );
 }
 
 #[test]

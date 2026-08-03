@@ -27,12 +27,12 @@ authenticated trading, strategy changes, and long-running hosting policy.
 
 ## Acceptance criteria
 
-- [ ] `int_1_event_provenance_roundtrips` proves provenance is event-level.
-- [ ] `int_2_mixed_log_is_quarantined` proves a venue/symbol mismatch fails.
-- [ ] `int_3_audit_reports_gap_and_staleness` proves coverage diagnostics.
-- [ ] `int_4_compaction_refuses_quarantined_log` proves contaminated data never
+- [x] `int_1_event_provenance_roundtrips` proves provenance is event-level.
+- [x] `int_2_mixed_log_is_quarantined` proves a venue/symbol mismatch fails.
+- [x] `int_3_audit_reports_gap_and_staleness` proves coverage diagnostics.
+- [x] `int_4_compaction_refuses_quarantined_log` proves contaminated data never
   reaches cold storage.
-- [ ] `int_5_scorecard_requires_every_recording_clean` proves promotion is
+- [x] `int_5_scorecard_requires_every_recording_clean` proves promotion is
   based on the required matrix, not process uptime.
 
 ## Decisions
@@ -41,3 +41,8 @@ authenticated trading, strategy changes, and long-running hosting policy.
   legacy/unattributable and quarantined.  They are never silently promoted.
 - 2026-07-29: The collector process remains one `(venue, symbol)` pair.  Cross
   venue observations are separate recordings and are merged only at replay.
+- 2026-08-03: INT-4 is enforced at the compaction boundary via
+  `compact_day_verified` (returns `StorageError::Refused` and writes nothing
+  when the raw log's audit is not clean).  `compact_day` stays the pure
+  mechanics entry point for already-verified paths; promotion must go through
+  the verified gate.

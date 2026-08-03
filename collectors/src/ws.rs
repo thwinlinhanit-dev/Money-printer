@@ -50,7 +50,7 @@ pub struct WsLimits {
 impl Default for WsLimits {
     fn default() -> Self {
         Self {
-            max_frame_size: 1024 * 1024,      // 1 MiB
+            max_frame_size: 1024 * 1024,       // 1 MiB
             max_message_size: 4 * 1024 * 1024, // 4 MiB
         }
     }
@@ -233,7 +233,8 @@ async fn run(
         max_message_size: Some(endpoint.limits.max_message_size),
         ..Default::default()
     };
-    let (ws, _resp) = tokio_tungstenite::connect_async_with_config(&endpoint.url, Some(cfg), false).await?;
+    let (ws, _resp) =
+        tokio_tungstenite::connect_async_with_config(&endpoint.url, Some(cfg), false).await?;
     let (mut write, mut read) = ws.split();
 
     for sub in &endpoint.subscribe {

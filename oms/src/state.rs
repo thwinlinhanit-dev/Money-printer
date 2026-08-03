@@ -169,7 +169,10 @@ impl OrderStore {
         self.orders
             .values()
             .filter(|o| o.state == OrderState::Unknown)
-            .filter(|o| o.unknown_since_ns.map_or(false, |t| now_ns.saturating_sub(t) >= max_ns))
+            .filter(|o| {
+                o.unknown_since_ns
+                    .map_or(false, |t| now_ns.saturating_sub(t) >= max_ns)
+            })
             .map(|o| o.client_id.clone())
             .collect()
     }

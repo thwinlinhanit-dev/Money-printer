@@ -62,7 +62,7 @@ impl CommandJournal {
             w.write_all(line.as_bytes())?;
             self.bytes_written += line.len() as u64;
             w.flush()?; // fflush
-            // fsync the file handle
+                        // fsync the file handle
             w.get_ref().sync_data()?;
         }
         Ok(())
@@ -148,11 +148,26 @@ fn utc_date_str() -> String {
     let mut rem = days as i64;
     loop {
         let days_yr = if is_leap(y) { 366 } else { 365 };
-        if rem < days_yr { break; }
+        if rem < days_yr {
+            break;
+        }
         rem -= days_yr;
         y += 1;
     }
-    let months = [31, if is_leap(y) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = [
+        31,
+        if is_leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut m = 0usize;
     while m < 12 && rem >= months[m] {
         rem -= months[m];
@@ -168,13 +183,32 @@ fn is_leap(y: i64) -> bool {
 fn next_date(d: &str) -> String {
     // Simple: parse YYYY-MM-DD, add one day
     let parts: Vec<&str> = d.split('-').collect();
-    if parts.len() != 3 { return d.to_string(); }
+    if parts.len() != 3 {
+        return d.to_string();
+    }
     let y: i64 = parts[0].parse().unwrap_or(1970);
     let m: u32 = parts[1].parse().unwrap_or(1);
     let day: u32 = parts[2].parse().unwrap_or(1);
-    let months = [31, if is_leap(y) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = [
+        31,
+        if is_leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let (ny, nm, nd) = if day >= months[m as usize - 1] {
-        if m >= 12 { (y + 1, 1u32, 1u32) } else { (y, m + 1, 1u32) }
+        if m >= 12 {
+            (y + 1, 1u32, 1u32)
+        } else {
+            (y, m + 1, 1u32)
+        }
     } else {
         (y, m, day + 1)
     };
@@ -188,7 +222,13 @@ mod tests {
 
     #[test]
     fn ops_11_command_persisted() {
-        let dir = std::env::temp_dir().join(format!("cmd_journal_test_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "cmd_journal_test_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let mut j = CommandJournal::open(&dir).unwrap();
         let entry = CommandEntry {
@@ -210,7 +250,13 @@ mod tests {
 
     #[test]
     fn ops_14_audit_read() {
-        let dir = std::env::temp_dir().join(format!("cmd_audit_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "cmd_audit_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let mut j = CommandJournal::open(&dir).unwrap();
         for i in 0..5 {
@@ -219,7 +265,8 @@ mod tests {
                 user_id: 1,
                 text: format!("/status {}", i),
                 verdict: "ok".into(),
-            }).unwrap();
+            })
+            .unwrap();
         }
         j.flush().unwrap();
         let date = utc_date_str();
@@ -230,7 +277,13 @@ mod tests {
 
     #[test]
     fn ops_15_pending_survives_restart() {
-        let dir = std::env::temp_dir().join(format!("cmd_pending_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "cmd_pending_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let j = CommandJournal::open(&dir).unwrap();
         let state = Some(PendingState {

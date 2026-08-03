@@ -330,7 +330,9 @@ impl LogReader {
                     // EVT-4: a torn tail means the writer crashed mid-frame.
                     // Distinguish it from a clean EOF so replay isn't fooled
                     // into thinking the capture simply ended. WARN per spec.
-                    tracing::warn!("event log ended with a torn tail; trailing partial frame discarded");
+                    tracing::warn!(
+                        "event log ended with a torn tail; trailing partial frame discarded"
+                    );
                     self.done = true;
                     return Ok(None);
                 }

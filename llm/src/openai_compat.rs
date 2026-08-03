@@ -14,8 +14,12 @@ pub(crate) fn u32_at(v: &Value, ptr: &'static str) -> Result<u32, LlmError> {
     match v.pointer(ptr) {
         None => Ok(0),
         Some(n) => {
-            let raw = n.as_u64().ok_or_else(|| LlmError::UsageOverflow { ptr, value: u64::MAX })?;
-            raw.try_into().map_err(|_| LlmError::UsageOverflow { ptr, value: raw })
+            let raw = n.as_u64().ok_or_else(|| LlmError::UsageOverflow {
+                ptr,
+                value: u64::MAX,
+            })?;
+            raw.try_into()
+                .map_err(|_| LlmError::UsageOverflow { ptr, value: raw })
         }
     }
 }

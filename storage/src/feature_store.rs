@@ -145,8 +145,9 @@ fn write_features_no_overwrite(
 ) -> Result<u64, StorageError> {
     if path.exists() {
         let existing = read_features(path)?;
-        let existing_meta = read_feature_meta(path)?
-            .ok_or_else(|| StorageError::Parquet(format!("{} lacks feature footer", path.display())))?;
+        let existing_meta = read_feature_meta(path)?.ok_or_else(|| {
+            StorageError::Parquet(format!("{} lacks feature footer", path.display()))
+        })?;
         if rows_content_hash(&existing, &existing_meta) == rows_content_hash(rows, meta) {
             return Ok(0); // identical content: nothing to do
         }
@@ -350,13 +351,31 @@ fn date_str(ns: i64) -> String {
     let mut rem = days as i64;
     loop {
         let days_yr = if is_leap(y) { 366 } else { 365 };
-        if rem < days_yr { break; }
+        if rem < days_yr {
+            break;
+        }
         rem -= days_yr;
         y += 1;
     }
-    let months = [31, if is_leap(y) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = [
+        31,
+        if is_leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut m = 0usize;
-    while m < 12 && rem >= months[m] { rem -= months[m]; m += 1; }
+    while m < 12 && rem >= months[m] {
+        rem -= months[m];
+        m += 1;
+    }
     format!("{:04}-{:02}-{:02}", y, m + 1, rem + 1)
 }
 

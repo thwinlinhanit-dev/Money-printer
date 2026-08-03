@@ -94,6 +94,10 @@ snapshot channel or REST snapshot), mark/funding, open interest, liquidations.
 ## Decisions
 - 2026-07-10: first venue = Bybit (API-friendly, no US geo-block, in-band
   book snapshots). Binance second, from a non-US host.
+- 2026-08-03: **first venue = Binance** — owner correction: the deployed
+  collector is Binance-only (`binance-btcusdt.example.toml`); Bybit stays
+  supported (multi-venue normalizer) but is no longer the reference venue.
+  Supersedes the 2026-07-10 Bybit-first decision.
 - 2026-07-10 (impl): the collector is split into a **transport-agnostic core**
   (this crate) and a live WS transport (deferred). Adding a network dependency
   (tokio/tokio-tungstenite) is must-ask-first (CLAUDE.md); until approved, all

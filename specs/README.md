@@ -32,7 +32,7 @@ should be updated).
 | 021 | [Bot Command Journal](021-bot-journal.md) | ops | 📝 draft |
 | 022 | [Screener Evaluation Cadence](022-screener-cadence.md) | intelligence | 📝 draft |
 | 023 | [String Interning in Features](023-string-interning.md) | intelligence | 📝 draft |
-| 024 | [Market-Data Integrity Gate](024-market-data-integrity.md) | data plane | 🔨 implementing |
+| 024 | [Market-Data Integrity Gate](024-market-data-integrity.md) | data plane | ✅ implemented |
 
 Status values: `draft` → `ready` (implementable) → `implementing` →
 `implemented` → `superseded`. Update this table in the same commit as the work

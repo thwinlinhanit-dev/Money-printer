@@ -90,7 +90,11 @@ fn main() {
                 path = log.path.display(),
             );
             for f in &audit.findings {
-                println!("       └─ [{code}] {detail}", code = f.code, detail = f.detail);
+                println!(
+                    "       └─ [{code}] {detail}",
+                    code = f.code,
+                    detail = f.detail
+                );
             }
         }
 
@@ -141,7 +145,10 @@ fn main() {
             "longest_clean_run": longest_clean_run(&scorecards),
             "all_clean": all_clean,
         });
-        println!("{}", serde_json::to_string_pretty(&summary).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary).unwrap_or_default()
+        );
     }
 
     std::process::exit(if all_clean { 0 } else { 1 });
@@ -191,7 +198,12 @@ fn discover_raw_logs(raw_dir: &Path) -> Vec<RawLog> {
             symbol: parts[2].to_string(),
         });
     }
-    logs.sort_by(|a, b| a.date.cmp(&b.date).then(a.venue_str.cmp(&b.venue_str)).then(a.symbol.cmp(&b.symbol)));
+    logs.sort_by(|a, b| {
+        a.date
+            .cmp(&b.date)
+            .then(a.venue_str.cmp(&b.venue_str))
+            .then(a.symbol.cmp(&b.symbol))
+    });
     logs
 }
 

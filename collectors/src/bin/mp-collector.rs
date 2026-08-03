@@ -46,8 +46,12 @@ mod inner {
         backpressure: Option<String>,
     }
 
-    fn default_data_dir() -> String { "data".to_owned() }
-    fn default_channel_capacity() -> usize { 10_000 }
+    fn default_data_dir() -> String {
+        "data".to_owned()
+    }
+    fn default_channel_capacity() -> usize {
+        10_000
+    }
 
     fn config_from_args(args: &[String]) -> Result<FileConfig, String> {
         if let Some(path) = flag(args, "--config") {
@@ -56,7 +60,10 @@ mod inner {
             let config: FileConfig = toml::from_str(&text)
                 .map_err(|error| format!("parse collector config {path}: {error}"))?;
             if config.symbol.is_empty() || config.venue.is_empty() || config.channel_capacity == 0 {
-                return Err("collector config requires non-empty venue/symbol and channel_capacity > 0".into());
+                return Err(
+                    "collector config requires non-empty venue/symbol and channel_capacity > 0"
+                        .into(),
+                );
             }
             return Ok(config);
         }
@@ -137,7 +144,11 @@ mod inner {
                     ),
                 )
             })?;
-            let _ = writeln!(file, "pid={} venue={venue} symbol={symbol}", std::process::id());
+            let _ = writeln!(
+                file,
+                "pid={} venue={venue} symbol={symbol}",
+                std::process::id()
+            );
             let _ = file.flush();
             Ok(Self { _file: file, path })
         }
@@ -190,10 +201,7 @@ mod inner {
         }
         #[cfg(not(any(windows, unix)))]
         {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
+            OpenOptions::new().write(true).create_new(true).open(path)
         }
     }
 
@@ -268,9 +276,15 @@ mod inner {
                 let coin = hl_coin(symbol);
                 // Subscribe to all channels the normalizer supports
                 vec![
-                    format!(r#"{{"method":"subscribe","subscription":{{"type":"trades","coin":"{coin}"}}}}"#),
-                    format!(r#"{{"method":"subscribe","subscription":{{"type":"l2Book","coin":"{coin}"}}}}"#),
-                    format!(r#"{{"method":"subscribe","subscription":{{"type":"activeAssetCtx","coin":"{coin}"}}}}"#),
+                    format!(
+                        r#"{{"method":"subscribe","subscription":{{"type":"trades","coin":"{coin}"}}}}"#
+                    ),
+                    format!(
+                        r#"{{"method":"subscribe","subscription":{{"type":"l2Book","coin":"{coin}"}}}}"#
+                    ),
+                    format!(
+                        r#"{{"method":"subscribe","subscription":{{"type":"activeAssetCtx","coin":"{coin}"}}}}"#
+                    ),
                 ]
             }
             "okx" => vec![format!(
@@ -332,7 +346,14 @@ mod inner {
     }
 
     impl Stream {
-        fn new(name: String, venue_str: &str, symbol: &str, seed: u64, channel_capacity: usize, backpressure: BackpressurePolicy) -> Result<Self, String> {
+        fn new(
+            name: String,
+            venue_str: &str,
+            symbol: &str,
+            seed: u64,
+            channel_capacity: usize,
+            backpressure: BackpressurePolicy,
+        ) -> Result<Self, String> {
             let venue = parse_venue(venue_str)?;
             let url = endpoint_for(venue_str, symbol)?;
             let subscribe = subscribe_for(venue_str, symbol);
@@ -366,7 +387,11 @@ mod inner {
             })
         }
 
-        fn provenance(&self, body: &MarketEvent, snapshot_source: SnapshotSource) -> EventProvenance {
+        fn provenance(
+            &self,
+            body: &MarketEvent,
+            snapshot_source: SnapshotSource,
+        ) -> EventProvenance {
             let stream = match body {
                 MarketEvent::Trade { .. } => "trade",
                 MarketEvent::BookDelta { .. } | MarketEvent::BookSnapshot { .. } => "book",
@@ -400,7 +425,11 @@ mod inner {
             if self.transport.is_some() {
                 return;
             }
-            match WsTransport::connect_with_policy(self.endpoint.clone(), self.channel_capacity, self.backpressure) {
+            match WsTransport::connect_with_policy(
+                self.endpoint.clone(),
+                self.channel_capacity,
+                self.backpressure,
+            ) {
                 Ok(t) => {
                     tracing::info!(stream = %self.name, venue = ?self.venue, "connected");
                     self.backoff.reset();
@@ -417,9 +446,16 @@ mod inner {
                         let now_ns = mp_collectors::binance::wall_now_ns();
                         let before = seed_buf.len();
                         let norm = self.collector.normalizer_mut();
-                        if let Some(bn) = norm.as_any_mut().and_then(|a| a.downcast_mut::<BinanceNormalizer>()) {
+                        if let Some(bn) = norm
+                            .as_any_mut()
+                            .and_then(|a| a.downcast_mut::<BinanceNormalizer>())
+                        {
                             match mp_collectors::binance::inject_rest_depth_seed_budgeted(
-                                bn, &sym, now_ns, seed_buf, Some(&mut self.rest_budget),
+                                bn,
+                                &sym,
+                                now_ns,
+                                seed_buf,
+                                Some(&mut self.rest_budget),
                             ) {
                                 Ok(()) => {}
                                 Err(e) => tracing::warn!(
@@ -489,10 +525,19 @@ mod inner {
             #[cfg(feature = "live-http")]
             if let Some(sym) = self.binance_symbol.clone() {
                 let norm = self.collector.normalizer_mut();
-                if let Some(bn) = norm.as_any_mut().and_then(|a| a.downcast_mut::<BinanceNormalizer>()) {
+                if let Some(bn) = norm
+                    .as_any_mut()
+                    .and_then(|a| a.downcast_mut::<BinanceNormalizer>())
+                {
                     if bn.needs_reseed() {
                         let before = out.len();
-                        match mp_collectors::binance::reseed_if_needed(bn, &sym, 0, out, Some(&mut self.rest_budget)) {
+                        match mp_collectors::binance::reseed_if_needed(
+                            bn,
+                            &sym,
+                            0,
+                            out,
+                            Some(&mut self.rest_budget),
+                        ) {
                             Ok(true) => {
                                 self.stamp(&mut out[before..], SnapshotSource::Rest);
                             }
@@ -523,7 +568,11 @@ mod inner {
             // transport stamps recv_ts_ns at socket read; fall back to the loop
             // edge when an event has none (REST-injected events use 0).
             for ev in new_events.iter() {
-                let ts = if ev.recv_ts_ns > 0 { ev.recv_ts_ns } else { now_recv_ns };
+                let ts = if ev.recv_ts_ns > 0 {
+                    ev.recv_ts_ns
+                } else {
+                    now_recv_ns
+                };
                 self.staleness.observe(&self.symbol, ts);
             }
             // COL-2: stream silent past the threshold ⇒ declare stale, force
@@ -588,7 +637,14 @@ mod inner {
 
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let mut streams = vec![Stream::new("primary".into(), &venue, &symbol, 1, config.channel_capacity, backpressure)?];
+        let mut streams = vec![Stream::new(
+            "primary".into(),
+            &venue,
+            &symbol,
+            1,
+            config.channel_capacity,
+            backpressure,
+        )?];
 
         let raw_dir = Path::new(&config.data_dir).join("raw");
         std::fs::create_dir_all(&raw_dir)?;
@@ -629,13 +685,17 @@ mod inner {
             }
 
             #[cfg(feature = "live-http")]
-            if venue == "binance" && (last_oi_poll.elapsed() >= oi_poll_interval || current_date.is_empty()) {
+            if venue == "binance"
+                && (last_oi_poll.elapsed() >= oi_poll_interval || current_date.is_empty())
+            {
                 last_oi_poll = std::time::Instant::now();
                 // COL-21: the OI poll shares the stream's REST budget so
                 // snapshot reseeds and OI fetches together respect the venue limit.
                 if !streams[0].rest_budget.try_take(now_ns(), 1.0) {
                     tracing::debug!("OI poll skipped: REST rate budget empty (COL-21)");
-                } else if let Ok(oi_body) = mp_collectors::binance::fetch_open_interest_blocking(&symbol) {
+                } else if let Ok(oi_body) =
+                    mp_collectors::binance::fetch_open_interest_blocking(&symbol)
+                {
                     let now_ns = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()

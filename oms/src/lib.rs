@@ -14,7 +14,9 @@
 pub mod reconcile;
 pub mod state;
 
-pub use reconcile::{reconcile, reconcile_balances, reconcile_orders, OrderReconStatus, ReconStatus};
+pub use reconcile::{
+    reconcile, reconcile_balances, reconcile_orders, OrderReconStatus, ReconStatus,
+};
 pub use state::{IllegalTransition, OmsEvent, Order, OrderState, OrderStore};
 
 /// EXE-10 offline sanity used by `oms doctor`: drive the full legal state
@@ -37,7 +39,11 @@ pub fn state_machine_self_test() -> Result<(), String> {
     for (ev, want) in expect {
         match store.apply("self-test", ev, 0) {
             Some(Ok(got)) if got == want => {}
-            other => return Err(format!("legal path diverged at {ev:?}: {other:?} (want {want:?})")),
+            other => {
+                return Err(format!(
+                    "legal path diverged at {ev:?}: {other:?} (want {want:?})"
+                ))
+            }
         }
     }
 
@@ -57,7 +63,10 @@ pub fn state_machine_self_test() -> Result<(), String> {
     // Illegal transitions must error, never silently change state.
     let mut store = OrderStore::new();
     store.submit("self-test");
-    if store.apply("self-test", Ack, 0).map_or(false, |r| r.is_ok()) {
+    if store
+        .apply("self-test", Ack, 0)
+        .map_or(false, |r| r.is_ok())
+    {
         return Err("ack-before-submit must be illegal".into());
     }
     Ok(())
