@@ -7,8 +7,9 @@
 //! read or CRC mismatch) is detected and truncated on open (EVT-4).
 
 use crate::codec::{self, CodecError};
-use crate::event::EventEnvelope;
+use crate::event::{EventEnvelope, EventProvenance, MarketEvent, SymbolId, Venue};
 use crate::symbol::SymbolMeta;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::{File, OpenOptions};
@@ -22,6 +23,23 @@ const FRAME_EVENT: u8 = 1;
 const FRAME_HEADER_LEN: u64 = 9; // kind(1) + len(4) + crc(4)
 /// Reject absurd frame lengths from corrupt data before allocating (EVT-4).
 const MAX_FRAME_LEN: u32 = 64 * 1024 * 1024;
+
+/// Schema-1 envelope layout (pre-provenance, written before SCHEMA_VER was
+/// bumped to 2). Field order is the v1 law and MUST stay as-is: bincode maps
+/// struct fields positionally, so this is the only shape that decodes the
+/// historical recordings. The 2026-08-03 audit fix added this so the
+/// 07-18..07-29 capture becomes readable again instead of being quarantined
+/// behind a strict `schema_ver != SCHEMA_VER` reject.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvelopeV1 {
+    pub schema_ver: u16,
+    pub venue: Venue,
+    pub symbol: SymbolId,
+    pub exch_ts_ns: i64,
+    pub recv_ts_ns: i64,
+    pub stream_seq: u64,
+    pub body: MarketEvent,
+}
 
 /// Event-log errors.
 #[derive(Debug, thiserror::Error)]
@@ -348,10 +366,33 @@ impl LogReader {
                             return Ok(None);
                         }
                         let schema_ver = u16::from_le_bytes([payload[0], payload[1]]);
-                        if schema_ver != crate::SCHEMA_VER {
-                            return Err(LogError::UnsupportedSchema(schema_ver));
-                        }
-                        let e = codec::decode_event(&payload[2..])?;
+                        let e = match schema_ver {
+                            crate::SCHEMA_VER => codec::decode_event(&payload[2..])?,
+                            // Schema-1 (pre-provenance): decode the historical
+                            // layout and normalize to the current envelope with
+                            // synthetic provenance. All market data is
+                            // preserved; the audit layer flags the synthetic
+                            // provenance as `missing_provenance` (INT-1), so
+                            // legacy recordings are readable for research but
+                            // never promoted to cold as live-attributable.
+                            1 => {
+                                let legacy: EnvelopeV1 =
+                                    bincode::deserialize(&payload[2..]).map_err(|e| {
+                                        LogError::Codec(CodecError::Decode(e.to_string()))
+                                    })?;
+                                EventEnvelope {
+                                    schema_ver: legacy.schema_ver,
+                                    venue: legacy.venue,
+                                    symbol: legacy.symbol,
+                                    exch_ts_ns: legacy.exch_ts_ns,
+                                    recv_ts_ns: legacy.recv_ts_ns,
+                                    stream_seq: legacy.stream_seq,
+                                    provenance: EventProvenance::synthetic(),
+                                    body: legacy.body,
+                                }
+                            }
+                            other => return Err(LogError::UnsupportedSchema(other)),
+                        };
                         return Ok(Some(e));
                     }
                     other => return Err(LogError::BadFrameKind(other)),
@@ -472,5 +513,116 @@ impl<I: Iterator<Item = Result<EventEnvelope, LogError>>> Iterator for MergeRead
     type Item = Result<EventEnvelope, LogError>;
     fn next(&mut self) -> Option<Self::Item> {
         self.next_merged().transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{MarketEvent, Side, SnapshotSource};
+    use std::io::Write;
+
+    /// Write a schema-1 event log by hand: MAGIC + FORMAT_VER header, then
+    /// one event frame whose payload is `schema_ver:u16 || bincode(EnvelopeV1)`
+    /// — exactly the byte layout the pre-provenance collector produced.
+    fn write_v1_log(path: &std::path::Path, events: &[EnvelopeV1]) {
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(MAGIC).unwrap();
+        f.write_all(&FORMAT_VER.to_le_bytes()).unwrap();
+        for e in events {
+            let mut payload = e.schema_ver.to_le_bytes().to_vec();
+            payload.extend_from_slice(&bincode::serialize(e).unwrap());
+            f.write_all(&encode_frame(FRAME_EVENT, &payload)).unwrap();
+        }
+        f.sync_all().unwrap();
+    }
+
+    fn v1_trade(recv_ts_ns: i64, stream_seq: u64) -> EnvelopeV1 {
+        EnvelopeV1 {
+            schema_ver: 1,
+            venue: Venue::BinanceFutures,
+            symbol: SymbolId(7),
+            exch_ts_ns: recv_ts_ns - 1,
+            recv_ts_ns,
+            stream_seq,
+            body: MarketEvent::Trade {
+                price: 61_000.5,
+                qty: 0.25,
+                side: Side::Buy,
+                trade_id: stream_seq,
+            },
+        }
+    }
+
+    #[test]
+    fn conv_20_schema_1_log_decodes_with_synthetic_provenance() {
+        // Audit 2026-08-03: schema-1 recordings must become readable again
+        // instead of being rejected by the strict schema_ver gate.
+        let dir = std::env::temp_dir().join(format!("mplog-v1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("schema1.log");
+        let _ = std::fs::remove_file(&path);
+
+        write_v1_log(&path, &[v1_trade(100, 1), v1_trade(200, 2)]);
+
+        let got: Vec<_> = LogReader::open(&path)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(got.len(), 2, "both v1 events must decode");
+        let e = &got[0];
+        assert_eq!(e.recv_ts_ns, 100);
+        assert_eq!(e.stream_seq, 1);
+        assert_eq!(e.symbol, SymbolId(7));
+        assert_eq!(e.venue, Venue::BinanceFutures);
+        // Provenance is synthetic: empty stream/subscription, no snapshot
+        // source — the audit layer flags this as missing_provenance (INT-1).
+        assert_eq!(e.provenance, EventProvenance::synthetic());
+        assert_eq!(e.provenance.snapshot_source, SnapshotSource::None);
+        match &e.body {
+            MarketEvent::Trade { price, qty, side, .. } => {
+                assert_eq!(*price, 61_000.5);
+                assert_eq!(*qty, 0.25);
+                assert_eq!(*side, Side::Buy);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn conv_20_schema_2_log_still_reads_normally() {
+        // Guard: the compat path must not disturb current-schema reads.
+        let dir = std::env::temp_dir().join(format!("mplog-v2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("schema2.log");
+        let _ = std::fs::remove_file(&path);
+
+        let (mut w, _) = EventLogWriter::open(&path).unwrap();
+        w.append(&EventEnvelope::new(
+            Venue::Bybit,
+            SymbolId(1),
+            10,
+            20,
+            3,
+            MarketEvent::Trade {
+                price: 1.0,
+                qty: 2.0,
+                side: Side::Sell,
+                trade_id: 9,
+            },
+        ))
+        .unwrap();
+        w.sync().unwrap();
+        drop(w);
+
+        let got: Vec<_> = LogReader::open(&path)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].schema_ver, crate::SCHEMA_VER);
+        assert_eq!(got[0].recv_ts_ns, 20);
+        let _ = std::fs::remove_file(&path);
     }
 }
