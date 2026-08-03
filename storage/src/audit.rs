@@ -262,10 +262,8 @@ mod tests {
     }
 
     fn fixture(events: Vec<EventEnvelope>) -> std::path::PathBuf {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("mp-int-{}-{nonce}.log", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let (mut writer, _) = EventLogWriter::open(&path).unwrap();
