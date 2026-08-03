@@ -111,17 +111,6 @@ mod tests {
     use mp_core::log::EnvelopeV1;
     use mp_core::{SymbolId, Venue};
 
-    /// Unique temp dir per test: the storage suite runs tests in parallel and
-    /// a shared `mpmigrate-{pid}` dir with identical filenames would let one
-    /// test delete another's fixture mid-flight.
-    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    fn test_dir() -> std::path::PathBuf {
-        let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("mpmigrate-{}-{nonce}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     fn write_v1_log(path: &Path, n: u64) {
         // The current writer stamps SCHEMA_VER=2, so a schema-1 fixture has to
         // be hand-framed: header + FRAME_EVENT (kind=1) frames whose payload
@@ -178,6 +167,9 @@ mod tests {
         w.sync().unwrap();
     }
 
+    /// Unique temp dir per test: the storage suite runs tests in parallel and
+    /// a shared `mpmigrate-{pid}` dir with identical filenames would let one
+    /// test delete another's fixture mid-flight.
     fn tmp(tag: &str) -> std::path::PathBuf {
         static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

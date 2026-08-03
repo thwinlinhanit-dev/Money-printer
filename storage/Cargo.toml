@@ -20,5 +20,9 @@ tracing.workspace = true
 arrow = { version = "53", default-features = false }
 parquet = { version = "53", default-features = false, features = ["arrow", "zstd"] }
 
+[dev-dependencies]
+bincode.workspace = true
+crc32fast.workspace = true
+
 [lints]
 workspace = true

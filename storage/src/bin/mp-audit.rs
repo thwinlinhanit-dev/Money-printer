@@ -7,9 +7,9 @@
 //!   cargo run -p mp-storage --bin mp-audit -- --data-dir data  (all logs)
 
 use mp_core::Venue;
-use mp_storage::audit::{audit_raw_log, scorecard, AuditConfig, DailyScorecard, RawLogAudit};
+use mp_storage::audit::{audit_raw_log, discover_raw_logs, scorecard, AuditConfig, DailyScorecard, RawLogAudit};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -158,53 +158,6 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1).cloned())
-}
-
-/// Parsed raw log filename: `{date}_{venue}_{symbol}.log`.
-struct RawLog {
-    path: PathBuf,
-    date: String,
-    venue_str: String,
-    symbol: String,
-}
-
-fn discover_raw_logs(raw_dir: &Path) -> Vec<RawLog> {
-    let mut logs = Vec::new();
-    let Ok(entries) = std::fs::read_dir(raw_dir) else {
-        return logs;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("log") {
-            continue;
-        }
-        let stem = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s.to_owned(),
-            None => continue,
-        };
-        // Expected: YYYYMMDD_venue_SYMBOL
-        let parts: Vec<&str> = stem.splitn(3, '_').collect();
-        if parts.len() != 3 {
-            continue;
-        }
-        // Validate date is 8 digits.
-        if parts[0].len() != 8 || !parts[0].chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        logs.push(RawLog {
-            path,
-            date: parts[0].to_string(),
-            venue_str: parts[1].to_string(),
-            symbol: parts[2].to_string(),
-        });
-    }
-    logs.sort_by(|a, b| {
-        a.date
-            .cmp(&b.date)
-            .then(a.venue_str.cmp(&b.venue_str))
-            .then(a.symbol.cmp(&b.symbol))
-    });
-    logs
 }
 
 fn longest_clean_run(scorecards: &[DailyScorecard]) -> usize {

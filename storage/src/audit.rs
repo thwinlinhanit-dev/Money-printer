@@ -6,7 +6,7 @@ use mp_core::log::LogReader;
 use mp_core::{EventEnvelope, MarketEvent, SnapshotSource, SymbolMeta, Venue};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Expected identity and quality thresholds for one raw recording.
 #[derive(Debug, Clone)]
@@ -40,6 +40,52 @@ pub struct AuditFinding {
 pub struct TimeRange {
     pub start_ns: i64,
     pub end_ns: i64,
+}
+
+/// A raw log file discovered by [`discover_raw_logs`] (spec 024).
+#[derive(Debug, Clone)]
+pub struct RawLog {
+    pub path: PathBuf,
+    pub date: String,
+    pub venue_str: String,
+    pub symbol: String,
+}
+
+/// Discover raw logs in `raw_dir` matching the `{date}_{venue}_{symbol}.log`
+/// naming contract. Non-matching files (stderr/stdout captures, test scripts,
+/// old ad-hoc names) are skipped — they are not recordings.
+pub fn discover_raw_logs(raw_dir: &Path) -> Vec<RawLog> {
+    let mut logs = Vec::new();
+    let Ok(entries) = std::fs::read_dir(raw_dir) else {
+        return logs;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("log") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_owned(),
+            None => continue,
+        };
+        // Expected: YYYYMMDD_venue_SYMBOL
+        let parts: Vec<&str> = stem.splitn(3, '_').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        // Validate date is 8 digits.
+        if parts[0].len() != 8 || !parts[0].chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        logs.push(RawLog {
+            path,
+            date: parts[0].to_string(),
+            venue_str: parts[1].to_string(),
+            symbol: parts[2].to_string(),
+        });
+    }
+    logs.sort_by(|a, b| a.date.cmp(&b.date).then(a.venue_str.cmp(&b.venue_str)).then(a.symbol.cmp(&b.symbol)));
+    logs
 }
 
 /// Machine-readable quality verdict for one raw event log.
