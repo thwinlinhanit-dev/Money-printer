@@ -16,6 +16,7 @@ pub mod dataset;
 pub mod feature_store;
 pub mod layout;
 pub mod manifest;
+pub mod migrate;
 pub mod parquet_trades;
 pub mod prune;
 pub mod scd2;
@@ -34,6 +35,7 @@ pub enum StorageError {
 }
 
 pub use audit::{audit_raw_log, scorecard, AuditConfig, DailyScorecard, RawLogAudit};
+pub use migrate::{migrate_log, MigrateError, MigrateOutcome};
 pub use compactor::{compact_day, compact_day_verified, CompactStats};
 pub use dataset::Dataset;
 pub use feature_store::{
