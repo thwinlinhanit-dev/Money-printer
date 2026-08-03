@@ -1,7 +1,12 @@
 //! Screener hit journal (spec 017). Persists `ScreenerHit` to append-only
 //! JSONL files per day, and supports forward-return backfill and grading.
+//! Time is injected: the journal derives the date partition from a
+//! caller-supplied `&dyn Clock` (core/src/time.rs), never from a wall clock —
+//! at the binary edge pass `&WallClock`, in tests/replay pass a fixed
+//! `SimClock` (PD-3/CONV-5).
 
 use crate::ScreenerHit;
+use mp_core::Clock;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,26 +37,33 @@ impl From<ScreenerHit> for HitRecord {
     }
 }
 
-/// Hit journal: append-only JSONL per day.
-pub struct HitJournal {
+/// Hit journal: append-only JSONL per day ( partitioned by the date of the
+/// injected clock at record time).
+pub struct HitJournal<'a> {
     dir: PathBuf,
+    clock: &'a dyn Clock,
     writer: Option<std::io::BufWriter<std::fs::File>>,
     current_date: String,
 }
 
-impl HitJournal {
-    /// Open the journal directory. Creates per-date JSONL files on first write.
-    pub fn open(dir: &Path) -> std::io::Result<Self> {
+impl<'a> HitJournal<'a> {
+    /// Open the journal directory, taking the clock that determines day
+    /// partitions (injected; `&WallClock` at the live edge, `&SimClock` in
+    /// tests/replay). Creates per-date JSONL files on first write.
+    pub fn open(dir: &Path, clock: &'a dyn Clock) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         std::fs::create_dir_all(dir.join("backfill"))?;
-        Ok(Self { dir: dir.to_owned(), writer: None, current_date: String::new() })
+        Ok(Self {
+            dir: dir.to_owned(),
+            clock,
+            writer: None,
+            current_date: String::new(),
+        })
     }
 
-    fn date_str() -> String {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+    /// UTC date string for an event-time nanosecond timestamp (civil-from-days).
+    fn date_str_for_ns(now_ns: i64) -> String {
+        let secs = (now_ns / 1_000_000_000).max(0) as u64;
         let days = secs / 86400;
         let mut y = 1970i64;
         let mut rem = days as i64;
@@ -69,10 +81,14 @@ impl HitJournal {
     }
 
     fn ensure_writer(&mut self) -> std::io::Result<()> {
-        let date = Self::date_str();
+        let date = Self::date_str_for_ns(self.clock.now_ns());
         if date != self.current_date {
             if let Some(mut w) = self.writer.take() {
+                // Rotation: flush the buffered writer AND fsync the file before
+                // dropping it, so the old day's tail hits durable storage
+                // (previously flush-only — the kernel could still lose it).
                 w.flush()?;
+                w.get_ref().sync_data()?;
             }
             let path = self.dir.join(format!("{date}.jsonl"));
             let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
@@ -95,17 +111,32 @@ impl HitJournal {
         Ok(())
     }
 
-    /// Read all hits for a date range.
+    /// Read all hits for a date range. Corrupt JSON lines are never fatal and
+    /// never silently dropped: each is WARNed with file + line number and the
+    /// per-file total is WARN-summarized (CONV-14/CONV-15).
     pub fn read_range(&self, from: &str, to: &str) -> std::io::Result<Vec<HitRecord>> {
         let mut results = Vec::new();
         let mut d = from.to_string();
         loop {
             let path = self.dir.join(format!("{d}.jsonl"));
             if path.exists() {
-                for line in std::fs::read_to_string(&path)?.lines() {
-                    if let Ok(r) = serde_json::from_str::<HitRecord>(line) {
-                        results.push(r);
+                let mut corrupt = 0u64;
+                for (lineno, line) in std::fs::read_to_string(&path)?.lines().enumerate() {
+                    match serde_json::from_str::<HitRecord>(line) {
+                        Ok(r) => results.push(r),
+                        Err(e) => {
+                            corrupt += 1;
+                            tracing::warn!(
+                                file = %path.display(),
+                                line = lineno + 1,
+                                error = %e,
+                                "corrupt journal line skipped"
+                            );
+                        }
                     }
+                }
+                if corrupt > 0 {
+                    tracing::warn!(file = %path.display(), corrupt, "corrupt journal lines skipped");
                 }
             }
             if d.as_str() >= to { break; }
@@ -114,9 +145,10 @@ impl HitJournal {
         Ok(results)
     }
 
-    /// Write backfill records (forward returns computed later).
+    /// Write backfill records (forward returns computed later), partitioned by
+    /// the injected clock's current date.
     pub fn write_backfill(&self, records: &[HitRecord]) -> std::io::Result<()> {
-        let date = Self::date_str();
+        let date = Self::date_str_for_ns(self.clock.now_ns());
         let dir = self.dir.join("backfill");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{date}.jsonl"));
@@ -146,14 +178,23 @@ fn next_date(d: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mp_core::SymbolId;
+    use mp_core::{SimClock, SymbolId};
+
+    // Deterministic instant (no wall clock, PD-3): 2026-07-19T00:00:00Z.
+    const FIXED_NS: i64 = 1784505600 * 1_000_000_000;
+
+    fn tmp(tag: &str) -> PathBuf {
+        // Unique per test run without a wall clock: pid + tag (CONV-3 style).
+        let d = std::env::temp_dir().join(format!("hitjournal-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
 
     #[test]
     fn grd_1_hit_persisted_with_snapshot() {
-        let dir = std::env::temp_dir().join(format!("hit_journal_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut j = HitJournal::open(&dir).unwrap();
+        let dir = tmp("grd1");
+        let clock = SimClock::new(FIXED_NS);
+        let mut j = HitJournal::open(&dir, &clock).unwrap();
         let hit = ScreenerHit {
             rule_id: "test_rule".into(),
             symbol: SymbolId(1),
@@ -161,7 +202,7 @@ mod tests {
             snapshot: [("funding_rate".into(), 0.00015)].into(),
         };
         j.record(hit).unwrap();
-        let date = HitJournal::date_str();
+        let date = HitJournal::date_str_for_ns(FIXED_NS);
         let records = j.read_range(&date, &date).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].rule_id, "test_rule");
@@ -171,10 +212,9 @@ mod tests {
 
     #[test]
     fn grd_4_grading_produces_report() {
-        let dir = std::env::temp_dir().join(format!("hit_grading_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut j = HitJournal::open(&dir).unwrap();
+        let dir = tmp("grd4");
+        let clock = SimClock::new(FIXED_NS);
+        let mut j = HitJournal::open(&dir, &clock).unwrap();
         for i in 0..10 {
             j.record(ScreenerHit {
                 rule_id: "rule_a".into(),
@@ -183,10 +223,39 @@ mod tests {
                 snapshot: Default::default(),
             }).unwrap();
         }
-        let date = HitJournal::date_str();
+        let date = HitJournal::date_str_for_ns(FIXED_NS);
         let records = j.read_range(&date, &date).unwrap();
         assert_eq!(records.len(), 10);
         assert!(records.iter().all(|r| r.rule_id == "rule_a"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grd_1_corrupt_lines_are_skipped_with_warn_not_panic() {
+        let dir = tmp("grdcorrupt");
+        let clock = SimClock::new(FIXED_NS);
+        let date = HitJournal::date_str_for_ns(FIXED_NS);
+        let mut j = HitJournal::open(&dir, &clock).unwrap();
+        j.record(ScreenerHit {
+            rule_id: "ok_rule".into(),
+            symbol: SymbolId(1),
+            ts_ns: 1784456653319497000,
+            snapshot: Default::default(),
+        }).unwrap();
+        drop(j);
+        // Append corrupt lines to the day's file: a torn write must never
+        // panic read_range, and must not silently drop the good line either.
+        let path = dir.join(format!("{date}.jsonl"));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{not json\n{\"rule_id\": 5\n")
+            .unwrap();
+        let j2 = HitJournal::open(&dir, &clock).unwrap();
+        let records = j2.read_range(&date, &date).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].rule_id, "ok_rule");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

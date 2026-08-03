@@ -6,6 +6,20 @@ use crate::error::LlmError;
 use crate::provider::{ChatRequest, Completion, HttpRequest, LlmProvider, Usage};
 use serde_json::{json, Value};
 
+/// Read a non-negative integer at a JSON pointer. `None` (missing field) is
+/// not an error (providers sometimes omit usage on error envelopes the caller
+/// parses past); a *present* field that cannot convert to `u32` is — fail
+/// closed with a descriptive variant instead of truncating (L4).
+pub(crate) fn u32_at(v: &Value, ptr: &'static str) -> Result<u32, LlmError> {
+    match v.pointer(ptr) {
+        None => Ok(0),
+        Some(n) => {
+            let raw = n.as_u64().ok_or_else(|| LlmError::UsageOverflow { ptr, value: u64::MAX })?;
+            raw.try_into().map_err(|_| LlmError::UsageOverflow { ptr, value: raw })
+        }
+    }
+}
+
 /// Build a `POST {base}` Chat Completions request with `Bearer` auth. When
 /// `api_key` is empty (Ollama-local) the `Authorization` header is omitted.
 pub fn build(
@@ -64,8 +78,8 @@ pub fn parse(body: &[u8]) -> Result<Completion, LlmError> {
         .unwrap_or_default()
         .to_string();
     let usage = Usage {
-        input_tokens: u32_at(&v, "/usage/prompt_tokens"),
-        output_tokens: u32_at(&v, "/usage/completion_tokens"),
+        input_tokens: u32_at(&v, "/usage/prompt_tokens")?,
+        output_tokens: u32_at(&v, "/usage/completion_tokens")?,
     };
     Ok(Completion {
         model,
@@ -73,8 +87,4 @@ pub fn parse(body: &[u8]) -> Result<Completion, LlmError> {
         usage,
         stop_reason,
     })
-}
-
-pub(crate) fn u32_at(v: &Value, ptr: &str) -> u32 {
-    v.pointer(ptr).and_then(|n| n.as_u64()).unwrap_or(0) as u32
 }

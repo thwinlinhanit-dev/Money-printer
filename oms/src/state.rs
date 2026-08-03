@@ -62,6 +62,9 @@ pub struct IllegalTransition {
 pub struct Order {
     pub client_id: String,
     pub state: OrderState,
+    /// When the order entered `Unknown` (EXE-4 escalation: unresolvable after
+    /// `unknown_max_s` → venue kill switch). None outside `Unknown`.
+    pub unknown_since_ns: Option<i64>,
 }
 
 impl Order {
@@ -69,6 +72,7 @@ impl Order {
         Self {
             client_id: client_id.into(),
             state: OrderState::RiskChecked,
+            unknown_since_ns: None,
         }
     }
 
@@ -125,6 +129,49 @@ impl OrderStore {
 
     pub fn get_mut(&mut self, client_id: &str) -> Option<&mut Order> {
         self.orders.get_mut(client_id)
+    }
+
+    /// All client ids in a deterministic order.
+    pub fn ids(&self) -> Vec<String> {
+        self.orders.keys().cloned().collect()
+    }
+
+    /// Apply an event to an existing order, tracking the `Unknown` entry time
+    /// (EXE-4 escalation primitive). Returns `None` if the client id is not
+    /// tracked. Prefer this over `Order::apply` + manual timestamping: the
+    /// `unknown_since_ns` bookkeeping is one code path, never skipped.
+    pub fn apply(
+        &mut self,
+        client_id: &str,
+        event: OmsEvent,
+        now_ns: i64,
+    ) -> Option<Result<OrderState, IllegalTransition>> {
+        let order = self.orders.get_mut(client_id)?;
+        let was_unknown = order.state == OrderState::Unknown;
+        let res = order.apply(event);
+        match res {
+            Ok(next) => {
+                if next == OrderState::Unknown && !was_unknown {
+                    order.unknown_since_ns = Some(now_ns);
+                } else if next != OrderState::Unknown {
+                    order.unknown_since_ns = None;
+                }
+            }
+            Err(_) => {}
+        }
+        Some(res)
+    }
+
+    /// Client ids now in `Unknown` for at least `max_ns` — the EXE-4 escalation
+    /// set the caller feeds into a venue kill switch (unresolvable Unknowns
+    /// free local trading; the margin risk is not worth a guess).
+    pub fn unknown_expired(&self, now_ns: i64, max_ns: i64) -> Vec<String> {
+        self.orders
+            .values()
+            .filter(|o| o.state == OrderState::Unknown)
+            .filter(|o| o.unknown_since_ns.map_or(false, |t| now_ns.saturating_sub(t) >= max_ns))
+            .map(|o| o.client_id.clone())
+            .collect()
     }
 
     /// Client ids currently in the `Unknown` state (freeze the venue until

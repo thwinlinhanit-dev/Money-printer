@@ -33,6 +33,14 @@ pub trait Normalizer {
     /// Return the current symbol table built during normalization.
     /// Used by the event-log writer to persist symbol frames (EVT-8).
     fn symbols(&self) -> &SymbolTable;
+
+    /// Dynamic downcast to a concrete normalizer type. Override in each impl
+    /// to enable venue-specific operations at the binary edge (e.g. injecting
+    /// a REST depth seed into `BinanceNormalizer` without a generic parameter).
+    /// Default returns `None`; only the venues that need it override it.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 }
 
 /// Blanket impl so `Box<dyn Normalizer>` can be used as `N` in `Collector<N>`.
@@ -53,6 +61,9 @@ impl Normalizer for Box<dyn Normalizer> {
     }
     fn symbols(&self) -> &SymbolTable {
         (**self).symbols()
+    }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        (**self).as_any_mut()
     }
 }
 

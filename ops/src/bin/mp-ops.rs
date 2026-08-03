@@ -10,7 +10,8 @@
 
 use mp_core::log::LogReader;
 use mp_core::{EventEnvelope, SymbolTable, Venue};
-use mp_storage::compactor;
+use mp_storage::{audit_raw_log, compactor, scorecard, AuditConfig, RawLogAudit};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,6 +26,12 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 
 fn need(args: &[String], name: &str) -> Result<String, String> {
     flag(args, name).ok_or_else(|| format!("missing {name}"))
+}
+
+fn flags(args: &[String], name: &str) -> Vec<String> {
+    args.windows(2)
+        .filter_map(|pair| (pair[0] == name).then(|| pair[1].clone()))
+        .collect()
 }
 
 fn parse_venue(s: &str) -> Result<Venue, String> {
@@ -92,6 +99,34 @@ fn read_log_with_symbols(path: &Path) -> Result<(Vec<EventEnvelope>, SymbolTable
     Ok((events, symbols))
 }
 
+fn audit_config(args: &[String], venue: Venue, symbol: &str) -> Result<AuditConfig, String> {
+    let mut config = AuditConfig::single(venue, symbol);
+    if let Some(seconds) = flag(args, "--max-gap-sec") {
+        let seconds: i64 = seconds.parse().map_err(|_| "--max-gap-sec must be an integer")?;
+        if seconds <= 0 {
+            return Err("--max-gap-sec must be positive".into());
+        }
+        config.max_gap_ns = seconds.saturating_mul(1_000_000_000);
+    }
+    config.required_streams = flags(args, "--require-stream").into_iter().collect::<BTreeSet<_>>();
+    Ok(config)
+}
+
+fn clean_audit(path: &Path, config: &AuditConfig) -> Result<RawLogAudit, String> {
+    let audit = audit_raw_log(path, config);
+    if audit.is_clean() {
+        Ok(audit)
+    } else {
+        let reasons = audit
+            .findings
+            .iter()
+            .map(|finding| format!("{}: {}", finding.code, finding.detail))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(format!("quarantined raw log {}: {reasons}", path.display()))
+    }
+}
+
 fn cmd_compact(args: &[String]) -> Result<String, String> {
     let date_raw = need(args, "--date")?;
     // Normalize: strip dashes for raw log filename, build dashed for partition paths.
@@ -110,6 +145,11 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
     if !raw_path.exists() {
         return Err(format!("raw log not found: {}", raw_path.display()));
     }
+
+    // INT-4: no compaction is allowed to turn contaminated raw data into a
+    // trustworthy-looking cold dataset.  The audit runs before reading events.
+    let config = audit_config(args, venue, &symbol)?;
+    clean_audit(&raw_path, &config)?;
 
     tracing::info!(path = %raw_path.display(), "compacting raw log");
 
@@ -144,18 +184,56 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
     ))
 }
 
+fn cmd_audit(args: &[String]) -> Result<String, String> {
+    let date = need(args, "--date")?.replace('-', "");
+    if date.len() != 8 {
+        return Err("date must be YYYYMMDD or YYYY-MM-DD".into());
+    }
+    let venue_name = need(args, "--venue")?;
+    let symbol = need(args, "--symbol")?;
+    let venue = parse_venue(&venue_name)?;
+    let path = Path::new("data").join("raw").join(format!("{date}_{venue_name}_{symbol}.log"));
+    let audit = audit_raw_log(&path, &audit_config(args, venue, &symbol)?);
+    serde_json::to_string_pretty(&audit).map_err(|error| error.to_string())
+}
+
+fn cmd_scorecard(args: &[String]) -> Result<String, String> {
+    let date = need(args, "--date")?.replace('-', "");
+    if date.len() != 8 {
+        return Err("date must be YYYYMMDD or YYYY-MM-DD".into());
+    }
+    let required = flags(args, "--required");
+    if required.is_empty() {
+        return Err("scorecard requires one or more --required venue:symbol entries".into());
+    }
+    let mut entries = Vec::new();
+    for item in required {
+        let (venue_name, symbol) = item
+            .split_once(':')
+            .ok_or_else(|| format!("invalid --required {item}; expected venue:symbol"))?;
+        let venue = parse_venue(venue_name)?;
+        let path = Path::new("data").join("raw").join(format!("{date}_{venue_name}_{symbol}.log"));
+        let audit = audit_raw_log(&path, &audit_config(args, venue, symbol)?);
+        entries.push((venue, symbol.to_owned(), audit));
+    }
+    let dashed = format!("{}-{}-{}", &date[0..4], &date[4..6], &date[6..8]);
+    serde_json::to_string_pretty(&scorecard(dashed, entries)).map_err(|error| error.to_string())
+}
+
 fn main() -> ExitCode {
     tracing_subscriber::fmt::init();
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: mp-ops <subcommand> [options]");
-        eprintln!("Subcommands: compact");
+        eprintln!("Subcommands: compact, audit, scorecard");
         return ExitCode::FAILURE;
     }
 
     let result = match args[1].as_str() {
         "compact" => cmd_compact(&args[2..]),
+        "audit" => cmd_audit(&args[2..]),
+        "scorecard" => cmd_scorecard(&args[2..]),
         other => Err(format!("unknown subcommand: {other}")),
     };
 
@@ -170,5 +248,27 @@ fn main() -> ExitCode {
             eprintln!("Error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mp_core::log::EventLogWriter;
+    use mp_core::{EventEnvelope, EventProvenance, InstrumentKind, MarketEvent, Side, SnapshotSource, SymbolId, SymbolMeta};
+
+    #[test]
+    fn int_4_compaction_refuses_quarantined_log() {
+        let path = std::env::temp_dir().join(format!("mp-int-compact-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let (mut writer, _) = EventLogWriter::open(&path).unwrap();
+        writer.write_symbols(&[SymbolMeta::new(SymbolId(0), Venue::BinanceFutures, "BTCUSDT", "BTC", "USDT", InstrumentKind::Perp, 0.1, 0.1, 1.0)]).unwrap();
+        let event = EventEnvelope::new(Venue::Hyperliquid, SymbolId(0), 1, 1, 1, MarketEvent::Trade { price: 1.0, qty: 1.0, side: Side::Buy, trade_id: 1 })
+            .with_provenance(EventProvenance { stream: "trade".into(), subscription: "x".into(), connection_id: 1, snapshot_source: SnapshotSource::None });
+        writer.append(&event).unwrap();
+        writer.sync().unwrap();
+        let err = clean_audit(&path, &AuditConfig::single(Venue::BinanceFutures, "BTCUSDT")).unwrap_err();
+        assert!(err.contains("quarantined raw log"));
+        let _ = std::fs::remove_file(path);
     }
 }

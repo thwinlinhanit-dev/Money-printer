@@ -10,11 +10,19 @@ use mp_core::event::EventEnvelope;
 use mp_core::{SymbolId, Venue};
 use std::collections::BTreeMap;
 
-/// A single feature output at a point in time (FEA-16: feature is interned SymbolId).
+/// A single feature output at a point in time. The `feature` field is an
+/// interned `SymbolId` (spec 023 FEA-16 — no heap `String` in hot identity);
+/// `name` carries the resolved feature name (e.g. `funding.rate`) so
+/// strategies can self-filter on THEIR subscription set instead of trusting a
+/// dispatcher to have done it (audit C1: carry-v1 once read any feature
+/// update, e.g. CVD, as a funding rate).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeatureUpdate {
-    /// Interned feature name (SymbolId). String form resolved via engine's name table.
+    /// Interned feature name (SymbolId).
     pub feature: SymbolId,
+    /// Resolved feature name (`id()` of the producing feature). Strategies use
+    /// this to assert the signal they subscribed to is the one they got.
+    pub name: String,
     /// Venue the source event came from — strategies need this for
     /// `OrderIntent.venue` (multi-venue feeds must not invent a default).
     pub venue: Venue,
@@ -70,6 +78,8 @@ struct SymbolState {
     ticks: Vec<Box<dyn TickFeature>>,
     bars: Vec<Box<dyn BarFeature>>,
     builder: BarBuilder,
+    /// Venue from the first event seen on this symbol (finish() stamps it).
+    venue: Venue,
     /// Pre-computed SymbolIds for each tick feature (index-matched to `ticks`).
     tick_ids: Vec<SymbolId>,
     /// Pre-computed feature names (for diagnostics without engine borrow).
@@ -89,14 +99,14 @@ pub struct FeatureEngine {
     per_symbol: BTreeMap<SymbolId, SymbolState>,
     /// FEA-5: non-finite outputs suppressed (never emitted downstream).
     nan_suppressed: u64,
-    /// Feature name intern table (FEA-17): name → SymbolId.
+    /// Feature name intern table (spec 023 FEA-17): name → SymbolId.
     name_to_id: BTreeMap<String, SymbolId>,
     /// Reverse lookup: SymbolId → name (for resolution in logs/screener).
     id_to_name: BTreeMap<SymbolId, String>,
     next_feature_id: u32,
 }
 
-/// SymbolId(0) is reserved as null/invalid (FEA-18).
+// Spec 023 FEA-18: SymbolId(0) is reserved as null/invalid.
 
 impl FeatureEngine {
     pub fn new(bar_tf_ns: i64) -> Self {
@@ -108,11 +118,11 @@ impl FeatureEngine {
             nan_suppressed: 0,
             name_to_id: BTreeMap::new(),
             id_to_name: BTreeMap::new(),
-            next_feature_id: 1, // FEA-18: start from 1
+            next_feature_id: 1, // spec 023 FEA-18: ids start from 1
         }
     }
 
-    /// Intern a feature name, returning a stable SymbolId (FEA-17).
+    /// Intern a feature name, returning a stable SymbolId (spec 023 FEA-17).
     fn intern(&mut self, name: &str) -> SymbolId {
         if let Some(&id) = self.name_to_id.get(name) {
             return id;
@@ -165,7 +175,8 @@ impl FeatureEngine {
     }
 
     /// Register a tick-feature factory (one instance is built per symbol).
-    /// Registers and interns the feature name at setup time (FEA-17).
+    /// Registers and interns the feature name at setup time (spec 023 FEA-17:
+    /// interning happens at setup, not at runtime).
     pub fn register_tick(&mut self, f: impl Fn() -> Box<dyn TickFeature> + 'static) -> &mut Self {
         // Create a sample instance to extract the name for interning.
         let sample = f();
@@ -176,7 +187,7 @@ impl FeatureEngine {
     }
 
     /// Register a bar-feature factory.
-    /// Registers and interns the feature name at setup time (FEA-17).
+    /// Registers and interns the feature name at setup time (spec 023 FEA-17).
     pub fn register_bar(&mut self, f: impl Fn() -> Box<dyn BarFeature> + 'static) -> &mut Self {
         let sample = f();
         let name = sample.id();
@@ -185,8 +196,9 @@ impl FeatureEngine {
         self
     }
 
-    fn state_for(&mut self, sym: SymbolId) -> &mut SymbolState {
+    fn state_for(&mut self, sym: SymbolId, venue: Venue) -> &mut SymbolState {
         if self.per_symbol.contains_key(&sym) {
+            // SAFETY (CONV-13): the contains_key guard above proves the entry.
             return self.per_symbol.get_mut(&sym).unwrap();
         }
         // Phase 1: extract all names from factories (immutable borrow).
@@ -203,11 +215,13 @@ impl FeatureEngine {
             ticks,
             bars,
             builder: BarBuilder::new(tf),
+            venue,
             tick_ids,
             tick_names,
             bar_ids,
             bar_names,
         });
+        // SAFETY (CONV-13): we just inserted this key above.
         self.per_symbol.get_mut(&sym).unwrap()
     }
 
@@ -218,7 +232,7 @@ impl FeatureEngine {
         let sym = ev.symbol;
         let venue = ev.venue;
         let ts = ev.recv_ts_ns;
-        let st = self.state_for(sym);
+        let st = self.state_for(sym, venue);
         let mut out = Vec::new();
 
         let mut suppressed = 0u64;
@@ -234,6 +248,7 @@ impl FeatureEngine {
                 if st.ticks[i].warm() {
                     out.push(FeatureUpdate {
                         feature: fid,
+                        name: st.tick_names[i].clone(),
                         venue,
                         symbol: sym,
                         ts_ns: ts,
@@ -257,7 +272,49 @@ impl FeatureEngine {
                     if st.bars[i].warm() {
                         out.push(FeatureUpdate {
                             feature: fid,
+                            name: st.bar_names[i].clone(),
                             venue,
+                            symbol: sym,
+                            ts_ns: close_ts,
+                            value: v,
+                            ver: st.bars[i].ver(),
+                        });
+                    }
+                }
+            }
+        }
+        self.nan_suppressed += suppressed;
+        out
+    }
+
+    /// End-of-stream hook: close every symbol's in-flight partial bar through
+    /// [`BarBuilder::finish`] and run bar features on the final bars, returning
+    /// their updates in symbol (BTreeMap) order. Offline/replay loops MUST call
+    /// this once after the event loop, or the last partial bar per symbol is
+    /// silently dropped. Live mode never needs it: the next tick after a bucket
+    /// boundary closes the bar naturally (`now_ns` must be >= the last event
+    /// time; it documents the call site's end-of-stream time).
+    pub fn finish(&mut self, now_ns: i64) -> Vec<FeatureUpdate> {
+        let mut out = Vec::new();
+        let mut suppressed = 0u64;
+        for (&sym, st) in &mut self.per_symbol {
+            let Some(bar) = st.builder.finish(now_ns) else {
+                continue;
+            };
+            let close_ts = bar.close_ts_ns;
+            for i in 0..st.bars.len() {
+                let fid = st.bar_ids[i];
+                if let Some(v) = st.bars[i].on_bar(&bar) {
+                    if !v.is_finite() {
+                        suppressed += 1;
+                        tracing::warn!(feature = %st.bar_names[i], symbol = sym.0, "non-finite feature output suppressed (FEA-5)");
+                        continue;
+                    }
+                    if st.bars[i].warm() {
+                        out.push(FeatureUpdate {
+                            feature: fid,
+                            name: st.bar_names[i].clone(),
+                            venue: st.venue,
                             symbol: sym,
                             ts_ns: close_ts,
                             value: v,
@@ -273,7 +330,9 @@ impl FeatureEngine {
 
     /// Convenience: run a whole sequence and collect all updates. Used by both
     /// live and offline paths — identical output proves the one-code-path
-    /// guarantee (FEA-4).
+    /// guarantee (FEA-4). Does NOT auto-finish partial bars: a live runner
+    /// calls this in a loop forever; an offline runner calls [`Self::finish`]
+    /// once afterwards to emit the final partial bars.
     pub fn run<'a>(
         &mut self,
         events: impl IntoIterator<Item = &'a EventEnvelope>,

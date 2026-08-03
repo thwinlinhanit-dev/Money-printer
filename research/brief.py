@@ -128,6 +128,8 @@ class ArchiveRecord:
     prompt_version: str
     model_id: str
     output: str
+    input_bundle: str = ""
+    validation_result: str = "not_checked"
 
     def to_json(self) -> str:
         return json.dumps(
@@ -136,6 +138,8 @@ class ArchiveRecord:
                 "prompt_version": self.prompt_version,
                 "model_id": self.model_id,
                 "output": self.output,
+                "input_bundle": self.input_bundle,
+                "validation_result": self.validation_result,
             },
             sort_keys=True,
         )

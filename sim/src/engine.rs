@@ -13,7 +13,8 @@ use mp_core::{
 };
 use mp_features::FeatureEngine;
 use mp_risk::{
-    evaluate, size, GateInput, KillSwitches, Mode, RiskLimits, SizingInputs, SizingParams, Verdict,
+    evaluate, size, trip_on_breach, GateInput, KillSwitches, Mode, RiskLimits, Scope,
+    SizingInputs, SizingParams, TripRequest, Verdict,
 };
 use mp_strategies::strategy::{Ctx, TimerId};
 use mp_strategies::Strategy;
@@ -64,6 +65,11 @@ impl Default for SimConfig {
                 max_gross_portfolio: 10_000_000.0,
                 max_px_dev_frac: 0.05,
                 max_orders_per_min: 1_000,
+                // INFINITE budgets are SIMULATOR-ONLY. They keep the RG-8/9
+                // daily-loss gate inert so a backtest measures the strategy's edge,
+                // not where it would have been halted. They are NOT a live/
+                // executable default — live/paper configs must set finite budgets in
+                // `risk.toml` (the gate's own `RiskLimits::default()` is finite).
                 strategy_daily_loss_budget: f64::INFINITY,
                 portfolio_daily_loss_budget: f64::INFINITY,
             },
@@ -79,6 +85,7 @@ struct SimCtx {
     rng: SplitMix64,
     queued_timers: Vec<(i64, TimerId)>,
     next_timer: u64,
+    logs: Vec<String>,
 }
 
 impl Ctx for SimCtx {
@@ -100,7 +107,9 @@ impl Ctx for SimCtx {
         self.queued_timers.push((self.now + after_ns, id));
         id
     }
-    fn log(&mut self, _msg: &str) {}
+    fn log(&mut self, msg: &str) {
+        self.logs.push(msg.to_string());
+    }
 }
 
 /// The backtester (orchestration only).
@@ -116,7 +125,6 @@ pub struct Backtester {
     latest_vol: BTreeMap<SymbolId, f64>,
     latest_mark: BTreeMap<SymbolId, f64>,
     books: BTreeMap<SymbolId, BookMirror>,
-    funding_seen: BTreeMap<SymbolId, i64>,
     run_start_ns: Option<i64>,
     trade_pnls: Vec<(i64, f64)>,
     kills: KillSwitches,
@@ -128,6 +136,17 @@ pub struct Backtester {
     next_intent: u128,
     pending_timers: Vec<(i64, TimerId)>,
     next_timer_id: u64,
+    /// Venue contract multiplier ($ notional per contract) per symbol; 1.0 = spot/linear.
+    contract_mult: BTreeMap<SymbolId, f64>,
+    /// Funding events observed per symbol (counted per held interval, SIM-4).
+    funding_count: BTreeMap<SymbolId, u32>,
+    /// Earliest time each symbol became (nonzero) long/short during the run.
+    /// Drives SIM-4 strictness: a required funding tick per funding boundary
+    /// crossed while held, so a month-long hold demands ~90 ticks and a
+    /// 6h→9h window (old code silently skipped) demands its boundary tick.
+    hold_start: BTreeMap<SymbolId, i64>,
+    /// Strategy that produced each pending intent (fill log attribution, audit H2).
+    intent_strategy: BTreeMap<u128, String>,
 }
 
 impl Backtester {
@@ -144,7 +163,6 @@ impl Backtester {
             latest_vol: BTreeMap::new(),
             latest_mark: BTreeMap::new(),
             books: BTreeMap::new(),
-            funding_seen: BTreeMap::new(),
             run_start_ns: None,
             trade_pnls: Vec::new(),
             kills: KillSwitches::new(),
@@ -156,6 +174,10 @@ impl Backtester {
             next_intent: 0,
             pending_timers: Vec::new(),
             next_timer_id: 0,
+            contract_mult: BTreeMap::new(),
+            funding_count: BTreeMap::new(),
+            hold_start: BTreeMap::new(),
+            intent_strategy: BTreeMap::new(),
         }
     }
 
@@ -222,13 +244,22 @@ impl Backtester {
         let Some(start) = self.run_start_ns else {
             return Ok(());
         };
+        let _ = start;
         let now = self.clock.now_ns();
-        if now - start < self.cfg.funding_check_interval_ns {
-            return Ok(());
-        }
-        for (symbol, qty) in self.acct.positions() {
-            if qty != 0.0 && !self.funding_seen.contains_key(&symbol) {
-                return Err(SimError::MissingFunding(symbol));
+        let interval = self.cfg.funding_check_interval_ns.max(1);
+        // SIM-4 strictness (audit H2): the guard counts funding boundaries
+        // crossed while a perp was held, per symbol — not run duration and not
+        // "one tick ever". A month-long hold demands ~90 ticks; a run that
+        // starts mid-window and holds past a boundary (e.g. 6h→9h) demands its
+        // boundary tick even though it is shorter than one interval. Runs whose
+        // holds cross no boundary (e.g. 4s micro-tests) owe no funding yet and
+        // legitimately require no ticks — real 8h tick data cannot appear in a
+        // sub-interval window.
+        for (symbol, open) in &self.hold_start {
+            let required = (now.div_euclid(interval) - open.div_euclid(interval)) as u32;
+            let count = self.funding_count.get(symbol).copied().unwrap_or(0);
+            if count < required {
+                return Err(SimError::MissingFunding(*symbol));
             }
         }
         Ok(())
@@ -261,9 +292,7 @@ impl Backtester {
         self.books.entry(ev.symbol).or_default().apply(&ev.body);
 
         match &ev.body {
-            MarketEvent::Trade {
-                price, qty, side, ..
-            } => {
+            MarketEvent::Trade { price, qty, side, .. } => {
                 self.latest_mark.insert(ev.symbol, *price);
                 self.acct.mark(ev.symbol, *price);
                 self.on_trade(ev.symbol, *price, *qty, *side, ev.recv_ts_ns);
@@ -272,11 +301,20 @@ impl Backtester {
                 self.latest_mark.insert(ev.symbol, *mark);
                 self.acct.mark(ev.symbol, *mark);
             }
-            MarketEvent::Funding { rate, .. } => {
-                self.funding_seen.insert(ev.symbol, ev.recv_ts_ns);
+            MarketEvent::Funding { rate, interval_s, .. } => {
+                *self.funding_count.entry(ev.symbol).or_insert(0) += 1;
                 self.acct.accrue_funding(ev.symbol, *rate);
+                let _ = interval_s;
             }
+            MarketEvent::OpenInterest { .. } => {}
             _ => {}
+        }
+        // Mark = book mid when one is trustworthy (audit H2: a raw trade print,
+        // especially a stop-hunt wick, previously marked all positions; the mid
+        // is far less wick-sensitive). Falls back to the latest trade/mark event.
+        if let Some(mid) = self.books.get(&ev.symbol).and_then(BookMirror::mid) {
+            self.latest_mark.insert(ev.symbol, mid);
+            self.acct.mark(ev.symbol, mid);
         }
 
         if !matches!(ev.body, MarketEvent::Trade { .. })
@@ -298,6 +336,9 @@ impl Backtester {
         let now = ev.recv_ts_ns;
         self.fire_timers(now);
 
+        let subs = self.strat.subscriptions();
+        let subscribed = |name: &str| subs.iter().any(|s| s == "*" || name.starts_with(s.as_str()));
+
         let ups = self.fe.on_event(ev);
         for u in ups {
             self.seq += 1;
@@ -306,12 +347,29 @@ impl Backtester {
             if feat_name.starts_with("vol.rv") {
                 self.latest_vol.insert(u.symbol, u.value);
             }
-            let intents = self.dispatch_strategy(now, |s, ctx| s.on_feature(&u, ctx));
-            for intent in intents {
-                self.seq += 1;
-                self.log.record_intent(self.seq, &intent);
-                self.enqueue(&intent, now);
+            // Honor the strategy's subscriptions (audit C1: a funding-only
+            // strategy acting on a CVD update as if it were funding is a
+            // wrong-signal bug; the sim dispatches every feature update unless
+            // filtered here, and the strategy can't resolve feature ids).
+            if !subscribed(feat_name) {
+                continue;
             }
+            let (intents, logs) = self.dispatch_strategy(now, |s, ctx| s.on_feature(&u, ctx));
+            self.record_dispatch(now, &intents, &logs);
+        }
+    }
+
+    /// Validate + record a dispatch result, threading strategy rationale lines
+    /// into the decision log ahead of the intents they explain.
+    fn record_dispatch(&mut self, now: i64, intents: &[OrderIntent], logs: &[String]) {
+        for msg in logs {
+            self.seq += 1;
+            self.log.record_log(self.seq, msg);
+        }
+        for intent in intents {
+            self.seq += 1;
+            self.log.record_intent(self.seq, intent);
+            self.enqueue(intent, now);
         }
     }
 
@@ -328,21 +386,19 @@ impl Backtester {
         }
         self.pending_timers = still;
         for timer_id in fired {
-            let intents = self.dispatch_strategy(now, |s, ctx| s.on_timer(timer_id, ctx));
-            for intent in intents {
-                self.seq += 1;
-                self.log.record_intent(self.seq, &intent);
-                self.enqueue(&intent, now);
-            }
+            let (intents, logs) = self.dispatch_strategy(now, |s, ctx| s.on_timer(timer_id, ctx));
+            self.record_dispatch(now, &intents, &logs);
         }
     }
 
     /// Single strategy dispatch path for on_feature / on_fill / on_timer.
+    /// Returns (intents, strategy log lines). Log lines are routed through the
+    /// decision log so a strategy's rationale is replayable (audit H3).
     fn dispatch_strategy(
         &mut self,
         now: i64,
         f: impl FnOnce(&mut dyn Strategy, &mut dyn Ctx) -> Vec<OrderIntent>,
-    ) -> Vec<OrderIntent> {
+    ) -> (Vec<OrderIntent>, Vec<String>) {
         let mut ctx = SimCtx {
             now,
             equity: self.acct.equity(),
@@ -350,12 +406,13 @@ impl Backtester {
             rng: SplitMix64::from_state(self.rng.state()),
             queued_timers: Vec::new(),
             next_timer: self.next_timer_id,
+            logs: Vec::new(),
         };
         let intents = f(self.strat.as_mut(), &mut ctx);
         self.rng = SplitMix64::from_state(ctx.rng.state());
         self.next_timer_id = ctx.next_timer;
         self.pending_timers.extend(ctx.queued_timers);
-        intents
+        (intents, ctx.logs)
     }
 
     fn on_trade(&mut self, symbol: SymbolId, price: f64, qty: f64, side: Side, now: i64) {
@@ -384,6 +441,14 @@ impl Backtester {
     }
 
     fn enqueue(&mut self, intent: &OrderIntent, now: i64) {
+        // CONV-8 / audit C2: reject structurally-invalid intents before they
+        // can reach the gate or a fill model. NaN/negative sizes and non-finite
+        // limit prices are strategy bugs and must not become executed orders.
+        if let Err(e) = intent.validate() {
+            self.seq += 1;
+            self.log.record_invalid_intent(self.seq, intent.intent_id, &e.to_string());
+            return;
+        }
         let kind = match intent.kind {
             OrderKind::Market => PendingKind::Market,
             OrderKind::Limit { px } => PendingKind::Limit(px),
@@ -411,7 +476,11 @@ impl Backtester {
                         k_stop: self.cfg.k_stop,
                         step_size: self.cfg.step_size,
                         min_notional: self.cfg.min_notional,
-                        contract_multiplier: 1.0,
+                        contract_multiplier: self
+                            .contract_mult
+                            .get(&intent.symbol)
+                            .copied()
+                            .unwrap_or(1.0),
                     },
                 )
                 .qty_contracts
@@ -437,30 +506,42 @@ impl Backtester {
             .iter()
             .map(|(s, q)| q.abs() * self.latest_mark.get(s).copied().unwrap_or(0.0))
             .sum();
-        let verdict = evaluate(
-            &self.cfg.limits,
-            &self.kills,
-            &GateInput {
-                mode: Mode::Paper,
-                venue: intent.venue,
-                symbol: intent.symbol,
-                strategy: intent.strategy.clone(),
-                side: intent.side,
-                qty,
-                price,
-                mark,
-                current_position_qty: self.acct.position(intent.symbol),
-                gross_exposure_notional: gross,
-                orders_last_min: self.intent_ts.len() as u32,
-                strategy_daily_pnl: daily_pnl,
-                portfolio_daily_pnl: daily_pnl,
-                reconciler_clean: true,
-                allowed: &self.allowed,
-            },
-        );
+        let mult = self
+            .contract_mult
+            .get(&intent.symbol)
+            .copied()
+            .unwrap_or(1.0);
+        let gate_input = GateInput {
+            mode: Mode::Paper,
+            venue: intent.venue,
+            symbol: intent.symbol,
+            strategy: intent.strategy.clone(),
+            side: intent.side,
+            qty,
+            price,
+            mark,
+            current_position_qty: self.acct.position(intent.symbol),
+            gross_exposure_notional: gross,
+            orders_last_min: self.intent_ts.len() as u32,
+            strategy_daily_pnl: daily_pnl,
+            portfolio_daily_pnl: daily_pnl,
+            reconciler_clean: true,
+            reduce_only: intent.reduce_only,
+            contract_multiplier: mult,
+            allowed: &self.allowed,
+        };
+        let verdict = evaluate(&self.cfg.limits, &self.kills, &gate_input);
         self.intent_ts.push(now);
         self.seq += 1;
         self.log.record_verdict(self.seq, intent.intent_id, verdict);
+        // EXE-1/spec 007: an RG-8/9 daily-loss breach must additionally trip the
+        // matching kill switch — fail-closed, one-way, until a human resets.
+        if let Some(req) = trip_on_breach(verdict, &gate_input) {
+            match req {
+                TripRequest::Strategy(s) => self.kills.trip(Scope::Strategy(s)),
+                TripRequest::Global => self.kills.trip(Scope::Global),
+            }
+        }
         if !matches!(verdict, Verdict::Pass) {
             return;
         }
@@ -474,6 +555,8 @@ impl Backtester {
             ready_ns: now + self.cfg.latency_ns,
             intent_id: intent.intent_id,
         });
+        self.intent_strategy
+            .insert(intent.intent_id.0, intent.strategy.0.clone());
     }
 
     fn apply_produced_fill(&mut self, p: ProducedFill, now: i64) {
@@ -484,6 +567,12 @@ impl Backtester {
             Side::Sell => -p.qty,
         };
         let outcome = self.acct.apply_fill(p.symbol, signed, p.price, fee);
+        let pos = self.acct.position(p.symbol);
+        if pos != 0.0 {
+            self.hold_start.entry(p.symbol).or_insert(self.clock.now_ns());
+        } else {
+            self.hold_start.remove(&p.symbol);
+        }
         let net = outcome.realized_gross - outcome.attributed_fees;
         if outcome.closed_qty > 0.0 {
             self.metrics.record_trade_with_optimism(net, p.optimism);
@@ -492,6 +581,7 @@ impl Backtester {
 
         self.seq += 1;
         self.next_intent = self.next_intent.max(p.intent_id.0);
+        let strategy = self.intent_strategy.get(&p.intent_id.0).map(String::as_str).unwrap_or("");
         let fill = Fill {
             intent_id: p.intent_id,
             symbol: p.symbol,
@@ -502,14 +592,9 @@ impl Backtester {
             liquidity: p.liquidity,
             ts_ns: self.clock.now_ns(),
         };
-        self.log.record_fill_tagged(self.seq, &fill, p.optimism);
+        self.log.record_fill_tagged(self.seq, &fill, p.optimism, strategy, p.venue);
 
-        let follow = self.dispatch_strategy(now, |s, ctx| s.on_fill(&fill, ctx));
-        for intent in follow {
-            self.seq += 1;
-            self.log.record_intent(self.seq, &intent);
-            self.enqueue(&intent, now);
-        }
-        let _ = p.venue; // carried on Pending for multi-venue allowlist fidelity
+        let (follow, logs) = self.dispatch_strategy(now, |s, ctx| s.on_fill(&fill, ctx));
+        self.record_dispatch(now, &follow, &logs);
     }
 }

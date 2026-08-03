@@ -37,11 +37,16 @@ impl TradingMode {
         let path = Path::new("/etc/money-printer/mode.toml").to_path_buf();
 
         if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Ok(cfg) = toml::from_str::<ModeConfig>(&contents) {
-                return cfg.mode;
+            match toml::from_str::<ModeConfig>(&contents) {
+                Ok(cfg) => return cfg.mode,
+                Err(e) => {
+                    // A malformed mode.toml must not silently become Sleep —
+                    // an operator typo like `mode = "lve"` is exactly the kind
+                    // of thing that should scream, not vanish (MOD-1).
+                    tracing::warn!(error = %e, path = %path.display(), "mode config parse failed; defaulting to Sleep");
+                }
             }
         }
-        // Default to Sleep if no config found.
         TradingMode::Sleep
     }
 

@@ -98,8 +98,8 @@ impl LlmProvider for AnthropicProvider {
             .and_then(|s| s.as_str())
             .map(str::to_string);
         let usage = Usage {
-            input_tokens: crate::openai_compat::u32_at(&v, "/usage/input_tokens"),
-            output_tokens: crate::openai_compat::u32_at(&v, "/usage/output_tokens"),
+            input_tokens: crate::openai_compat::u32_at(&v, "/usage/input_tokens")?,
+            output_tokens: crate::openai_compat::u32_at(&v, "/usage/output_tokens")?,
         };
         Ok(Completion {
             model,

@@ -1,7 +1,8 @@
 """S3/B2 archive script (SPEC-011).
 
 Uploads compacted Parquet files older than current UTC day to S3-compatible
-object storage, verifies checksums, and purges local files only on success.
+object storage and verifies checksums.  Local recordings remain append-only;
+retention/deletion is an explicit human operation (CLAUDE.md W-6).
 
 Usage:
   python research/archive_data.py
@@ -64,24 +65,6 @@ def find_old_parquet_files(root: Path, today: str) -> list[Path]:
         if f"date={today}" in rel:
             continue
         old.append(p)
-    return sorted(old)
-
-
-def find_old_raw_logs(root: Path, today: str) -> list[Path]:
-    """Find raw .log files older than today (date prefix < today)."""
-    old: list[Path] = []
-    if not root.exists():
-        return old
-    for p in root.iterdir():
-        if p.suffix != ".log":
-            continue
-        # filename format: YYYYMMDD_venue_symbol.log
-        parts = p.stem.split("_", 1)
-        if not parts:
-            continue
-        date_part = parts[0]
-        if date_part < today and len(date_part) == 8:
-            old.append(p)
     return sorted(old)
 
 
@@ -195,21 +178,13 @@ def main() -> None:
 
         ok = upload_with_retry(s3, local_path, bucket, key)
         if ok:
-            logger.info("purging local file: %s", local_path)
-            local_path.unlink()
+            logger.info("verified remote copy; retaining local append-only file: %s", local_path)
         else:
             any_failure = True
             logger.error(
                 "FAILED to archive %s after retries — NOT deleting local file",
                 local_path,
             )
-
-    # --- Purge old raw logs ---
-    raw_dir = data_dir / "raw"
-    raw_logs = find_old_raw_logs(raw_dir, today)
-    for log_path in raw_logs:
-        logger.info("purging old raw log: %s", log_path)
-        log_path.unlink()
 
     if any_failure:
         logger.error("Archive completed with failures — some files retained locally")

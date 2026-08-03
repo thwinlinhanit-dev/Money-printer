@@ -24,17 +24,17 @@ live-http = ["dep:reqwest"]
 mp-core = { path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 smallvec.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"], optional = true }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 futures-util = { version = "0.3", optional = true }
 url = { version = "2", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints]
 workspace = true
-

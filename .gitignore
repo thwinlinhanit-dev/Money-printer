@@ -21,8 +21,17 @@ secrets*
 *.parquet
 *.ndjson.zst
 *.log
+*.eventlog
 
-# Local scratch
+# Local scratch (ad-hoc binaries/inspectors — hygiene, audit L-series)
 /scratch
+scratch_*
+stdout.txt
+stderr.txt
+collector_stdout.log
+collector_stderr.log
+--help
+.omx/
 __pycache__/
 *.pyc
+*.pdb

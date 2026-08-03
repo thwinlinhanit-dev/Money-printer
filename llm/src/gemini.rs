@@ -90,8 +90,8 @@ impl LlmProvider for GeminiProvider {
             .and_then(|s| s.as_str())
             .map(str::to_string);
         let usage = Usage {
-            input_tokens: crate::openai_compat::u32_at(&v, "/usageMetadata/promptTokenCount"),
-            output_tokens: crate::openai_compat::u32_at(&v, "/usageMetadata/candidatesTokenCount"),
+            input_tokens: crate::openai_compat::u32_at(&v, "/usageMetadata/promptTokenCount")?,
+            output_tokens: crate::openai_compat::u32_at(&v, "/usageMetadata/candidatesTokenCount")?,
         };
         Ok(Completion {
             model: self.default_model().to_string(),

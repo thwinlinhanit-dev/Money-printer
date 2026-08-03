@@ -2,7 +2,7 @@
 //! Prefer: `cargo run -p mp-collectors --features live-ws --bin mp-collector`.
 
 fn main() {
-    eprintln!("note: `collect` is an alias of `mp-collector` (default: binance + hyperliquid whales)");
+    eprintln!("note: `collect` is an alias of `mp-collector` (default: venue=binance, symbol=BTCUSDT)");
     // Re-invoke logic by exec'ing the same crate binary path is awkward; share
     // by including the same main path. For simplicity, document and exit with
     // the same feature gate message if live-ws is off; when live-ws is on,
@@ -14,14 +14,14 @@ fn main() {
     }
     #[cfg(feature = "live-ws")]
     {
-        // Forward all args after program name by resetting is unnecessary —
-        // mp-collector and collect share the workspace; run identical binary body.
-        // We compile the live loop only once in mp-collector; this alias prints
-        // usage and tells the user to switch. (Avoid dual 200-line copies.)
+        // Honest help text: mp-collector's actual flags are `--config <path>`
+        // or `--venue <v> --symbol <s>`. There is no whale-stream toggle
+        // (an earlier draft advertised `--no-whale`; that flag does not exist).
         eprintln!(
-            "run: cargo run -p mp-collectors --features live-ws --bin mp-collector -- --symbol BTCUSDT"
+            "run: cargo run -p mp-collectors --features live-ws,live-http --bin mp-collector -- [--config path/to/config.toml | --venue binance --symbol BTCUSDT]"
         );
-        eprintln!("defaults: --venue binance, Hyperliquid whale stream on (disable with --no-whale)");
+        eprintln!("flags: --config <toml>  (full config) | --venue <binance|bybit|okx|hyperliquid>, --symbol <SYM>");
+        eprintln!("defaults: --venue binance --symbol BTCUSDT; one (venue,symbol) per process.");
         std::process::exit(2);
     }
 }

@@ -60,6 +60,35 @@ fn rsk_1_zero_vol_is_no_trade_not_nan() {
 }
 
 #[test]
+fn regression_rsk_1_invalid_step_size_warns_but_no_quantize() {
+    // step_size ≤ 0 (bad config/venue metadata) → WARN + no quantization, never a
+    // silent exact size. floored_to_zero still reports the min_notional zeroing.
+    let p = SizingParams::default();
+    let mut inp = base_inputs();
+    inp.step_size = 0.0; // invalid → treated as no quantization
+    inp.min_notional = 0.0; // disable the floor so raw size survives
+
+    let mut good = base_inputs();
+    good.step_size = 0.0;
+    good.min_notional = 0.0;
+    let sized = size(&p, &inp);
+    let exact = size(&p, &good);
+    // No quantization: qty equals raw (since step was ignored).
+    assert!((sized.qty_contracts - sized.trace.raw_contracts).abs() < 1e-9);
+    assert!((sized.qty_contracts - exact.qty_contracts).abs() < 1e-9);
+    assert!(!sized.trace.floored_to_zero, "no floor → not zeroed");
+
+    // And with a finite step that floors the size below min_notional, the trace flag
+    // is set and qty is zeroed (the flag stays accurate).
+    let mut floored = base_inputs();
+    floored.step_size = 0.0; // no quantize, so raw survives to the notional check
+    floored.risk_units = 1e-6; // tiny → notional < min_notional
+    let fs = size(&p, &floored);
+    assert!(fs.trace.floored_to_zero);
+    assert_eq!(fs.qty_contracts, 0.0);
+}
+
+#[test]
 fn rsk_2_dd_governor_shape() {
     assert_eq!(dd_governor(0.0, 0.1, 1.0), 1.0); // no DD → full
     assert!((dd_governor(0.05, 0.1, 1.0) - 0.5).abs() < 1e-9); // half budget → 0.5
@@ -144,6 +173,23 @@ fn rsk_4_intraday_shrink_only() {
     let mut proposed2 = BTreeMap::new();
     proposed2.insert("a".to_string(), 0.1); // shrink is allowed
     assert_eq!(shrink_only(&prev, &proposed2)["a"], 0.1);
+}
+
+#[test]
+fn regression_rsk_4_shrink_only_caps_new_strategy_entry() {
+    // A strategy ABSENT from `prev` has no intraday baseline. It must not enter at
+    // its full proposed weight — risk-on waits for the daily run (RSK-4 asymmetry).
+    let mut prev = BTreeMap::new();
+    prev.insert("existing".to_string(), 0.3);
+    let mut proposed = BTreeMap::new();
+    proposed.insert("existing".to_string(), 0.3);
+    proposed.insert("brand_new".to_string(), 0.5); // no prev entry
+    let out = shrink_only(&prev, &proposed);
+    assert_eq!(out["existing"], 0.3, "existing strategy keeps its baseline");
+    assert_eq!(
+        out["brand_new"], 0.0,
+        "a brand-new strategy enters at 0 intraday, not its full proposal"
+    );
 }
 
 // ---- property tests (RSK-9) -------------------------------------------------
@@ -290,4 +336,23 @@ fn rsk_7_regime_fit_reads_live_features_not_opinion() {
         (w["carry-v1"] - 0.25).abs() < 1e-9,
         "mismatch de-weights allocation"
     );
+}
+
+#[test]
+fn regression_rsk_7_regime_fit_fails_closed_on_out_of_range_label() {
+    use mp_risk::regime_fit_from_features;
+    // The catalog encodes exactly 0/1/2 — anything else is a feature bug and must
+    // NOT silently masquerade as a valid regime (2.7 must not read "high_vol").
+    let hv = vec!["high_vol".to_string()];
+    let tr = vec!["trend".to_string()];
+    // Even when the (valid) other dimension matches, an invalid vol label wins.
+    assert_eq!(regime_fit_from_features(&hv, 2.7, 1.0, 0.25), 0.25);
+    assert_eq!(regime_fit_from_features(&hv, -1.0, 1.0, 0.25), 0.25);
+    assert_eq!(regime_fit_from_features(&hv, f64::NAN, 0.0, 0.25), 0.25);
+    // An invalid trend label is equally fail-closed.
+    assert_eq!(regime_fit_from_features(&tr, 1.0, 1.0, 0.25), 1.0); // valid control
+    assert_eq!(regime_fit_from_features(&tr, 1.0, 0.5, 0.25), 0.25); // fractional label
+    assert_eq!(regime_fit_from_features(&tr, 1.0, 7.0, 0.25), 0.25); // out of range
+    // The fail-closed penalty is still clamped to [0,1].
+    assert_eq!(regime_fit_from_features(&hv, 9.9, 0.0, 4.0), 1.0); // penalty clamped
 }

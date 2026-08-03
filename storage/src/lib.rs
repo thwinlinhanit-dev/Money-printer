@@ -10,6 +10,7 @@
 //! in spec 003 Decisions.
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod audit;
 pub mod compactor;
 pub mod dataset;
 pub mod feature_store;
@@ -31,6 +32,7 @@ pub enum StorageError {
 }
 
 pub use compactor::{compact_day, CompactStats};
+pub use audit::{audit_raw_log, scorecard, AuditConfig, DailyScorecard, RawLogAudit};
 pub use dataset::Dataset;
 pub use feature_store::{
     materialize, read_feature_meta, read_features, resolve_version, FeatureMeta, FeatureRow,
@@ -38,4 +40,4 @@ pub use feature_store::{
 };
 pub use manifest::{derive_manifest, Gap, GapKind, QualityManifest, StreamStats};
 pub use prune::{verify_prunable, PruneRefusal};
-pub use scd2::{SymbolScd2, SymbolVersion};
+pub use scd2::{Scd2AppendError, SymbolScd2, SymbolVersion};

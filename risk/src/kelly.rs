@@ -36,9 +36,14 @@ impl Default for KellyParams {
 }
 
 /// Full-Kelly optimal fraction `f* = p − (1−p)/b`, clamped at 0 (never short
-/// the edge).
+/// the edge). Fail-closed (CONV-8/RSK-3): a p outside [0,1] or non-positive b
+/// is a corrupt statistic, not an edge — return 0 rather than amplify it.
 pub fn full_kelly(stats: &KellyStats) -> f64 {
-    if !(stats.p.is_finite() && stats.b.is_finite()) || stats.b <= 0.0 {
+    if !stats.p.is_finite()
+        || !stats.b.is_finite()
+        || stats.b <= 0.0
+        || !(0.0..=1.0).contains(&stats.p)
+    {
         return 0.0;
     }
     (stats.p - (1.0 - stats.p) / stats.b).max(0.0)

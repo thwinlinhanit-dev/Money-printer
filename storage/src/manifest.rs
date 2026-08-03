@@ -18,6 +18,19 @@ pub enum GapKind {
     Venue,
 }
 
+impl GapKind {
+    /// Structured discriminator for a `Status::GapDetected` kind. The event
+    /// schema has no gap-origin field, so v1 maps `detail` text onto the enum
+    /// here — one sanctioned place — instead of scattering free-text matching.
+    pub fn from_status_detail(detail: &str) -> Self {
+        if detail.contains("overrun") {
+            GapKind::Overrun
+        } else {
+            GapKind::Venue
+        }
+    }
+}
+
 /// A half-open uncovered interval `[from_ns, to_ns)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Gap {
@@ -152,11 +165,7 @@ pub fn derive_manifest(
                     }
                 }
                 StatusKind::GapDetected => {
-                    let kind = if detail.contains("overrun") {
-                        GapKind::Overrun
-                    } else {
-                        GapKind::Venue
-                    };
+                    let kind = GapKind::from_status_detail(detail);
                     open_seq.entry(sym).or_insert((e.recv_ts_ns, kind));
                 }
                 _ => {}
@@ -251,6 +260,8 @@ pub fn write_manifest(path: &std::path::Path, m: &QualityManifest) -> std::io::R
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    // SAFETY: QualityManifest is derived-Serialize over plain data (numbers,
+    // strings, maps); serde_json cannot fail on it (CONV-13).
     let json = serde_json::to_string_pretty(m).expect("manifest serializes");
     std::fs::write(path, json)
 }

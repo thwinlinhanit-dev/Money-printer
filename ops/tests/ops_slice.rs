@@ -262,6 +262,8 @@ fn ops_3_kill_latch_makes_the_real_gate_reject_with_rg10() {
         strategy_daily_pnl: 0.0,
         portfolio_daily_pnl: 0.0,
         reconciler_clean: true,
+        reduce_only: false,
+        contract_multiplier: 1.0,
         allowed: &allowed,
     };
     let limits = RiskLimits::default();
@@ -433,6 +435,8 @@ fn ops_3_kill_needs_confirm_and_flatten_needs_double_confirm() {
             strategy_daily_pnl: 0.0,
             portfolio_daily_pnl: 0.0,
             reconciler_clean: true,
+            reduce_only: false,
+            contract_multiplier: 1.0,
             allowed: &allowed,
         },
     );

@@ -59,6 +59,12 @@ impl<N: Normalizer> Collector<N> {
         &self.normalizer
     }
 
+    /// Mutable access to the normalizer — needed at the binary edge for
+    /// venue-specific setup (e.g. REST depth seeding for Binance, COL-23).
+    pub fn normalizer_mut(&mut self) -> &mut N {
+        &mut self.normalizer
+    }
+
     /// Consume one transport until it disconnects or exhausts, appending
     /// normalized events to `out`.
     pub fn drive(
@@ -78,9 +84,21 @@ impl<N: Normalizer> Collector<N> {
                             self.consecutive_parse_failures = 0;
                             self.account(&out[before..]);
                         }
-                        Err(_e) => {
+                        Err(e) => {
                             self.counters.messages_dropped += 1;
                             self.consecutive_parse_failures += 1;
+                            // COL-6: WARN (never panic, never secrets) + continue
+                            // after counting. Payload truncated to keep logs small
+                            // and to bound any credential that leaked into a frame.
+                            let snippet = String::from_utf8_lossy(&payload[..payload.len().min(500)]);
+                            let snippet = snippet.as_ref();
+                            tracing::warn!(
+                                venue = ?self.normalizer.venue(),
+                                consecutive_failures = self.consecutive_parse_failures,
+                                error = %e,
+                                payload = %snippet,
+                                "normalize parse error (frame dropped)"
+                            );
                             if self.consecutive_parse_failures
                                 >= self.config.max_consecutive_parse_failures
                             {

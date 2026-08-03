@@ -23,7 +23,7 @@ should be updated).
 | 012 | [Zero-Copy Event Pipeline](012-zero-copy-pipeline.md) | core | 📝 draft |
 | 013 | [WS Backpressure Policy](013-ws-backpressure.md) | collectors | 📝 draft |
 | 014 | [Event Log Fsync Policy](014-event-log-fsync.md) | core/storage | 📝 draft |
-| 015 | [carry-v1 Strategy](015-carry-v1.md) | intelligence | 📝 draft |
+| 015 | [carry-v1 Strategy](015-carry-v1.md) | intelligence | 🔨 implementing |
 | 016 | [Feature Materialization](016-feature-materialization.md) | intelligence | 📝 draft |
 | 017 | [Screener Hit Journal & Grading](017-screener-grading.md) | intelligence | 📝 draft |
 | 018 | [Paper/Shadow/Live Mode Switch](018-mode-switch.md) | ops | 📝 draft |
@@ -32,6 +32,7 @@ should be updated).
 | 021 | [Bot Command Journal](021-bot-journal.md) | ops | 📝 draft |
 | 022 | [Screener Evaluation Cadence](022-screener-cadence.md) | intelligence | 📝 draft |
 | 023 | [String Interning in Features](023-string-interning.md) | intelligence | 📝 draft |
+| 024 | [Market-Data Integrity Gate](024-market-data-integrity.md) | data plane | 🔨 implementing |
 
 Status values: `draft` → `ready` (implementable) → `implementing` →
 `implemented` → `superseded`. Update this table in the same commit as the work
@@ -56,7 +57,8 @@ Open questions — needs human input; do NOT guess these
 ```
 
 Requirement prefixes: CONV, EVT, COL, STO, FEA, SIM, STR, EXE, RSK, OPS,
-RES, UI, ZCP (012), BKP (013), FSP (014), MAT (016), GRD (017), MOD (018).
+RES, UI, ZCP (012), BKP (013), FSP (014), MAT (016), GRD (017), MOD (018),
+INT (024).
 
 ## How to implement a spec
 

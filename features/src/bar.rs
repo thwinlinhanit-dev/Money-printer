@@ -70,7 +70,8 @@ impl BarBuilder {
         ts.div_euclid(self.tf_ns) * self.tf_ns
     }
 
-    fn finish(&self) -> Bar {
+    /// Close the current bucket into a [`Bar`].
+    fn close_current(&self) -> Bar {
         let vwap = if self.vol > 0.0 {
             self.pv / self.vol
         } else {
@@ -141,10 +142,29 @@ impl BarBuilder {
                 None
             }
             Some(_) => {
-                let closed = self.finish();
+                let closed = self.close_current();
                 self.reset_with(bucket, price, qty, side, ts_ns);
                 Some(closed)
             }
+        }
+    }
+
+    /// End-of-stream hook: close and yield the in-flight partial bar, if any,
+    /// for the given end-of-stream time (`now_ns` must be >= the last event
+    /// time; kept as a parameter to document the intent at call sites). Without
+    /// this call the partial bar silently vanishes when a replay ends mid-
+    /// bucket — offline runs call it once after the event loop so the final
+    /// partial bar is emitted (its `close_ts_ns` is the normal bucket
+    /// boundary, so downstream consumers cannot distinguish it from a naturally
+    /// closed bar). Live mode never needs this: the next tick after the bucket
+    /// boundary closes the bar naturally.
+    pub fn finish(&mut self, _now_ns: i64) -> Option<Bar> {
+        if self.bucket_start.is_some() {
+            let bar = self.close_current();
+            self.bucket_start = None; // consumed; the builder is cold again
+            Some(bar)
+        } else {
+            None
         }
     }
 }

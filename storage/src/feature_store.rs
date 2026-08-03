@@ -7,16 +7,20 @@
 //!
 //! Layout: `{root}/{feature}/ver={N}/venue={v}/symbol={s}/date={d}.parquet`,
 //! with a `{root}/{feature}/ver={N}/_params` marker holding the params hash so
-//! the version resolver can match without opening data files.
+//! the version resolver can match without opening data files. The streaming
+//! store appends `{date}-{hash}.parquet` files (per-flush unique, content-hash
+//! suffix) instead of ever rewriting a `{date}.parquet` (W-6, spec 016).
 
 use crate::StorageError;
 use arrow::array::{Float64Array, Int64Array, RecordBatch, UInt16Array, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
+use mp_core::{fnv1a_absorb, FNV1A_OFFSET};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -91,6 +95,8 @@ pub fn write_features(
     .map_err(|e| StorageError::Arrow(e.to_string()))?;
 
     let props = WriterProperties::builder()
+        // SAFETY: zstd level 3 is within the crate's valid range, so
+        // `ZstdLevel::try_new(3)` cannot fail (CONV-13).
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
         .set_key_value_metadata(Some(vec![
             KeyValue::new(KV_FEATURE_VER.into(), meta.feature_ver.to_string()),
@@ -109,6 +115,47 @@ pub fn write_features(
         .close()
         .map_err(|e| StorageError::Parquet(e.to_string()))?;
     Ok(n)
+}
+
+/// Deterministic content hash (FNV-1a) over rows + the FEA-6 footer metadata.
+/// Used for the per-flush unique suffix and the no-overwrite guard; the same
+/// rows always hash the same, so a re-flush of unchanged content is a no-op.
+fn rows_content_hash(rows: &[FeatureRow], meta: &FeatureMeta) -> u64 {
+    let mut h = FNV1A_OFFSET;
+    h = fnv1a_absorb(h, &meta.feature_ver.to_le_bytes());
+    h = fnv1a_absorb(h, meta.engine_git_sha.as_bytes());
+    h = fnv1a_absorb(h, meta.params_hash.as_bytes());
+    for r in rows {
+        h = fnv1a_absorb(h, &r.symbol_id.to_le_bytes());
+        h = fnv1a_absorb(h, &r.venue_code.to_le_bytes());
+        h = fnv1a_absorb(h, &r.ts_ns.to_le_bytes());
+        h = fnv1a_absorb(h, &r.value.to_bits().to_le_bytes());
+        h = fnv1a_absorb(h, &r.ver.to_le_bytes());
+    }
+    h
+}
+
+/// Write rows to `path`, refusing to clobber different content (W-6): when
+/// the file already exists it must hash identically (idempotent re-flush ⇒
+/// no-op); otherwise error. Returns the number of rows actually written.
+fn write_features_no_overwrite(
+    path: &Path,
+    rows: &[FeatureRow],
+    meta: &FeatureMeta,
+) -> Result<u64, StorageError> {
+    if path.exists() {
+        let existing = read_features(path)?;
+        let existing_meta = read_feature_meta(path)?
+            .ok_or_else(|| StorageError::Parquet(format!("{} lacks feature footer", path.display())))?;
+        if rows_content_hash(&existing, &existing_meta) == rows_content_hash(rows, meta) {
+            return Ok(0); // identical content: nothing to do
+        }
+        return Err(StorageError::Parquet(format!(
+            "refusing to overwrite {} with different content (W-6)",
+            path.display()
+        )));
+    }
+    write_features(path, rows, meta)
 }
 
 /// Read FEA-6 footer metadata without scanning data.
@@ -209,8 +256,13 @@ pub fn resolve_version(root: &Path, feature: &str, params_hash: &str) -> Result<
 }
 
 /// Streaming feature store (spec 016). Buffers FeatureUpdates in memory and
-/// flushes to Parquet on threshold or interval. Wraps the batch materialization
-/// logic above for zero-data-loss-on-crash operation.
+/// flushes to Parquet on threshold or interval, partitioning each row by its
+/// OWN `ts_ns` date floor (a midnight-straddling buffer lands rows on the days
+/// they happened, not on the flush-call day). Resolution of `ver=N` uses
+/// [`resolve_version`] — the same rule as batch materialization (FEA-6) — and
+/// each flush writes a `{date}-{content_hash}.parquet` so a second flush of
+/// the same date never overwrites the first (W-6). An identical re-flush is a
+/// no-op; the same path with DIFFERENT content is a hard error.
 pub struct StreamingFeatureStore {
     root: PathBuf,
     buffer: Vec<FeatureRow>,
@@ -244,7 +296,9 @@ impl StreamingFeatureStore {
         }
     }
 
-    /// Push one row. Auto-flushes when threshold crossed or interval elapsed.
+    /// Push one row (event time `ts_ns` drives the flush interval, not any
+    /// wall clock — PD-3). Auto-flushes when threshold crossed or interval
+    /// elapsed.
     pub fn push(&mut self, row: FeatureRow, ts_ns: i64) -> Result<(), StorageError> {
         self.buffer.push(row);
         let elapsed = ts_ns - self.last_flush_ns;
@@ -254,23 +308,36 @@ impl StreamingFeatureStore {
         Ok(())
     }
 
-    /// Force-flush any buffered rows to Parquet (e.g. on shutdown).
+    /// Force-flush any buffered rows to Parquet (e.g. on shutdown). Rows are
+    /// grouped by each row's own UTC date (`ts_ns` floor), one
+    /// `{date}-{content_hash}.parquet` per (date, flush); `ts_ns` only stamps
+    /// `last_flush_ns` for the interval gate.
     pub fn flush(&mut self, ts_ns: i64) -> Result<(), StorageError> {
         if self.buffer.is_empty() {
             return Ok(());
         }
         // Sort by ts_ns for deterministic output (MAT-5).
         self.buffer.sort_by_key(|r| r.ts_ns);
-        // Use the date from the latest row for the partition path.
-        let d = date_str(ts_ns);
-        let path = self.root
+        // FEA-6: resolve (or allocate) the version for this params hash —
+        // never a hardcoded ver (was ver=1).
+        let ver = resolve_version(&self.root, &self.feature, &self.meta.params_hash)?;
+        // Partition by each row's OWN date floor: a midnight-straddling buffer
+        // writes rows where they belong, not under one flush-call date.
+        let mut by_date: BTreeMap<String, Vec<FeatureRow>> = BTreeMap::new();
+        for r in self.buffer.drain(..) {
+            by_date.entry(date_str(r.ts_ns)).or_default().push(r);
+        }
+        let base = self
+            .root
             .join(&self.feature)
-            .join("ver=1")
+            .join(format!("ver={ver}"))
             .join(format!("venue={}", self.venue_slug))
-            .join(format!("symbol={}", self.symbol_id))
-            .join(format!("{d}.parquet"));
-        write_features(&path, &self.buffer, &self.meta)?;
-        self.buffer.clear();
+            .join(format!("symbol={}", self.symbol_id));
+        for (d, rows) in by_date {
+            let suffix = rows_content_hash(&rows, &self.meta);
+            let path = base.join(format!("{d}-{suffix:016x}.parquet"));
+            write_features_no_overwrite(&path, &rows, &self.meta)?;
+        }
         self.last_flush_ns = ts_ns;
         Ok(())
     }

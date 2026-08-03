@@ -34,6 +34,8 @@ pub enum LogError {
     BadMagic,
     #[error("unsupported format version {0}")]
     BadFormat(u16),
+    #[error("unsupported event schema version {0}")]
+    UnsupportedSchema(u16),
     #[error("unknown frame kind {0}")]
     BadFrameKind(u8),
 }
@@ -171,15 +173,24 @@ pub struct EventLogWriter {
 }
 
 impl EventLogWriter {
-    /// Open `path` for appending, creating it with a header if new and
-    /// truncating any torn trailing frame if it already exists. Returns the
-    /// writer and whether a truncation occurred (WARN-worthy, EVT-4).
+    /// Open `path` for appending. A "new" file means *no valid header*, not
+    /// merely "inode exists" (audit M2: a crash between creation and header
+    /// flush previously left a permanently unreadable log because `exists()`
+    /// was true but MAGIC was never written).
     pub fn open(path: &Path) -> Result<(Self, bool), LogError> {
         let exists = path.exists();
         let mut truncated = false;
+        let mut has_header = false;
         if exists {
             let valid = scan_valid_len(path)?;
             let actual = std::fs::metadata(path)?.len();
+            // A valid log begins with MAGIC + FORMAT_VER. scan_valid_len
+            // returns the offset of the first byte that does not parse as a
+            // complete frame, which for a well-formed file is the file length.
+            // A file that has MAGIC but nothing else, or no MAGIC at all, has
+            // no header.
+            let header_len = (MAGIC.len() + 4) as u64;
+            has_header = valid >= header_len;
             if valid < actual {
                 let f = OpenOptions::new().write(true).open(path)?;
                 f.set_len(valid)?;
@@ -192,7 +203,9 @@ impl EventLogWriter {
             .read(true)
             .append(true)
             .open(path)?;
-        if !exists {
+        if !has_header {
+            // Write (or re-write after truncation-to-zero) the header so any
+            // subsequent appends produce a readable log.
             file.write_all(MAGIC)?;
             file.write_all(&FORMAT_VER.to_le_bytes())?;
         }
@@ -230,13 +243,12 @@ impl EventLogWriter {
         self.events_since_fsync += 1;
         let p = self.fsync_policy;
         let should_fsync = p.every_n_events > 0 && self.events_since_fsync >= p.every_n_events;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as i64;
+        // FSYNC cadence is paced on *event* time (`recv_ts_ns`), not the OS
+        // wall clock — PD-3 / CONV-5: no wall-clock reads on the decision path.
+        let now = e.recv_ts_ns;
         let should_fsync_time = p.every_ns > 0
             && self.last_fsync_ns > 0
-            && (now - self.last_fsync_ns) >= p.every_ns;
+            && now.saturating_sub(self.last_fsync_ns) >= p.every_ns;
         if should_fsync || should_fsync_time {
             self.file.flush()?;
             // Use sync_data (faster) — metadata sync not needed for append-only (FSP-5).
@@ -310,7 +322,15 @@ impl LogReader {
                 return Ok(None);
             }
             match read_frame(&mut self.reader)? {
-                FrameRead::Eof | FrameRead::Torn => {
+                FrameRead::Eof => {
+                    self.done = true;
+                    return Ok(None);
+                }
+                FrameRead::Torn => {
+                    // EVT-4: a torn tail means the writer crashed mid-frame.
+                    // Distinguish it from a clean EOF so replay isn't fooled
+                    // into thinking the capture simply ended. WARN per spec.
+                    tracing::warn!("event log ended with a torn tail; trailing partial frame discarded");
                     self.done = true;
                     return Ok(None);
                 }
@@ -324,6 +344,10 @@ impl LogReader {
                         if payload.len() < 2 {
                             self.done = true;
                             return Ok(None);
+                        }
+                        let schema_ver = u16::from_le_bytes([payload[0], payload[1]]);
+                        if schema_ver != crate::SCHEMA_VER {
+                            return Err(LogError::UnsupportedSchema(schema_ver));
                         }
                         let e = codec::decode_event(&payload[2..])?;
                         return Ok(Some(e));

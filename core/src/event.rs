@@ -33,15 +33,17 @@ impl Venue {
         }
     }
 
-    /// Parse a venue from its slug.
+    /// Parse a venue from its slug. Accepts both the short [`slug`](Self::slug)
+    /// form and the underscore partition slug written by the storage layout
+    /// (e.g. `binance_futures`), so partition paths round-trip.
     pub fn from_slug(s: &str) -> Option<Self> {
         Some(match s {
-            "binance" | "binancefutures" => Venue::BinanceFutures,
+            "binance" | "binancefutures" | "binance_futures" => Venue::BinanceFutures,
             "bybit" => Venue::Bybit,
             "okx" => Venue::Okx,
             "hyperliquid" => Venue::Hyperliquid,
             "coinbase" => Venue::Coinbase,
-            "kraken" | "krakenfutures" => Venue::KrakenFutures,
+            "kraken" | "krakenfutures" | "kraken_futures" => Venue::KrakenFutures,
             _ => return None,
         })
     }
@@ -91,6 +93,47 @@ pub enum StatusKind {
         /// Number of frames dropped in this batch.
         dropped: u64,
     },
+}
+
+/// Where an event came from within one collector connection.  The envelope
+/// already carries the venue and symbol; this records the otherwise-lost
+/// transport context needed to audit a raw recording (INT-1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventProvenance {
+    /// Logical market-data stream, for example `depth` or `mark_price`.
+    pub stream: String,
+    /// Exact public subscription or combined-stream path used by the venue.
+    pub subscription: String,
+    /// Monotonic collector-local connection identity.  Changes after a
+    /// reconnect, making reconnect boundaries replayable.
+    pub connection_id: u64,
+    /// Origin of a book snapshot.  `None` is valid for non-book events.
+    pub snapshot_source: SnapshotSource,
+}
+
+impl EventProvenance {
+    /// Empty provenance used by deterministic fixtures and in-process
+    /// generated events.  Production raw recordings must replace this before
+    /// append.  Empty `String`s preserve EVT-2's allocation-free trade path.
+    pub fn synthetic() -> Self {
+        Self {
+            stream: String::new(),
+            subscription: String::new(),
+            connection_id: 0,
+            snapshot_source: SnapshotSource::None,
+        }
+    }
+}
+
+/// How a book snapshot was obtained.  Keeping this separate from
+/// [`SnapshotReason`] answers both *why* a snapshot exists and *where* it was
+/// sourced from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SnapshotSource {
+    None,
+    Rest,
+    WebSocket,
+    Synthetic,
 }
 
 /// The normalized market event body (EVT-1).
@@ -159,6 +202,8 @@ pub struct EventEnvelope {
     pub recv_ts_ns: i64,
     /// Venue sequence if provided, else collector-assigned monotonic.
     pub stream_seq: u64,
+    /// Transport provenance persisted with every event (INT-1).
+    pub provenance: EventProvenance,
     pub body: MarketEvent,
 }
 
@@ -179,8 +224,15 @@ impl EventEnvelope {
             exch_ts_ns,
             recv_ts_ns,
             stream_seq,
+            provenance: EventProvenance::synthetic(),
             body,
         }
+    }
+
+    /// Attach live collector provenance immediately before writing a raw log.
+    pub fn with_provenance(mut self, provenance: EventProvenance) -> Self {
+        self.provenance = provenance;
+        self
     }
 
     /// Merge key for global ordering across venues/files (EVT-5).

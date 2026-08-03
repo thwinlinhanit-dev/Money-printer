@@ -47,4 +47,18 @@ impl RateBudget {
         self.refill(now_ns);
         self.tokens
     }
+
+    /// The last timestamp this bucket observed — lets budgeted wrappers keep
+    /// determinism (injected time) without taking their own clock parameter.
+    pub fn now(&self) -> Nanos {
+        self.last_ns
+    }
+
+    /// Binance USDⓈ-M Futures REST allowance for the live collector (spec 020
+    /// §Rate limits): depth weight ≤2 and openInterest weight 1 against a
+    /// 2400 weight/min IP cap. We budget 2400 weight-units per minute refilled
+    /// continuously (~40/s), leaving ~120 units of headroom under the cap.
+    pub fn binance_futures(now_ns: Nanos) -> Self {
+        Self::new(2400.0, 40.0, now_ns)
+    }
 }

@@ -6,7 +6,8 @@ Description=Money Printer weekly screener grading
 [Service]
 Type=oneshot
 User=printer
-ExecStart=/usr/bin/python3 /opt/money-printer/research/run_grading.py
+ExecStart=/usr/bin/python3 /opt/money-printer/research/run_grading.py --input /opt/money-printer/research/grading-input.json --out-dir /opt/money-printer/research/grades
 ProtectSystem=strict
 ReadWritePaths=/opt/money-printer/research/grades
+ReadOnlyPaths=/opt/money-printer/research/grading-input.json
 NoNewPrivileges=true

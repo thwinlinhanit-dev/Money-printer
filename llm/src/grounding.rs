@@ -39,6 +39,12 @@ impl InputBundle {
 pub struct HumanReadOnly(String);
 
 impl HumanReadOnly {
+    /// Construct from completion text (crate-internal: the typed boundary is
+    /// meaningful only if every construction flows through `mp-llm`).
+    pub(crate) fn from_text(text: String) -> Self {
+        HumanReadOnly(text)
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -77,7 +83,7 @@ impl ArchiveRecord {
             model_id: completion.model.clone(),
             prompt_version: prompt_version.into(),
             bundle_hash: bundle.hash,
-            output: HumanReadOnly(completion.text.clone()),
+            output: HumanReadOnly::from_text(completion.text.clone()),
             created_ts_ns,
         }
     }

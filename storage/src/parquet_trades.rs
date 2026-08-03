@@ -99,6 +99,8 @@ pub fn write_trades(
     .map_err(|e| StorageError::Arrow(e.to_string()))?;
 
     let props = WriterProperties::builder()
+        // SAFETY: zstd level 3 is within the crate's valid range, so
+        // `ZstdLevel::try_new(3)` cannot fail (CONV-13).
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
         .set_key_value_metadata(Some(vec![
             KeyValue::new(KV_SCHEMA_VER.into(), mp_core::SCHEMA_VER.to_string()),

@@ -93,29 +93,44 @@ impl RiskConfig {
 /// {0=low, 1=mid, 2=high}, `regime.trend` ∈ {0=chop, 1=trend}. The declared
 /// mask holds labels like "trend", "chop", "low_vol", "mid_vol", "high_vol";
 /// an empty mask means any regime. Returns 1.0 on match, `penalty` otherwise.
+///
+/// Fail-closed (CONV-8): the labels must be EXACTLY 0, 1, or 2. A silent
+/// `f64 as i64` cast would map e.g. 2.7 → 2 ("high_vol") — a malformed feature
+/// passing as a real regime. Any non-{0,1,2}, fractional, or non-finite label
+/// logs a WARN and falls back to `penalty` (de-weighted, never full fit).
 pub fn regime_fit_from_features(
     declared: &[String],
     regime_vol: f64,
     regime_trend: f64,
     penalty: f64,
 ) -> f64 {
+    let fallback = || penalty.clamp(0.0, 1.0);
     if declared.is_empty() {
         return 1.0;
     }
-    let vol_label = match regime_vol as i64 {
-        0 => "low_vol",
-        1 => "mid_vol",
-        _ => "high_vol",
+    // Valid only when finite AND exactly one of the catalog encodings.
+    let vol_label = if regime_vol == 0.0 {
+        "low_vol"
+    } else if regime_vol == 1.0 {
+        "mid_vol"
+    } else if regime_vol == 2.0 {
+        "high_vol"
+    } else {
+        tracing::warn!(regime_vol, "invalid regime.vol label (not 0/1/2) → fail-closed penalty (RSK-7)");
+        return fallback();
     };
-    let trend_label = if regime_trend as i64 == 1 {
+    let trend_label = if regime_trend == 0.0 {
+        "chop"
+    } else if regime_trend == 1.0 {
         "trend"
     } else {
-        "chop"
+        tracing::warn!(regime_trend, "invalid regime.trend label (not 0/1) → fail-closed penalty (RSK-7)");
+        return fallback();
     };
     let matches = declared.iter().any(|l| l == vol_label || l == trend_label);
     if matches {
         1.0
     } else {
-        penalty.clamp(0.0, 1.0)
+        fallback()
     }
 }

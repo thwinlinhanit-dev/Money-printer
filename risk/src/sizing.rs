@@ -65,6 +65,11 @@ pub struct SizedOrder {
 
 fn round_down(x: f64, step: f64) -> f64 {
     if step <= 0.0 {
+        // step_size comes from risk.toml / venue metadata; ≤ 0 is a config bug,
+        // not a request for exact sizing. Treat as no quantization but say so.
+        // CONFIG-VALIDATION: such configs SHOULD be rejected at load time; this
+        // in-code warning is the fail-safe so a size is never computed silently.
+        tracing::warn!(step, "non-positive step_size → no quantization (validate config to reject this upstream)");
         return x;
     }
     (x / step).floor() * step
@@ -79,6 +84,10 @@ pub fn size(params: &SizingParams, inp: &SizingInputs) -> SizedOrder {
     let dollar_vol = inp.instrument_vol_frac * inp.mark_price * inp.contract_multiplier;
 
     let denom = inp.k_stop * dollar_vol;
+    // Negative risk-units = strategy bug; treat as zero but flag it (PD-5).
+    if inp.risk_units < 0.0 {
+        tracing::warn!(risk_units = inp.risk_units, "negative risk_units → zero size (strategy bug)");
+    }
     let raw = if denom > 0.0 && inp.risk_units.is_finite() && per_unit_risk.is_finite() {
         (inp.risk_units.max(0.0) * per_unit_risk) / denom
     } else {

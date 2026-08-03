@@ -181,7 +181,83 @@ impl AlertRouter {
         std::mem::take(&mut self.batch)
     }
 
+    /// Post a P1 dispatch to the owner-configured webhook sink (O1). This is
+    /// the P1 "phone-call webhook" channel made real: when the owner sets
+    /// `MP_OPS_P1_WEBHOOK` the binary edge posts the dispatch JSON there;
+    /// when unset the caller keeps its warn-only fallback (documented —
+    /// functionality-gated, not silently dead). Never called for P2/P3.
+    ///
+    /// Off the decision path (PD-3): this is alert egress, and it reads no
+    /// clock and no secrets — the URL arrives via owner-managed env. Any
+    /// network failure is reported to the caller so it can at least log it.
+    pub fn post_p1_webhook(dispatch: &Dispatch, url: &str) -> Result<(), String> {
+        debug_assert_eq!(dispatch.severity, Severity::P1, "webhook sink is P1-only");
+        let body = format!(
+            "{{\"id\":{},\"severity\":{},\"detail\":{},\"runbook\":{},\"ts_ns\":{}}}",
+            json_str(&dispatch.id),
+            json_str(dispatch.severity.as_str()),
+            json_str(&dispatch.detail),
+            json_str(&dispatch.runbook),
+            dispatch.ts_ns,
+        );
+        let (host, path) = url
+            .strip_prefix("http://")
+            .filter(|_| !url.starts_with("https")) // https would need TLS; refuse honestly
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(host, rest)| (host.to_string(), format!("/{rest}")))
+            .ok_or_else(|| "MP_OPS_P1_WEBHOOK must be an http:// host[:port]/path URL".to_string())?;
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        let mut stream = TcpStream::connect(host.as_str())
+            .map_err(|e| format!("p1 webhook connect {host}: {e}"))?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(|e| e.to_string())?;
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(|e| e.to_string())?;
+        stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+        let mut buf = Vec::new();
+        stream.take(8192).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&buf);
+        // Fail closed on anything but a 2xx: an alert sink that "accepted" a
+        // 500 would be worse than the honest warn-only fallback.
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default();
+        if status.starts_with('2') {
+            Ok(())
+        } else {
+            Err(format!("p1 webhook non-2xx: {}", status))
+        }
+    }
+
     pub fn batch_len(&self) -> usize {
         self.batch.len()
     }
+}
+
+/// Minimal JSON-string escaper for the P1 webhook payload (the ops crate does
+/// not carry serde-derive for this one-shot body; ids/details are our own).
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }

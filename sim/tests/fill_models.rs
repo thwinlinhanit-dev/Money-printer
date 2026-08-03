@@ -270,9 +270,11 @@ fn sim_4_missing_funding_refuses_to_report_a_held_perp_position() {
         1,
     );
     let nine_hours = 9 * 3_600 * 1_000_000_000i64;
+    let four_hours = 4 * 3_600 * 1_000_000_000i64;
     let events = vec![
-        trade(0, 100.0, 1.0, Side::Buy),          // opens the position
-        trade(nine_hours, 100.0, 1.0, Side::Buy), // time passes, no Funding ever
+        trade(0, 100.0, 1.0, Side::Buy),             // strategy fires; order queued
+        trade(four_hours, 100.0, 1.0, Side::Buy),    // fills here; hold crosses the 8h boundary
+        trade(nine_hours, 100.0, 1.0, Side::Buy),    // still held at run end, no Funding ever
     ];
     let err = bt.run(&events).unwrap_err();
     assert_eq!(err, SimError::MissingFunding(SYM));

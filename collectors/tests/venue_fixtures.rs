@@ -80,15 +80,21 @@ fn col_5_binance_aggtrade_side_and_markprice_funding() {
 
 #[test]
 fn col_7_binance_depth_seeds_then_deltas() {
+    // Spec 020 removed the synthetic-seed fallback: the book comes from a REST
+    // snapshot (injected via `seed_book`), and deltas must satisfy the pu rule.
     let mut n = BinanceNormalizer::new();
-    // First depthUpdate seeds a synthetic snapshot.
+    let id = n
+        .symbols_mut()
+        .intern_default(mp_core::Venue::BinanceFutures, "BTCUSDT");
+    n.seed_book(id, 100);
+    // First depthUpdate straddles the snapshot (U <= lastUpdateId <= u).
     let s = norm(
         &mut n,
         1,
         r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":100,"u":105,"pu":99,"b":[["50000","1"]],"a":[["50001","1"]]}"#,
     );
-    assert!(matches!(s[0].body, MarketEvent::BookSnapshot { .. }));
-    // Contiguous next update (U == last u + 1).
+    assert!(matches!(s[0].body, MarketEvent::BookDelta { first_seq: 100, last_seq: 105, .. }));
+    // Contiguous next update (pu == prev u).
     let d = norm(
         &mut n,
         2,

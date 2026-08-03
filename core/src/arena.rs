@@ -91,7 +91,7 @@ impl Arena {
     /// Encode a value into the arena and return an `EventRef`.
     /// The offset is a global byte address (chunk_idx << 16 | intra_offset).
     pub fn alloc<T: serde::Serialize>(&self, val: &T) -> io::Result<EventRef> {
-        let bytes = bincode::serialize(val).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let bytes = bincode::serialize(val).map_err(io::Error::other)?;
         let len = bytes.len() as u32;
         let mut chunks = self.chunks.lock().unwrap();
         let idx = chunks.len() - 1;
@@ -105,9 +105,22 @@ impl Arena {
         }
         // Current chunk full — allocate a new one.
         let mut new_chunk = Chunk::new();
-        let intra_off = new_chunk
-            .write(&bytes)
-            .expect("fresh chunk must fit write");
+        let intra_off = match new_chunk.write(&bytes) {
+            Some(off) => off,
+            None => {
+                // CONV-15: a serialized event larger than a whole chunk is a
+                // routing error, not a panic. Return a typed io error so the
+                // caller can decide (drop + WARN upstream / refuse).
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "arena: serialized event {} bytes exceeds chunk size {} — not representable",
+                        bytes.len(),
+                        CHUNK_SIZE
+                    ),
+                ));
+            }
+        };
         chunks.push(new_chunk);
         let new_idx = chunks.len() - 1;
         let global_off = (new_idx << CHUNK_SHIFT) as u32 | intra_off as u32;
@@ -129,7 +142,7 @@ impl Arena {
             ));
         }
         let data = chunks[idx].as_slice(r.offset_in_chunk(), r.len as usize);
-        bincode::deserialize(data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        bincode::deserialize(data).map_err(io::Error::other)
     }
 
     /// Number of chunks currently live.

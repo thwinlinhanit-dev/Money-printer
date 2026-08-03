@@ -1,0 +1,8 @@
+# One public-market-data collector owns exactly this venue/symbol recording.
+# Start with:
+# cargo run -p mp-collectors --features live-ws,live-http --bin mp-collector -- --config collectors/binance-btcusdt.example.toml
+venue = "binance"
+symbol = "BTCUSDT"
+data_dir = "data"
+channel_capacity = 10000
+backpressure = "drop_oldest"

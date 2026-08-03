@@ -3,7 +3,7 @@
 //! hashes (CONV-12).
 
 use crate::fills::FillOptimism;
-use mp_core::{fnv1a_absorb, Fill, OrderIntent, FNV1A_OFFSET};
+use mp_core::{fnv1a_absorb, Fill, IntentId, OrderIntent, Venue, FNV1A_OFFSET};
 
 /// Append-only record of decisions with a rolling FNV-1a hash.
 #[derive(Debug, Clone, Default)]
@@ -36,15 +36,25 @@ impl DecisionLog {
         self.absorb(&s);
     }
 
-    pub fn record_fill(&mut self, seq: u64, f: &Fill) {
-        self.record_fill_tagged(seq, f, FillOptimism::None);
+    pub fn record_fill(&mut self, seq: u64, f: &Fill, venue: Venue) {
+        self.record_fill_tagged(seq, f, FillOptimism::None, "", venue);
     }
 
-    /// Record a fill with its optimism tag (`none` / `maker` / `tape`).
-    pub fn record_fill_tagged(&mut self, seq: u64, f: &Fill, optimism: FillOptimism) {
+    /// Record a fill with its optimism tag (`none` / `maker` / `tape`) plus the
+    /// strategy id and venue it belongs to (audit H2 — fills were previously
+    /// indistinguishable across strategies/venues).
+    pub fn record_fill_tagged(
+        &mut self,
+        seq: u64,
+        f: &Fill,
+        optimism: FillOptimism,
+        strategy: &str,
+        venue: Venue,
+    ) {
         self.fills += 1;
         let s = format!(
-            "F|{seq}|{}|{:?}|{}|{}|{}|{:?}|{}",
+            "F|{seq}|{}|{venue:?}|{}|{:?}|{}|{}|{}|{:?}|{}",
+            strategy,
             f.symbol.0,
             f.side,
             f.price.to_bits(),
@@ -53,6 +63,20 @@ impl DecisionLog {
             f.liquidity,
             optimism.as_str(),
         );
+        self.absorb(&s);
+    }
+
+    /// Record a structurally-invalid intent that was rejected by validation
+    /// before reaching the gate (audit C2, CONV-8).
+    pub fn record_invalid_intent(&mut self, seq: u64, intent: IntentId, reason: &str) {
+        let s = format!("X|{seq}|{}|{reason}", intent.0);
+        self.absorb(&s);
+    }
+
+    /// Record a strategy-side log line (routed through the decision log so the
+    /// strategy's rationale is replayable, audit H3).
+    pub fn record_log(&mut self, seq: u64, msg: &str) {
+        let s = format!("L|{seq}|{msg}");
         self.absorb(&s);
     }
 

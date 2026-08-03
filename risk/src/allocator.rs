@@ -64,6 +64,11 @@ pub fn allocate(
 
 /// Enforce the intraday shrink-only rule (RSK-4): given previous and freshly
 /// computed weights, never let a weight rise until the next daily run.
+///
+/// A strategy absent from `prev` is treated as having a previous weight of 0
+/// (there is no deployed intraday baseline for it), so its entry passes at 0 —
+/// a brand-new strategy gets NO intraday allocation and must wait for the next
+/// daily run to ramp in. Risk-on is never taken unilaterally intraday.
 pub fn shrink_only(
     prev: &BTreeMap<String, f64>,
     proposed: &BTreeMap<String, f64>,
@@ -71,7 +76,8 @@ pub fn shrink_only(
     proposed
         .iter()
         .map(|(id, &w)| {
-            let capped = prev.get(id).map(|&p| w.min(p)).unwrap_or(w);
+            // Absent from prev → baseline 0.0 → weight may only shrink to 0.
+            let capped = prev.get(id).map(|&p| w.min(p)).unwrap_or(0.0);
             (id.clone(), capped)
         })
         .collect()

@@ -1,6 +1,8 @@
 """RES-1 reader coverage gate over real Parquet, RES-2 weekly job idempotency."""
 
 import json
+import subprocess
+import sys
 
 import polars as pl
 import pytest
@@ -90,3 +92,47 @@ def test_res_2_weekly_grading_job_is_idempotent_and_journals_leaderboard(tmp_pat
     assert not ran2
     journal2 = (tmp_path / "leaderboard.jsonl").read_text(encoding="utf-8")
     assert journal == journal2
+
+
+def test_res_5_6_executable_brief_job_archives_inputs_and_validation(tmp_path):
+    bundle = {
+        "Regime": "range",
+        "Flows worth knowing": "funding 0.1",
+        "Your book": "flat",
+        "Data health": "coverage 1",
+        "Watch today": "no data",
+    }
+    input_path = tmp_path / "brief.json"
+    input_path.write_text(json.dumps(bundle), encoding="utf-8")
+    script = __import__("pathlib").Path(__file__).resolve().parents[1] / "run_brief.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--input", str(input_path), "--archive-dir", str(tmp_path / "briefs")],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    record = json.loads(next((tmp_path / "briefs").glob("*.jsonl")).read_text(encoding="utf-8"))
+    assert json.loads(record["input_bundle"]) == bundle
+    assert record["validation_result"] == "grounded"
+
+
+def test_res_2_executable_grading_job(tmp_path):
+    bundle = {
+        "week": "2026-W30",
+        "horizon_ns": MIN,
+        "hits": [{"rule": "strong", "symbol": "BTC", "ts_ns": 0}],
+        "prices": {"BTC": [[0, 100.0], [MIN, 110.0]]},
+        "baseline": {"BTC": 0.0},
+    }
+    input_path = tmp_path / "grading.json"
+    input_path.write_text(json.dumps(bundle), encoding="utf-8")
+    script = __import__("pathlib").Path(__file__).resolve().parents[1] / "run_grading.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--input", str(input_path), "--out-dir", str(tmp_path / "grades")],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "grades" / "2026-W30.json").exists()

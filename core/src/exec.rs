@@ -61,6 +61,54 @@ pub struct OrderIntent {
     pub tag: String,
 }
 
+/// Intent-shape failure reasons (CONV-8: decision-path inputs must be finite).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IntentError {
+    #[error("quantity/risk-units is not finite")]
+    NonFiniteQty,
+    #[error("quantity/risk-units is negative")]
+    NegativeQty,
+    #[error("limit price is not strictly positive and finite")]
+    BadLimitPrice,
+    #[error("strategy id is empty")]
+    EmptyStrategy,
+}
+
+impl OrderIntent {
+    /// Structural validation at the strategy→sizing seam (audit C2). Runs before
+    /// the intent can reach the gate: a buggy strategy emitting NaN qty, a
+    /// negative size, or junk gets an error here, never a fill.
+    pub fn validate(&self) -> Result<(), IntentError> {
+        match &self.qty {
+            SizeUnit::Contracts(c) => {
+                if !c.is_finite() {
+                    return Err(IntentError::NonFiniteQty);
+                }
+                if *c < 0.0 {
+                    return Err(IntentError::NegativeQty);
+                }
+            }
+            SizeUnit::RiskUnits(r) => {
+                if !r.is_finite() {
+                    return Err(IntentError::NonFiniteQty);
+                }
+                if *r < 0.0 {
+                    return Err(IntentError::NegativeQty);
+                }
+            }
+        }
+        if let OrderKind::Limit { px } = &self.kind {
+            if !px.is_finite() || *px <= 0.0 {
+                return Err(IntentError::BadLimitPrice);
+            }
+        }
+        if self.strategy.0.is_empty() {
+            return Err(IntentError::EmptyStrategy);
+        }
+        Ok(())
+    }
+}
+
 /// Whether a fill added or removed liquidity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Liquidity {

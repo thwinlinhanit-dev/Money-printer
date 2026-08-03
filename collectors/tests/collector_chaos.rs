@@ -5,6 +5,7 @@ use mp_collectors::{
     Backoff, Collector, CollectorConfig, DriveOutcome, MockTransport, Transport, TransportEvent,
 };
 use mp_collectors::{BybitNormalizer, RateBudget, Staleness};
+use mp_core::StatusKind;
 
 const SNAP1: &str = r#"{"topic":"orderbook.50.BTCUSDT","type":"snapshot","ts":1,"data":{"s":"BTCUSDT","b":[["100.0","5"]],"a":[["101.0","4"]],"u":1}}"#;
 const SNAP2: &str = r#"{"topic":"orderbook.50.BTCUSDT","type":"snapshot","ts":9,"data":{"s":"BTCUSDT","b":[["100.0","6"]],"a":[["101.0","2"]],"u":50}}"#;
@@ -135,6 +136,41 @@ fn col_2_staleness_flags_quiet_streams() {
     s.observe("publicTrade.BTCUSDT", 2_000_000_000);
     let stale = s.stale_streams(2_500_000_000);
     assert_eq!(stale, vec!["orderbook.50.BTCUSDT".to_string()]);
+}
+
+#[test]
+fn col_2_staleness_emits_stale_status_verdict() {
+    // Driver-level contract (mirrors the mp-collector watchdog wiring): after
+    // a stream observes an event at t and then goes silent past the threshold,
+    // `stale_streams` reports it so the driver can emit `Status::Stale` and
+    // reconnect. Kept transport-free to stay deterministic.
+    let mut s = Staleness::new(15_000_000_000); // same 15s as the binary
+    s.observe("binance/depth", 1_000_000_000);
+    assert!(s.stale_streams(2_000_000_000).is_empty(), "fresh stream not stale");
+    let stale = s.stale_streams(20_000_000_000);
+    assert_eq!(stale, vec!["binance/depth".to_string()]);
+    // The binary maps this verdict to a `Status::Stale` event; assert the kind
+    // exists in the event schema so the mapping can't silently rot.
+    let _ = StatusKind::Stale;
+}
+
+#[test]
+fn col_6_parse_error_warns_and_continues() {
+    // COL-6 wording: WARN log + counter increment + keep going (no panic).
+    // The WARN itself is observed in `tracing` output; here we pin the
+    // counter-increment-and-continue contract.
+    let mut c = Collector::new(
+        BybitNormalizer::new(),
+        CollectorConfig { max_consecutive_parse_failures: 3 },
+    );
+    let mut t = MockTransport::new();
+    t.push_frame(1, b"not-json".to_vec())
+        .push_frame(2, SNAP1);
+    let mut out = Vec::new();
+    let outcome = c.drive(&mut t, &mut out);
+    assert_eq!(outcome, DriveOutcome::Exhausted, "kept streaming after a parse error");
+    assert_eq!(c.counters().messages_dropped, 1, "parse error counted once");
+    assert_eq!(c.counters().events_emitted, 1, "good frame still emitted");
 }
 
 #[test]

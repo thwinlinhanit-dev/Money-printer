@@ -4,8 +4,18 @@ This repo is a personal trading system: research → simulation → backtesting 
 execution. You (an AI agent) are expected to implement it spec-first. Read this
 file completely before writing any code.
 
+## DOX Compliance
+
+This repository uses the DOX framework defined in [`AGENTS.md`](AGENTS.md).  
+AGENTS.md files are binding work contracts for their subtree. Before editing
+any file, read the root `AGENTS.md`, then walk the path to your target reading
+every `AGENTS.md` along the way. The nearest AGENTS.md is the local contract;
+parent docs supply repo-wide rules. If docs conflict, the closer doc controls
+local details, but no child doc may weaken DOX.
+
 ## Orientation (read in this order)
 
+0. [`AGENTS.md`](AGENTS.md) — DOX framework, hierarchy, and Child DOX Index.
 1. `docs/SYSTEM_BLUEPRINT.md` — the full-loop design and philosophy. The *why*.
 2. `specs/README.md` — spec index, status, and conventions. The *what*.
 3. The specific spec you are implementing. The *exactly what*.

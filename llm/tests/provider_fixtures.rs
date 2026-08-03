@@ -259,3 +259,71 @@ fn res_6_archive_record_is_reproducible_json_line() {
     );
     assert_eq!(line, rec2.to_json_line());
 }
+
+// ---- Token-usage threading + fail-closed parse (L3/L4, spec 010 cost) ----
+
+#[test]
+fn res_6_usage_threaded_out_of_completion_parse_for_every_provider() {
+    // L3: `parse_response` never discards usage — the tuple form returns it
+    // explicitly and it always matches the completion's own copy.
+    let cases: Vec<(Box<dyn LlmProvider>, &str, u32, u32)> = vec![
+        (
+            Box::new(mp_llm::anthropic::AnthropicProvider::new()),
+            r#"{"model":"claude-opus-4-8","content":[{"type":"text","text":"ok"}],
+                "usage":{"input_tokens":12,"output_tokens":5}}"#,
+            12,
+            5,
+        ),
+        (
+            Box::new(mp_llm::openai_family::OpenAiProvider::new()),
+            r#"{"model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"ok"}}],
+                "usage":{"prompt_tokens":9,"completion_tokens":2}}"#,
+            9,
+            2,
+        ),
+        (
+            Box::new(mp_llm::gemini::GeminiProvider::new()),
+            r#"{"candidates":[{"content":{"parts":[{"text":"ok"}]}}],
+                "usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}"#,
+            7,
+            3,
+        ),
+        (
+            Box::new(mp_llm::cohere::CohereProvider::new()),
+            r#"{"id":"abc","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},
+                "usage":{"tokens":{"input_tokens":4,"output_tokens":1}}}"#,
+            4,
+            1,
+        ),
+    ];
+    let mut acc = mp_llm::UsageAccumulator::new();
+    for (p, raw, want_in, want_out) in cases {
+        let (c, u) = p.completion_and_usage(raw.as_bytes()).unwrap();
+        assert_eq!(u.input_tokens, want_in);
+        assert_eq!(u.output_tokens, want_out);
+        assert_eq!(c.usage, u, "tuple usage must equal completion usage");
+        acc.record(u).unwrap();
+    }
+    // L3: accumulation over fixture responses yields exact totals.
+    let totals = acc.totals();
+    assert_eq!(totals.input_tokens, 12 + 9 + 7 + 4);
+    assert_eq!(totals.output_tokens, 5 + 2 + 3 + 1);
+    assert_eq!(totals.calls, 4);
+}
+
+#[test]
+fn res_6_usage_counter_out_of_u32_range_fails_closed() {
+    // L4: a usage field above u32::MAX must error descriptively, never
+    // truncate via `as u32` (previously `u32_at` wrapped past 4 billion).
+    let p = mp_llm::openai_family::OpenAiProvider::new();
+    let raw = r#"{"model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"ok"}}],
+        "usage":{"prompt_tokens":5000000000,"completion_tokens":1}}"#;
+    let err = p.parse_response(raw.as_bytes()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("/usage/prompt_tokens"), "{msg}");
+    assert!(msg.contains("5000000000"), "{msg}");
+    // A missing usage object stays best-effort zero, not an error.
+    let bare = r#"{"model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+    let c = p.parse_response(bare.as_bytes()).unwrap();
+    assert_eq!(c.usage, mp_llm::Usage::default());
+}

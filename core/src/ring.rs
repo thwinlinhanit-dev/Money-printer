@@ -14,6 +14,7 @@
 //! log/channel path; a zero-copy arena ring is a later optimization.
 
 use std::cell::UnsafeCell;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -21,8 +22,20 @@ const EMPTY: u64 = u64::MAX;
 
 struct Slot<T: Copy> {
     seq: AtomicU64,
-    val: UnsafeCell<T>,
+    val: UnsafeCell<MaybeUninit<T>>,
 }
+
+// SAFETY: `Ring` is only shared through `Arc<Ring<T>>`. One `Producer` writes a
+// slot and publishes it with a `Release` store to `seq`; consumers `Acquire`-
+// load `seq` before and after copying `val` and discard the value if the seq
+// changed underneath (LMAX generation protocol). `T: Copy` means read =
+// memcpy with no destructor racing a producer write. The `MaybeUninit`
+// payload permits the initial "never-read-before-publish" state for any
+// `T: Copy` without UB (fixes the previous `mem::zeroed()` which was invalid
+// for types without an all-zero bit pattern). The remaining producer-write /
+// consumer-read overlap on the same address is the standard Disruptor
+// pattern: it can produce a torn value only transiently, which the post-read
+// seq re-check always discards, so no torn value is ever returned.
 
 /// Shared broadcast ring. Construct with [`Ring::with_capacity`], then take one
 /// [`Producer`] and any number of [`Consumer`]s.
@@ -33,10 +46,6 @@ pub struct Ring<T: Copy> {
     write_pos: AtomicU64,
 }
 
-// SAFETY: access is disciplined — a single Producer writes each slot then
-// publishes via `seq` (Release); consumers read `seq` (Acquire) before and
-// after touching the value and discard the read on any change. `T: Send` makes
-// moving values across threads sound; `T: Copy` avoids concurrent drops.
 unsafe impl<T: Copy + Send> Send for Ring<T> {}
 unsafe impl<T: Copy + Send> Sync for Ring<T> {}
 
@@ -56,9 +65,9 @@ impl<T: Copy> Ring<T> {
         for _ in 0..cap {
             v.push(Slot {
                 seq: AtomicU64::new(EMPTY),
-                // The initial value is never returned: a slot is only readable
-                // after the producer publishes a real value with seq == index.
-                val: UnsafeCell::new(unsafe { std::mem::zeroed() }),
+                // Never read before the producer publishes a real value via
+                // seq, so no initialized `T` is materialized at construction.
+                val: UnsafeCell::new(MaybeUninit::uninit()),
             });
         }
         Arc::new(Self {
@@ -99,7 +108,7 @@ impl<T: Copy> Ring<T> {
         // index sees the sequence change and discards its read (EVT-7).
         slot.seq.store(EMPTY, Ordering::Release);
         unsafe {
-            *slot.val.get() = v;
+            slot.val.get().write(MaybeUninit::new(v));
         }
         slot.seq.store(w, Ordering::Release);
         self.write_pos.store(w + 1, Ordering::Release);
@@ -168,7 +177,11 @@ impl<T: Copy> Consumer<T> {
                 // Prevent the compiler from reordering the non-atomic read
                 // before the Acquire load of seq (or after the re-check).
                 std::sync::atomic::compiler_fence(Ordering::Acquire);
-                let v = *slot.val.get();
+                // SAFETY: seq1 == cursor (checked above) means the producer has
+                // published this slot, so the payload was initialized. assume_init
+                // reads it as T: Copy (memcpy); the post-copy seq re-check
+                // discards the value if a new write raced us.
+                let v = (*slot.val.get()).assume_init();
                 std::sync::atomic::compiler_fence(Ordering::Acquire);
                 v
             };

@@ -52,6 +52,7 @@ impl Ctx for TestCtx {
 fn feat(v: f64) -> FeatureUpdate {
     FeatureUpdate {
         feature: SymbolId(1),
+        name: "funding.rate".into(),
         venue: mp_core::Venue::Bybit,
         symbol: SymbolId(0),
         ts_ns: 1,
@@ -257,6 +258,7 @@ fn str_1_strategy_trait_matches_design_and_ctx_exposes_no_io() {
     let mut s = NullStrategy;
     let u = mp_features::FeatureUpdate {
         feature: mp_core::SymbolId(1),
+        name: "funding.rate".into(),
         venue: mp_core::Venue::Bybit,
         symbol: mp_core::SymbolId(0),
         ts_ns: 1,

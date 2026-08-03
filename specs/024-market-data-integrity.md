@@ -1,0 +1,43 @@
+# 024 — Market-Data Integrity Gate
+
+## Purpose
+
+Make a raw market-data recording attributable, auditable, and safe to promote
+into research.  The system is a market-data integrity system first: a strategy
+may only consume a recording that has passed this gate.
+
+## Scope
+
+In: one venue/symbol per raw log, event-level provenance, raw-log audit,
+quarantine classification, compaction refusal, and a daily scorecard.  Out:
+authenticated trading, strategy changes, and long-running hosting policy.
+
+## Requirements
+
+- **INT-1** Every raw event MUST retain its venue/symbol envelope and transport
+  provenance: stream, exact subscription, connection id, and snapshot source.
+- **INT-2** A raw log MUST contain one venue and one symbol only.  Mixed,
+  unknown, malformed, or legacy-unattributable logs are quarantined.
+- **INT-3** The audit MUST report event counts, first/last receive timestamps,
+  coverage, gaps, stale periods, mismatches, symbol-table validity, and
+  provenance failures.
+- **INT-4** Compaction MUST refuse any audit result that is not clean.
+- **INT-5** The daily scorecard MUST report each required venue/symbol/stream
+  and only mark a day promotable when every required recording is clean.
+
+## Acceptance criteria
+
+- [ ] `int_1_event_provenance_roundtrips` proves provenance is event-level.
+- [ ] `int_2_mixed_log_is_quarantined` proves a venue/symbol mismatch fails.
+- [ ] `int_3_audit_reports_gap_and_staleness` proves coverage diagnostics.
+- [ ] `int_4_compaction_refuses_quarantined_log` proves contaminated data never
+  reaches cold storage.
+- [ ] `int_5_scorecard_requires_every_recording_clean` proves promotion is
+  based on the required matrix, not process uptime.
+
+## Decisions
+
+- 2026-07-29: Existing schema-v1 raw logs are deliberately classified as
+  legacy/unattributable and quarantined.  They are never silently promoted.
+- 2026-07-29: The collector process remains one `(venue, symbol)` pair.  Cross
+  venue observations are separate recordings and are merged only at replay.

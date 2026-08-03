@@ -149,11 +149,39 @@ impl ChatRequest {
 }
 
 /// Token accounting parsed from the response (best-effort; 0 when the provider
-/// omits it).
+/// omits it). Field presence/range failures fail closed on purpose (L4):
+/// a `usage` object whose fields are present but out of u32 range is a parse
+/// error, not a silent truncation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+}
+
+impl core::ops::AddAssign for Usage {
+    fn add_assign(&mut self, rhs: Usage) {
+        self.input_tokens = self.input_tokens.saturating_add(rhs.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(rhs.output_tokens);
+    }
+}
+
+impl core::iter::Sum for Usage {
+    fn sum<I: Iterator<Item = Usage>>(iter: I) -> Self {
+        let mut total = Usage::default();
+        for u in iter {
+            total += u;
+        }
+        total
+    }
+}
+
+/// Convenience wrapper kept for the live edge: run `parse_response` and
+/// thread the usage out alongside the completion (L3).
+pub fn completion_with_usage(
+    p: &dyn LlmProvider,
+    body: &[u8],
+) -> Result<(Completion, Usage), crate::error::LlmError> {
+    p.completion_and_usage(body)
 }
 
 /// A parsed completion — the text plus enough metadata to archive it (RES-6).
@@ -188,8 +216,18 @@ pub trait LlmProvider {
     /// Build the wire request. `api_key` may be empty for keyless providers.
     fn build_request(&self, api_key: &str, req: &ChatRequest) -> Result<HttpRequest, LlmError>;
 
-    /// Parse a raw response body into a [`Completion`].
+    /// Parse a raw response body into a [`Completion`] (usage included).
     fn parse_response(&self, body: &[u8]) -> Result<Completion, LlmError>;
+
+    /// Parse a response and return usage alongside the completion — the
+    /// explicit threaded form callers that track cost (never discard the
+    /// usage) should use. The default splits the parsed completion; a
+    /// provider overrides only if usage lives outside the completion shape.
+    fn completion_and_usage(&self, body: &[u8]) -> Result<(Completion, Usage), LlmError> {
+        let c = self.parse_response(body)?;
+        let usage = c.usage;
+        Ok((c, usage))
+    }
 
     /// The effective model for a request (its override or our default).
     fn model_for<'a>(&'a self, req: &'a ChatRequest) -> &'a str {
