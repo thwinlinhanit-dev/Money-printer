@@ -107,6 +107,11 @@ downstream), never block the producer.
 - 2026-07-10 (impl): event log gains an 8-byte magic + `format_ver` header and
   a per-frame CRC32 (`kind|len|crc|payload` framing) — realizes EVT-4's
   crash-safety and EVT-8's in-log symbol snapshots.
+- 2026-08-03 (audit follow-up): `SCHEMA_VER` 1→2 added `provenance` to
+  `EventEnvelope` (INT-1).  The reader keeps a backward-compatible decode for
+  schema-1 frames (`EnvelopeV1` layout, provenance synthesized empty) so
+  historical recordings stay readable; writes always stamp the current
+  version.  See spec 024 Decisions for the promotion policy.
 
 ## Open questions
 - None.

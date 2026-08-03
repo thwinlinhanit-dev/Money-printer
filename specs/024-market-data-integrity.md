@@ -39,6 +39,15 @@ authenticated trading, strategy changes, and long-running hosting policy.
 
 - 2026-07-29: Existing schema-v1 raw logs are deliberately classified as
   legacy/unattributable and quarantined.  They are never silently promoted.
+- 2026-08-03 (audit follow-up): schema-v1 logs became readable again via a
+  backward-compatible decode path (`mp_core::log::LogReader` decodes the
+  pre-provenance envelope layout and normalizes it to the current envelope
+  with synthetic provenance).  This does NOT change the INT-1 verdict:
+  synthetic provenance fails `missing_provenance`, so legacy recordings are
+  readable for research/replay but still never promoted to cold.  A
+  migration tool (`mp-storage` `mp-migrate` bin + `migrate::migrate_log`)
+  rewrites schema-1 logs to current-schema files in a separate output
+  directory, W-6 style (write-new + verify, originals untouched).
 - 2026-07-29: The collector process remains one `(venue, symbol)` pair.  Cross
   venue observations are separate recordings and are merged only at replay.
 - 2026-08-03: INT-4 is enforced at the compaction boundary via

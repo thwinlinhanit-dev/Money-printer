@@ -15,6 +15,8 @@ Cold storage layer: transforms raw event logs into Hive-partitioned Parquet tabl
 - `src/feature_store.rs` — feature store materialization
 - `src/prune.rs` — data pruning
 - `src/audit.rs` — audit logging
+- `src/migrate.rs` — legacy raw-log migration (schema-1 → current, W-6 write-new + verify)
+- `src/bin/mp-migrate.rs` — migration CLI
 
 ## Verification
 

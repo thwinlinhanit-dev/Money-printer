@@ -7,7 +7,9 @@
 //!   cargo run -p mp-storage --bin mp-audit -- --data-dir data  (all logs)
 
 use mp_core::Venue;
-use mp_storage::audit::{audit_raw_log, discover_raw_logs, scorecard, AuditConfig, DailyScorecard, RawLogAudit};
+use mp_storage::audit::{
+    audit_raw_log, discover_raw_logs, scorecard, AuditConfig, DailyScorecard, RawLogAudit,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 

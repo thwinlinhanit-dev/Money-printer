@@ -73,6 +73,9 @@ pub fn migrate_log(src: &Path, dst: &Path) -> Result<MigrateOutcome, MigrateErro
     // an earlier partial run first — dst is a generated artifact, never
     // recorded data (W-6 protects the source, not the output copy).
     {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let _ = std::fs::remove_file(dst);
         let (mut writer, _) = EventLogWriter::open(dst)?;
         if !symbols.is_empty() {
@@ -101,7 +104,10 @@ pub fn migrate_log(src: &Path, dst: &Path) -> Result<MigrateOutcome, MigrateErro
         });
     }
 
-    Ok(MigrateOutcome::Migrated { events, legacy_events })
+    Ok(MigrateOutcome::Migrated {
+        events,
+        legacy_events,
+    })
 }
 
 #[cfg(test)]
@@ -173,7 +179,8 @@ mod tests {
     fn tmp(tag: &str) -> std::path::PathBuf {
         static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("mpmigrate-{}-{tag}-{nonce}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mpmigrate-{}-{tag}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -188,14 +195,14 @@ mod tests {
         let outcome = migrate_log(&src, &dst).unwrap();
         assert_eq!(
             outcome,
-            MigrateOutcome::Migrated { events: 5, legacy_events: 5 }
+            MigrateOutcome::Migrated {
+                events: 5,
+                legacy_events: 5
+            }
         );
 
         // dst must be current schema and carry all 5 events.
-        let got: Vec<_> = LogReader::open(&dst)
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect();
+        let got: Vec<_> = LogReader::open(&dst).unwrap().map(|r| r.unwrap()).collect();
         assert_eq!(got.len(), 5);
         for e in &got {
             assert_eq!(e.schema_ver, mp_core::SCHEMA_VER);
@@ -213,7 +220,10 @@ mod tests {
 
         let outcome = migrate_log(&src, &dst).unwrap();
         assert_eq!(outcome, MigrateOutcome::AlreadyCurrent);
-        assert!(!dst.exists(), "no file should be written for current schema");
+        assert!(
+            !dst.exists(),
+            "no file should be written for current schema"
+        );
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&dst);
     }

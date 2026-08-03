@@ -35,7 +35,6 @@ pub enum StorageError {
 }
 
 pub use audit::{audit_raw_log, scorecard, AuditConfig, DailyScorecard, RawLogAudit};
-pub use migrate::{migrate_log, MigrateError, MigrateOutcome};
 pub use compactor::{compact_day, compact_day_verified, CompactStats};
 pub use dataset::Dataset;
 pub use feature_store::{
@@ -43,5 +42,6 @@ pub use feature_store::{
     StreamingFeatureStore,
 };
 pub use manifest::{derive_manifest, Gap, GapKind, QualityManifest, StreamStats};
+pub use migrate::{migrate_log, MigrateError, MigrateOutcome};
 pub use prune::{verify_prunable, PruneRefusal};
 pub use scd2::{Scd2AppendError, SymbolScd2, SymbolVersion};

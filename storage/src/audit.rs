@@ -84,7 +84,12 @@ pub fn discover_raw_logs(raw_dir: &Path) -> Vec<RawLog> {
             symbol: parts[2].to_string(),
         });
     }
-    logs.sort_by(|a, b| a.date.cmp(&b.date).then(a.venue_str.cmp(&b.venue_str)).then(a.symbol.cmp(&b.symbol)));
+    logs.sort_by(|a, b| {
+        a.date
+            .cmp(&b.date)
+            .then(a.venue_str.cmp(&b.venue_str))
+            .then(a.symbol.cmp(&b.symbol))
+    });
     logs
 }
 

@@ -376,8 +376,8 @@ impl LogReader {
                             // legacy recordings are readable for research but
                             // never promoted to cold as live-attributable.
                             1 => {
-                                let legacy: EnvelopeV1 =
-                                    bincode::deserialize(&payload[2..]).map_err(|e| {
+                                let legacy: EnvelopeV1 = bincode::deserialize(&payload[2..])
+                                    .map_err(|e| {
                                         LogError::Codec(CodecError::Decode(e.to_string()))
                                     })?;
                                 EventEnvelope {
@@ -580,7 +580,9 @@ mod tests {
         assert_eq!(e.provenance, EventProvenance::synthetic());
         assert_eq!(e.provenance.snapshot_source, SnapshotSource::None);
         match &e.body {
-            MarketEvent::Trade { price, qty, side, .. } => {
+            MarketEvent::Trade {
+                price, qty, side, ..
+            } => {
                 assert_eq!(*price, 61_000.5);
                 assert_eq!(*qty, 0.25);
                 assert_eq!(*side, Side::Buy);

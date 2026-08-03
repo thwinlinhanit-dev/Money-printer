@@ -69,7 +69,10 @@ fn main() {
             "WOULD-MIGRATE".to_string()
         } else {
             match migrate_log(&log.path, &dst) {
-                Ok(MigrateOutcome::Migrated { events, legacy_events }) => {
+                Ok(MigrateOutcome::Migrated {
+                    events,
+                    legacy_events,
+                }) => {
                     migrated += 1;
                     format!("MIGRATED events={events} legacy={legacy_events}")
                 }
