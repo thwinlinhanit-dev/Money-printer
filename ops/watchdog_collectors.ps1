@@ -5,8 +5,13 @@
 # Run in foreground:
 #   .\ops\watchdog_collectors.ps1
 #
-# Register as a Scheduled Task (run elevated for AtStartup):
+# Register as a Scheduled Task (survives reboot; starts at user logon):
 #   .\ops\watchdog_collectors.ps1 -RegisterTask
+#   (registers for the logged-on user, no elevation needed. The task is
+#    interactive: it starts when that user logs on. -AsSystem needs an
+#    elevated prompt and is NOT recommended here - the watchdog runs
+#    `cargo build` and rustup/cargo are installed per-user under
+#    $env:USERPROFILE, so a SYSTEM-context run has no cargo on PATH.)
 #   .\ops\watchdog_collectors.ps1 -RegisterTask -AsSystem
 
 param(
@@ -28,22 +33,43 @@ if ($RegisterTask) {
     $Action = New-ScheduledTaskAction `
         -Execute  "powershell.exe" `
         -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSScriptRoot\watchdog_collectors.ps1`""
+    # AtLogOn scoped to the registering user; for an interactive task the
+    # AtStartup trigger only fires once that user is logged on. Setting
+    # MultipleInstances=IgnoreNew collapses the boot+logon trigger pair into
+    # a single watchdog instance (no duplicate supervisors).
     $Triggers = @(
         (New-ScheduledTaskTrigger -AtStartup),
-        (New-ScheduledTaskTrigger -AtLogOn)
+        (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)
     )
     $Settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit (New-TimeSpan -Days 3650) `
-        -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1)
+        -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) `
+        -MultipleInstances IgnoreNew
     if ($AsSystem) {
         Register-ScheduledTask -TaskName $TaskName -Action $Action `
             -Trigger $Triggers -Settings $Settings -RunLevel Highest -User "SYSTEM" -Force
         Write-Host "[OK] Registered as SYSTEM." -ForegroundColor Green
     } else {
-        Register-ScheduledTask -TaskName $TaskName -Action $Action `
-            -Trigger $Triggers -Settings $Settings -User $env:USERNAME -Force
-        Write-Host "[OK] Registered for $($env:USERNAME)." -ForegroundColor Green
+        # No -RunLevel Highest: the collectors need no elevation (they only
+        # write under data\raw), and registering with RunLevel Highest would
+        # require an elevated prompt. Standard users cannot create tasks with
+        # an AtStartup trigger (access denied - verified 2026-08-04), so we
+        # try Startup+Logon first and fall back to Logon-only when denied.
+        # Either way the task is interactive: it starts when $env:USERNAME
+        # logs on, which is the right model for a per-user cargo/rustup
+        # install.
+        try {
+            Register-ScheduledTask -TaskName $TaskName -Action $Action `
+                -Trigger $Triggers -Settings $Settings -User $env:USERNAME -Force -ErrorAction Stop
+            Write-Host "[OK] Registered for $($env:USERNAME) (startup + logon)." -ForegroundColor Green
+        } catch {
+            Write-Host "AtStartup trigger denied (not elevated) - falling back to logon-only." -ForegroundColor Yellow
+            $LogonOnly = @(New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)
+            Register-ScheduledTask -TaskName $TaskName -Action $Action `
+                -Trigger $LogonOnly -Settings $Settings -User $env:USERNAME -Force -ErrorAction Stop
+            Write-Host "[OK] Registered for $($env:USERNAME) (logon-only)." -ForegroundColor Green
+        }
     }
     Exit 0
 }
