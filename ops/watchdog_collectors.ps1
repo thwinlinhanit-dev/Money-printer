@@ -100,9 +100,11 @@ function Spawn-Collector {
 
 $lastSpawn  = @{}
 $spawnCount = @{}
+$spawnedPids = @{}
 foreach ($s in $Symbols) {
     $lastSpawn[$s]  = [datetime]::MinValue
     $spawnCount[$s] = 0
+    $spawnedPids[$s] = $null
 }
 
 Write-Host "Running. Ctrl+C to stop." -ForegroundColor Gray
@@ -114,18 +116,18 @@ while ($true) {
         $dataLog   = Join-Path $rawDir "${todayStr}_binance_${sym}.log"
         $tSinceSpawn = ((Get-Date) - $lastSpawn[$sym]).TotalSeconds
 
-        $procs = Get-CimInstance Win32_Process -Filter "Name='mp-collector.exe'" `
-                     -ErrorAction SilentlyContinue |
-                 Where-Object { $_.CommandLine -like "*$sym*" }
-        $alive = ($procs -and $procs.Count -gt 0)
-
         $needRestart   = $false
         $restartReason = ""
 
-        if (-not $alive) {
-            $needRestart   = $true
-            $restartReason = "process not running"
-        } elseif ($tSinceSpawn -gt $GraceSeconds) {
+        # Liveness = heartbeat/data-log freshness. We deliberately do NOT use
+        # Get-CimInstance Win32_Process here: enumerating collectors that way
+        # (in particular materializing the CommandLine property) was observed
+        # to TERMINATE the very collectors it listed on Windows (exit code
+        # 0xFFFFFFFF, exactly one check-interval after spawn; see
+        # docs/AUDIT-2026-08-03.md). The collector writes a heartbeat every
+        # 15s, so staleness detection is a strictly stronger liveness signal
+        # anyway (it also catches hung processes, which a process query can't).
+        if ($tSinceSpawn -gt $GraceSeconds) {
             # Heartbeat check (collector writes every 15s)
             if (Test-Path $hbFile) {
                 $hbAge = ((Get-Date) - (Get-Item $hbFile).LastWriteTime).TotalSeconds
@@ -148,10 +150,15 @@ while ($true) {
         }
 
         if ($needRestart) {
-            # Kill zombies + clean lock regardless of cooldown
-            foreach ($p in $procs) {
-                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+            # Kill the tracked instance by PID. Get-Process -Id is a plain
+            # native read (proven safe); the CIM query previously used to
+            # enumerate processes here is not. A stale heartbeat means the
+            # collector is dead or hung, so killing the tracked PID is correct.
+            $prevPid = $spawnedPids[$sym]
+            if ($prevPid) {
+                Stop-Process -Id $prevPid -Force -ErrorAction SilentlyContinue
             }
+            $spawnedPids[$sym] = $null
             Start-Sleep -Milliseconds 400
             Remove-Item (Join-Path $rawDir ".lock_binance_$sym") -Force -ErrorAction SilentlyContinue
 
@@ -164,6 +171,7 @@ while ($true) {
             $spawnCount[$sym]++
             WLog "$sym spawning #$($spawnCount[$sym]): $restartReason" "WARN"
             $spawnedPid = Spawn-Collector -Sym $sym
+            $spawnedPids[$sym] = $spawnedPid
             $lastSpawn[$sym] = Get-Date
             WLog "$sym spawned PID=$spawnedPid"
         }

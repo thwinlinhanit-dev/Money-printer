@@ -103,6 +103,7 @@ On Windows/development: run via `mp-collector --config path\to\config.toml` dire
 - 2026-07-19: Config per venue in `/etc/money-printer/collectors/{venue}.toml`. Systemd uses template instances: `mp-collector@hyperliquid`, `mp-collector@binance`, etc.
 - 2026-07-19: Heartbeat: write timestamp to `/run/mp-collector-{venue}.heartbeat` every 30s.
 - 2026-07-19: Backoff jitter uses `rand::thread_rng()` — no seed needed (jitter is for thundering herd avoidance, not deterministic replay).
+- 2026-08-03: Watchdog liveness = heartbeat/data-log staleness, NOT process enumeration. On Windows, `Get-CimInstance Win32_Process` (in particular materializing the `CommandLine` property) was observed to TERMINATE the very collectors it enumerated — every watchdog-spawned collector exited `0xFFFFFFFF` exactly one check-interval after spawn (20s interval → dead at 20–21s; 5s interval → dead at 6s), with no crash record, while the same binary spawned directly ran indefinitely. `ops/watchdog_collectors.ps1` now judges liveness purely from the heartbeat file (collector writes every 15s; restart if stale > 75s) plus data-log stall (> 150s), and kills only the tracked PID via `Get-Process -Id` (a plain native read, proven safe). Heartbeat staleness is a strictly stronger liveness signal than a process query — it also catches hung processes. See `docs/AUDIT-2026-08-03.md`.
 
 ## Open questions
 - None.
