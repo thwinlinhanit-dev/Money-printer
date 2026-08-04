@@ -27,3 +27,12 @@ evidence links).
 **Current status:** Phase 0 in progress — workspace + collectors + sim/research
 stack built; live Binance Futures recorder running (BTCUSDT). Validation gate
 (7 clean multi-symbol days, manifests ≥ 0.995) not yet met. Capital at risk: $0.
+
+**Phase-0 audit baseline (2026-08-04):** `mp-audit --data-dir data-migrated
+--venue binance --symbol BTCUSDT --date 20260729` → DIRTY (`sequence_gap` +
+`coverage_gap` findings), promotion gate reports **0 consecutive clean days
+(required 7)** — gate not yet met, honestly. The recv-monotonic write-boundary
+fix (spec 024, INT-6/7) is in place to stop `recv_time_reversal` from dirtying
+clean recordings; remaining gaps are real venue-side `sequence_gap`s to
+diagnose per `ops/runbooks/stream-gap.md`. Full multi-day audit pending
+(unabridged scan over the multi-GB corpus is slow; run per-day or on a slice).
