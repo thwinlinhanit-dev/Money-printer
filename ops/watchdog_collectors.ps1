@@ -23,6 +23,16 @@ param(
     [int]$GraceSeconds         = 45
 )
 
+# audit 08-04: symbols are joined into the spawned command line below, so reject
+# anything that could inject shell metacharacters (UseShellExecute builds a shell
+# command string). Alphanumeric-only, 2..20 chars.
+foreach ($sym in $Symbols) {
+    if ($sym -notmatch '^[A-Z0-9]{2,20}$') {
+        Write-Host "[!!] Invalid symbol '$sym' (must match ^[A-Z0-9]{2,20}\$); aborting." -ForegroundColor Red
+        Exit 1
+    }
+}
+
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $exe  = Join-Path $root "target\release\mp-collector.exe"
 
@@ -109,14 +119,15 @@ function Spawn-Collector {
     # KEY FIX: UseShellExecute=true fully detaches from this process's stdio.
     # No pipe is created, so the collector never blocks on stdout.
     # Tracing output goes to nul; the binary writes its own data + heartbeat files.
+    # $Sym is validated above (^[A-Z0-9]{2,20}$) and double-quoted here.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName         = $exe
-    $psi.Arguments        = "--symbol $Sym --no-whale"
+    $psi.Arguments        = "--symbol `"$Sym`" --no-whale"
     $psi.WorkingDirectory = [string]$root
     $psi.UseShellExecute  = $true
     $psi.WindowStyle      = [System.Diagnostics.ProcessWindowStyle]::Hidden
     # Pipe tracing to nul via the shell (UseShellExecute allows this)
-    $psi.Arguments = "--symbol $Sym --no-whale"
+    $psi.Arguments = "--symbol `"$Sym`" --no-whale"
 
     $p = New-Object System.Diagnostics.Process
     $p.StartInfo = $psi

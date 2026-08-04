@@ -27,6 +27,7 @@ Production operations: alerting, bot journal, ops daemon, deadman detection, sys
 ## Local Contracts
 
 - Collector watchdog uses `Spawn-Collector` with `UseShellExecute=true` for full process detachment
+- Collector watchdog validates `$Symbols` against `^[A-Z0-9]{2,20}$` and double-quotes them before spawn (anti-injection, audit 08-04)
 - Deadman detection checks heartbeat files with configurable grace period
 - Runbooks must be followed for incident response; update runbook if procedure changes
 

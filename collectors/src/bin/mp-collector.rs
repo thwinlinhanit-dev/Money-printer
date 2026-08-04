@@ -343,6 +343,10 @@ mod inner {
         /// COL-21 REST rate budget for snapshot reseeds (futures weights/min).
         #[cfg(feature = "live-http")]
         rest_budget: RateBudget,
+        /// COL-1/08-04: next `recv_ts_ns` before which a failed depth reseed is
+        /// NOT retried (a persistent failure must not busy-spin the loop).
+        #[cfg(feature = "live-http")]
+        next_reseed_at_ns: i64,
     }
 
     impl Stream {
@@ -384,6 +388,8 @@ mod inner {
                 staleness: Staleness::new(STALE_AFTER_NS),
                 #[cfg(feature = "live-http")]
                 rest_budget: RateBudget::binance_futures(now_ns()),
+                #[cfg(feature = "live-http")]
+                next_reseed_at_ns: 0,
             })
         }
 
@@ -524,29 +530,38 @@ mod inner {
             // this same loop iteration (no sleep inline) so trades keep flowing.
             #[cfg(feature = "live-http")]
             if let Some(sym) = self.binance_symbol.clone() {
-                let norm = self.collector.normalizer_mut();
-                if let Some(bn) = norm
-                    .as_any_mut()
-                    .and_then(|a| a.downcast_mut::<BinanceNormalizer>())
-                {
-                    if bn.needs_reseed() {
-                        let before = out.len();
-                        match mp_collectors::binance::reseed_if_needed(
-                            bn,
-                            &sym,
-                            0,
-                            out,
-                            Some(&mut self.rest_budget),
-                        ) {
-                            Ok(true) => {
-                                self.stamp(&mut out[before..], SnapshotSource::Rest);
+                // audit 08-04 (COL-1 spirit): once a reseed fails, don't retry it
+                // every ~50ms loop iteration — wait out the backoff window first.
+                if now_recv_ns >= self.next_reseed_at_ns {
+                    let norm = self.collector.normalizer_mut();
+                    if let Some(bn) = norm
+                        .as_any_mut()
+                        .and_then(|a| a.downcast_mut::<BinanceNormalizer>())
+                    {
+                        if bn.needs_reseed() {
+                            let before = out.len();
+                            match mp_collectors::binance::reseed_if_needed(
+                                bn,
+                                &sym,
+                                0,
+                                out,
+                                Some(&mut self.rest_budget),
+                            ) {
+                                Ok(true) => {
+                                    self.stamp(&mut out[before..], SnapshotSource::Rest);
+                                }
+                                Ok(false) => {}
+                                Err(e) => {
+                                    // Bounded retry: schedule the next attempt a
+                                    // couple seconds out instead of busy-spinning.
+                                    self.next_reseed_at_ns = now_recv_ns + 2_000_000_000;
+                                    tracing::warn!(
+                                        stream = %self.name,
+                                        error = %e,
+                                        "depth re-seed failed; book stays desynced until next attempt"
+                                    );
+                                }
                             }
-                            Ok(false) => {}
-                            Err(e) => tracing::warn!(
-                                stream = %self.name,
-                                error = %e,
-                                "depth re-seed failed; book stays desynced until next attempt"
-                            ),
                         }
                     }
                 }

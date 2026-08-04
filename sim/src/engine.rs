@@ -8,8 +8,8 @@ use crate::error::SimError;
 use crate::fills::{FillModel, FillParams, Pending, PendingBook, PendingKind, ProducedFill};
 use crate::metrics::Metrics;
 use mp_core::{
-    BookMirror, Clock, EventEnvelope, Fill, MarketEvent, OrderIntent, OrderKind, Side, SimClock,
-    SizeUnit, SplitMix64, SymbolId, Venue,
+    BookMirror, Clock, EventEnvelope, Fill, IntentId, MarketEvent, OrderIntent, OrderKind, Side,
+    SimClock, SizeUnit, SplitMix64, SymbolId, Venue,
 };
 use mp_features::FeatureEngine;
 use mp_risk::{
@@ -361,19 +361,30 @@ impl Backtester {
             if !subscribed(feat_name) {
                 continue;
             }
-            let (intents, logs) = self.dispatch_strategy(now, |s, ctx| s.on_feature(&u, ctx));
-            self.record_dispatch(now, &intents, &logs);
+            let (mut intents, logs) = self.dispatch_strategy(now, |s, ctx| s.on_feature(&u, ctx));
+            self.record_dispatch(now, &mut intents, &logs);
         }
     }
 
     /// Validate + record a dispatch result, threading strategy rationale lines
     /// into the decision log ahead of the intents they explain.
-    fn record_dispatch(&mut self, now: i64, intents: &[OrderIntent], logs: &[String]) {
+    fn record_dispatch(&mut self, now: i64, intents: &mut [OrderIntent], logs: &[String]) {
         for msg in logs {
             self.seq += 1;
             self.log.record_log(self.seq, msg);
         }
-        for intent in intents {
+        for intent in intents.iter_mut() {
+            // audit 08-04 / H2: the engine owns the intent-id space. Re-stamp
+            // every emitted intent with a globally-unique id so two strategies
+            // minting the same local id (both start at 1,2,..) can never
+            // collide or misattribute a fill. Deterministic: ids come from the
+            // same injected dispatch order every run.
+            intent.intent_id = IntentId(self.next_intent);
+            self.next_intent += 1;
+            // Attribute the (now-unique) id back to its strategy up front, so a
+            // fill can always be traced even if the order is later rejected.
+            self.intent_strategy
+                .insert(intent.intent_id.0, intent.strategy.0.clone());
             self.seq += 1;
             self.log.record_intent(self.seq, intent);
             self.enqueue(intent, now);
@@ -393,8 +404,8 @@ impl Backtester {
         }
         self.pending_timers = still;
         for timer_id in fired {
-            let (intents, logs) = self.dispatch_strategy(now, |s, ctx| s.on_timer(timer_id, ctx));
-            self.record_dispatch(now, &intents, &logs);
+            let (mut intents, logs) = self.dispatch_strategy(now, |s, ctx| s.on_timer(timer_id, ctx));
+            self.record_dispatch(now, &mut intents, &logs);
         }
     }
 
@@ -563,8 +574,6 @@ impl Backtester {
             ready_ns: now + self.cfg.latency_ns,
             intent_id: intent.intent_id,
         });
-        self.intent_strategy
-            .insert(intent.intent_id.0, intent.strategy.0.clone());
     }
 
     fn apply_produced_fill(&mut self, p: ProducedFill, now: i64) {
@@ -590,7 +599,6 @@ impl Backtester {
         }
 
         self.seq += 1;
-        self.next_intent = self.next_intent.max(p.intent_id.0);
         let strategy = self
             .intent_strategy
             .get(&p.intent_id.0)
@@ -609,7 +617,84 @@ impl Backtester {
         self.log
             .record_fill_tagged(self.seq, &fill, p.optimism, strategy, p.venue);
 
-        let (follow, logs) = self.dispatch_strategy(now, |s, ctx| s.on_fill(&fill, ctx));
-        self.record_dispatch(now, &follow, &logs);
+        let (mut follow, logs) = self.dispatch_strategy(now, |s, ctx| s.on_fill(&fill, ctx));
+        self.record_dispatch(now, &mut follow, &logs);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mp_core::StrategyId;
+    use mp_strategies::strategy::RegimeMask;
+    use mp_strategies::Universe;
+
+    /// A strategy that never emits anything — only needed to construct a Backtester.
+    struct Noop;
+    impl Strategy for Noop {
+        fn id(&self) -> StrategyId {
+            StrategyId::new("noop")
+        }
+        fn universe(&self) -> Universe {
+            Universe::default()
+        }
+        fn subscriptions(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn warmup_ns(&self) -> i64 {
+            0
+        }
+        fn declared_regime(&self) -> RegimeMask {
+            RegimeMask::any()
+        }
+        fn on_feature(
+            &mut self,
+            _: &mp_features::FeatureUpdate,
+            _: &mut dyn Ctx,
+        ) -> Vec<OrderIntent> {
+            Vec::new()
+        }
+        fn with_params(&self, _: &std::collections::BTreeMap<String, f64>) -> Box<dyn Strategy> {
+            Box::new(Noop)
+        }
+    }
+
+    // audit 08-04 / H2: the engine owns the intent-id space. Two strategies that
+    // both mint local id 7 (strategies all start their counters at 1,2,..) must
+    // receive distinct global ids, and each id must trace back to the strategy
+    // that emitted it — so a multi-strategy run can never misattribute a fill.
+    #[test]
+    fn audit_h2_engine_namespaces_intent_ids_across_strategies() {
+        let mut bt = Backtester::new(
+            FeatureEngine::new(1),
+            Box::new(Noop),
+            SimConfig::default(),
+            1,
+        );
+        let intent = |strategy: &str, side: Side| OrderIntent {
+            intent_id: IntentId(7), // same local id from both strategies
+            strategy: StrategyId::new(strategy),
+            venue: Venue::Bybit,
+            symbol: SymbolId(0),
+            side,
+            kind: OrderKind::Market,
+            qty: SizeUnit::Contracts(1.0),
+            tif: mp_core::TimeInForce::Ioc,
+            reduce_only: false,
+            tag: "namespaced".into(),
+        };
+        let mut intents = vec![intent("carry-v1", Side::Buy), intent("liq-fade", Side::Sell)];
+        bt.record_dispatch(0, &mut intents, &[]);
+
+        // Both local id-7 intents were re-stamped with unique global ids.
+        assert_ne!(intents[0].intent_id, intents[1].intent_id);
+        assert_eq!(intents[0].intent_id, IntentId(0));
+        assert_eq!(intents[1].intent_id, IntentId(1));
+        assert_eq!(bt.next_intent, 2);
+
+        // Attribution maps each global id to exactly its own strategy.
+        assert_eq!(bt.intent_strategy[&intents[0].intent_id.0], "carry-v1");
+        assert_eq!(bt.intent_strategy[&intents[1].intent_id.0], "liq-fade");
+    }
+}
+

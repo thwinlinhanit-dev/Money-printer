@@ -30,6 +30,7 @@ Real-time market data ingestion from cryptocurrency exchange WebSocket streams a
 - Binance book seeded from REST snapshot immediately after WS connect (before processing depth deltas)
 - Frame loss triggers book reset and `Status::BackpressureDrop` event emission
 - Backoff: 250ms base, 30s cap, full-jitter (COL-1)
+- Depth reseed retries are rate-budgeted AND time-bounded: a failed Binance reseed defers its next attempt ~2s (audit 08-04; no per-iteration busy-spin)
 
 ## Work Guidance
 
