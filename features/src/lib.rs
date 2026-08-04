@@ -16,6 +16,7 @@ pub mod config;
 pub mod engine;
 pub mod hit_journal;
 pub mod screener;
+pub mod signal_catalog;
 
 pub use bar::{Bar, BarBuilder};
 pub use config::{ConfigError, FeaturesConfig};

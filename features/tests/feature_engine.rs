@@ -151,6 +151,60 @@ fn fea_1_bar_delta_on_close() {
 }
 
 #[test]
+fn fea_1_footprint_delta_buckets_by_notional_and_rolls_on_bar() {
+    let mut e = FeatureEngine::new(SEC);
+    // whale = notional >= 100k (1000 BTC at $100 is exactly at the boundary).
+    e.register_tick(|| Box::new(FootprintDelta::new(SEC, "whale", 100_000.0, f64::MAX)))
+        .register_tick(|| Box::new(FootprintDelta::new(SEC, "small", 0.0, 100_000.0)));
+    // 100 * 1500 = 150k ≥ 100k → whale bucket, buy. Bar 0 opens, nothing yet.
+    assert!(e.on_event(&trade(0, 100.0, 1500.0, Side::Buy)).is_empty());
+    // 100 * 500 = 50k → small bucket, sell (in same bar).
+    assert!(e
+        .on_event(&trade(SEC / 2, 100.0, 500.0, Side::Sell))
+        .is_empty());
+    // Trade in bar 1 closes bar 0: whale delta = +1500 (buy), small = -500.
+    let u = e.on_event(&trade(SEC + 1, 101.0, 1.0, Side::Buy));
+    assert_eq!(value(&e, &u, "footprint.delta.1s.whale"), Some(1500.0));
+    assert_eq!(value(&e, &u, "footprint.delta.1s.small"), Some(-500.0));
+    // The aggregate equals delta.bar.1s semantics: 1500 - 500 = +1000.
+    let mut g = FeatureEngine::new(SEC);
+    g.register_bar(|| Box::new(BarDelta::new("1s")));
+    let mut all = Vec::new();
+    for i in 0..3 {
+        let ts = if i == 2 { SEC + 1 } else { i * SEC / 2 };
+        let ev = if i == 0 {
+            trade(ts, 100.0, 1500.0, Side::Buy)
+        } else if i == 1 {
+            trade(ts, 100.0, 500.0, Side::Sell)
+        } else {
+            trade(ts, 101.0, 1.0, Side::Buy)
+        };
+        all.extend(g.on_event(&ev));
+    }
+    assert_eq!(value(&g, &all, "delta.bar.1s"), Some(1000.0));
+}
+
+#[test]
+fn fea_1_footprint_imbalance_ratio_and_silence_without_flow() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(FootprintImbalance::new(SEC, "whale", 100_000.0, f64::MAX)));
+    // Two buy prints then one sell print in bar 0 (all whale-sized).
+    assert!(e.on_event(&trade(0, 100.0, 2000.0, Side::Buy)).is_empty());
+    assert!(e
+        .on_event(&trade(SEC / 3, 100.0, 1000.0, Side::Buy))
+        .is_empty());
+    assert!(e
+        .on_event(&trade(SEC / 2, 100.0, 1000.0, Side::Sell))
+        .is_empty());
+    // Bar closes: buy 3000, sell 1000 → (3000-1000)/(3000+1000) = 0.5.
+    let u = e.on_event(&trade(SEC + 1, 100.0, 1.0, Side::Buy));
+    assert_eq!(value(&e, &u, "footprint.imb.1s.whale"), Some(0.5));
+    // A bar with no whale flow is silent (no 0/0 emission, FEA-5 style).
+    let u2 = e.on_event(&trade(2 * SEC + 1, 100.0, 1.0, Side::Buy)); // 1 * 100 < 100k
+    assert_eq!(u2.len(), 0, "bucket-empty bar must not emit imbalance");
+}
+
+#[test]
 fn fea_3_realized_vol_and_breakout_warmup_suppressed() {
     let mut e = engine_with_all();
     // Feed trades across 5 buckets so 4 bars close (closes happen on the trade

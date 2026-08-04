@@ -543,7 +543,7 @@ mod inner {
                             match mp_collectors::binance::reseed_if_needed(
                                 bn,
                                 &sym,
-                                0,
+                                now_recv_ns, // loop-edge clock, not a fresh read
                                 out,
                                 Some(&mut self.rest_budget),
                             ) {
@@ -673,6 +673,12 @@ mod inner {
         let mut current_date = String::new();
         let mut log_writer: Option<EventLogWriter> = None;
         let mut last_symbol_count: usize = 0;
+        // Running recv clock of the last appended frame. Appends are made
+        // recv-monotonic (spec 024 2026-08-04): REST-injected events (OI
+        // polls, depth reseeds) can otherwise regress the clock by their HTTP
+        // round-trip, which mp-audit flags as recv_time_reversal and which
+        // used to make every recording DIRTY. Reset per log file.
+        let mut last_written_recv_ns: i64 = 0;
         #[cfg(feature = "live-http")]
         let mut last_oi_poll = std::time::Instant::now();
         #[cfg(feature = "live-http")]
@@ -763,6 +769,7 @@ mod inner {
                     log_writer = Some(w);
                     current_date = date;
                     last_symbol_count = 0;
+                    last_written_recv_ns = 0;
                 }
 
                 if let Some(ref mut w) = log_writer {
@@ -771,6 +778,10 @@ mod inner {
                         w.write_symbols(symbols.metas())?;
                         last_symbol_count = symbols.len();
                     }
+                    // recv-monotonic append boundary (spec 024 2026-08-04):
+                    // sort + clamp this batch so the log never regresses.
+                    last_written_recv_ns =
+                        mp_collectors::monotonicize(&mut event_buffer, last_written_recv_ns);
                     for ev in &event_buffer {
                         w.append(ev)?;
                     }

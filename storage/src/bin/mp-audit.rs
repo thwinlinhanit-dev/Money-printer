@@ -8,7 +8,8 @@
 
 use mp_core::Venue;
 use mp_storage::audit::{
-    audit_raw_log, discover_raw_logs, scorecard, AuditConfig, DailyScorecard, RawLogAudit,
+    audit_raw_log, discover_raw_logs, is_blocking_finding, scorecard, AuditConfig, DailyScorecard,
+    RawLogAudit,
 };
 use mp_storage::promotion::check_promotion;
 use std::collections::BTreeMap;
@@ -93,8 +94,16 @@ fn main() {
                 path = log.path.display(),
             );
             for f in &audit.findings {
+                // Non-blocking findings (recv_time_reversal) are warnings:
+                // they record jitter with no data loss (spec 024 2026-08-04).
+                let tag = if is_blocking_finding(&f.code) {
+                    "find"
+                } else {
+                    "warn"
+                };
                 println!(
-                    "       └─ [{code}] {detail}",
+                    "       └─ [{tag}] [{code}] {detail}",
+                    tag = tag,
                     code = f.code,
                     detail = f.detail
                 );

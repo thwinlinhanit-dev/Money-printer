@@ -108,9 +108,24 @@ pub struct RawLogAudit {
 
 impl RawLogAudit {
     /// A clean audit is the only state compaction may accept (INT-4).
+    ///
+    /// Clean means *no blocking findings* (spec 024, decision 2026-08-04):
+    /// `recv_time_reversal` is a warning, not a blocker — it records pure
+    /// arrival-order jitter with zero frame loss (the collector reorders
+    /// REST-injected events relative to WS frames; the log holds every event).
     pub fn is_clean(&self) -> bool {
-        self.event_count > 0 && self.findings.is_empty()
+        self.event_count > 0 && self.findings.iter().all(|f| !is_blocking_finding(&f.code))
     }
+}
+
+/// Findings that make a recording ineligible for promotion. Every code that
+/// indicates real data loss or unattributable data blocks: malformed/unreadable
+/// frames, missing provenance, venue/symbol identity issues, venue-side gaps,
+/// backpressure drops, and recv-clock holes (coverage gaps). `recv_time_reversal`
+/// is the single non-blocking code: all frames are present, only their receive
+/// order jitters (spec 024, decision 2026-08-04).
+pub fn is_blocking_finding(code: &str) -> bool {
+    !matches!(code, "recv_time_reversal")
 }
 
 /// Audit a single `(venue, symbol)` raw log.  Any malformed or older schema is
@@ -527,6 +542,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let _ = syms;
         let _ = id;
+    }
+
+    #[test]
+    fn int_6_recv_time_reversal_is_a_warning_not_a_blocker() {
+        let mut audit = RawLogAudit {
+            event_count: 2,
+            first_recv_ts_ns: Some(1),
+            last_recv_ts_ns: Some(2),
+            coverage: 1.0,
+            streams: BTreeMap::new(),
+            gaps: vec![],
+            stale_periods: vec![],
+            findings: vec![finding(
+                "recv_time_reversal",
+                "arrival-order jitter, all frames present",
+            )],
+        };
+        assert!(audit.is_clean(), "reversal-only log must be promotable");
+
+        // Any data-loss finding still blocks, even alongside warnings.
+        audit
+            .findings
+            .push(finding("sequence_gap", "venue-side gap"));
+        assert!(!audit.is_clean(), "sequence_gap must block promotion");
+        audit.findings.clear();
+        audit.findings.push(finding("stale_stream", "stale status"));
+        assert!(!audit.is_clean(), "stale_stream remains a blocker");
+    }
+
+    #[test]
+    fn int_7_blocking_code_classification() {
+        assert!(!is_blocking_finding("recv_time_reversal"));
+        for code in [
+            "legacy_or_malformed",
+            "unreadable_log",
+            "empty_log",
+            "missing_stream",
+            "missing_provenance",
+            "venue_mismatch",
+            "symbol_mismatch",
+            "invalid_symbol_table",
+            "missing_snapshot_source",
+            "sequence_gap",
+            "backpressure_loss",
+            "coverage_gap",
+            "stale_stream",
+        ] {
+            assert!(is_blocking_finding(code), "{code} must block");
+        }
     }
 
     #[test]

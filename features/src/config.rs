@@ -75,6 +75,58 @@ impl Default for LiqClusterParams {
     }
 }
 
+/// One footprint size bucket (notional USD range; trades priced out of the
+/// range belong to no bucket). `max_usd` is exclusive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FootprintBucketDef {
+    /// Bucket id embedded in feature names (`footprint.delta.{tf}.{name}`).
+    pub name: String,
+    pub min_usd: f64,
+    pub max_usd: f64,
+}
+
+/// Params for the `footprint.*` feature family (orderflow delta / imbalance
+/// per size bucket, spec 004 §Order flow).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FootprintParams {
+    /// Bar timeframe footprint buckets roll on (ns).
+    #[serde(default = "default_bar_tf")]
+    pub bar_tf_ns: i64,
+    #[serde(default = "default_footprint_buckets")]
+    pub buckets: Vec<FootprintBucketDef>,
+}
+
+fn default_footprint_buckets() -> Vec<FootprintBucketDef> {
+    vec![
+        FootprintBucketDef {
+            name: "small".into(),
+            min_usd: 0.0,
+            max_usd: 25_000.0,
+        },
+        FootprintBucketDef {
+            name: "mid".into(),
+            min_usd: 25_000.0,
+            max_usd: 100_000.0,
+        },
+        FootprintBucketDef {
+            name: "whale".into(),
+            min_usd: 100_000.0,
+            max_usd: f64::MAX,
+        },
+    ]
+}
+
+impl Default for FootprintParams {
+    fn default() -> Self {
+        FootprintParams {
+            bar_tf_ns: default_bar_tf(),
+            buckets: default_footprint_buckets(),
+        }
+    }
+}
+
 /// The whole catalog config (FEA-7). One file, all params, no unknown keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +140,8 @@ pub struct FeaturesConfig {
     pub whale_print: WhalePrintParams,
     #[serde(default)]
     pub liq_cluster: LiqClusterParams,
+    #[serde(default)]
+    pub footprint: FootprintParams,
 }
 
 fn default_bar_tf() -> i64 {
@@ -101,6 +155,7 @@ impl Default for FeaturesConfig {
             cvd: CvdParams::default(),
             whale_print: WhalePrintParams::default(),
             liq_cluster: LiqClusterParams::default(),
+            footprint: FootprintParams::default(),
         }
     }
 }

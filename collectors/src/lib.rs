@@ -56,3 +56,84 @@ pub fn normalizer_for(venue: mp_core::Venue) -> Box<dyn Normalizer> {
         KrakenFutures => Box::new(KrakenNormalizer::new()),
     }
 }
+
+/// Enforce the raw log's recv-clock invariant at the write boundary (spec 024,
+/// decision 2026-08-04).
+///
+/// REST-injected events (open-interest polls, depth reseeds) can carry a
+/// `recv_ts_ns` that is out of order relative to the WebSocket frames that
+/// arrived while their HTTP call was in flight — e.g. an OI poll is stamped
+/// *after* its ~1.5 s fetch but appended *before* the WS frames read during
+/// it. `mp-audit` flags every regression as `recv_time_reversal`, which made
+/// every recording DIRTY and the promotion gate unreachable.
+///
+/// This sorts the batch into `(recv_ts_ns, stream_seq)` order (the EVT-5/STO-4
+/// convention) and clamps stragglers up to the running clock so appended
+/// frames never regress. WS frames are already monotonic (single FIFO reader
+/// stamps at socket read), so the clamp only ever touches REST-injected
+/// stragglers. Returns the new running `recv_ts_ns` for the next batch.
+pub fn monotonicize(events: &mut [mp_core::EventEnvelope], last_recv_ns: i64) -> i64 {
+    events.sort_by_key(|e| (e.recv_ts_ns, e.stream_seq));
+    let mut running = last_recv_ns;
+    for ev in events.iter_mut() {
+        if ev.recv_ts_ns < running {
+            ev.recv_ts_ns = running;
+        } else {
+            running = ev.recv_ts_ns;
+        }
+    }
+    running
+}
+
+#[cfg(test)]
+mod monotonicize_tests {
+    use super::monotonicize;
+    use mp_core::{EventEnvelope, MarketEvent, Side, SymbolId, Venue};
+
+    fn ev(recv_ts_ns: i64, stream_seq: u64) -> EventEnvelope {
+        EventEnvelope::new(
+            Venue::BinanceFutures,
+            SymbolId(0),
+            0,
+            recv_ts_ns,
+            stream_seq,
+            MarketEvent::Trade {
+                price: 1.0,
+                qty: 1.0,
+                side: Side::Buy,
+                trade_id: recv_ts_ns as u64,
+            },
+        )
+    }
+
+    #[test]
+    fn sorts_rest_injected_events_into_recv_order() {
+        // OI event stamped after its fetch (recv 102) arrives before two WS
+        // frames read during the fetch (recv 100, 99) — the real 08-04 bug.
+        let mut batch = vec![ev(102, 0), ev(100, 5), ev(99, 6)];
+        let last = monotonicize(&mut batch, 98);
+        let recvs: Vec<i64> = batch.iter().map(|e| e.recv_ts_ns).collect();
+        assert_eq!(recvs, vec![99, 100, 102]);
+        assert!(recvs.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(last, 102);
+    }
+
+    #[test]
+    fn clamps_stragglers_below_running_clock() {
+        // A straggler older than the previous batch's clock must be clamped
+        // up, never allowed to regress the log.
+        let mut batch = vec![ev(50, 9)];
+        let last = monotonicize(&mut batch, 100);
+        assert_eq!(batch[0].recv_ts_ns, 100);
+        assert_eq!(last, 100);
+    }
+
+    #[test]
+    fn leaves_already_monotonic_batch_untouched() {
+        let mut batch = vec![ev(1, 1), ev(2, 2), ev(3, 3)];
+        let last = monotonicize(&mut batch, 0);
+        let recvs: Vec<i64> = batch.iter().map(|e| e.recv_ts_ns).collect();
+        assert_eq!(recvs, vec![1, 2, 3]);
+        assert_eq!(last, 3);
+    }
+}

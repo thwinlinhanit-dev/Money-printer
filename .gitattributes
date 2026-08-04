@@ -1,0 +1,16 @@
+# Line-ending policy (see CLAUDE.md engineering conventions).
+# Normalize text to LF in the repo; prevent the CRLF churn on Windows.
+* text=auto
+
+*.rs   text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
+*.py   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Windows-native scripts stay CRLF on checkout (harmless, matches the host).
+*.ps1  text eol=crlf
+*.bat  text eol=crlf

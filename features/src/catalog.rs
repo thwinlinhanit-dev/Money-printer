@@ -8,6 +8,157 @@ use std::collections::VecDeque;
 
 // ---- order flow -------------------------------------------------------------
 
+/// Renders a footprint tf into an id-safe label (`60s`, `5m`).
+pub fn tf_label(tf_ns: i64) -> String {
+    let s = tf_ns.max(1) / 1_000_000_000;
+    if s % 60 == 0 && s >= 300 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Shared per-bar, per-size-bucket accumulator behind the `footprint.*`
+/// features (spec 004 §Order flow). Trades are bucketed by USD notional
+/// (price × qty); the closed bar's totals are released when a trade lands in a
+/// later time bucket — the same rollover rule as `BarBuilder`, so
+/// `footprint.delta.{tf}.{bucket}` agrees with `delta.bar.{tf}` when summed
+/// across buckets. Pure function of events: no wall clock (PD-3/FEA-2).
+#[derive(Debug, Clone)]
+pub struct FootprintAccumulator {
+    tf_ns: i64,
+    min_usd: f64,
+    max_usd: f64,
+    bar_start: Option<i64>,
+    buy_vol: f64,
+    sell_vol: f64,
+}
+
+impl FootprintAccumulator {
+    pub fn new(tf_ns: i64, min_usd: f64, max_usd: f64) -> Self {
+        Self {
+            tf_ns: tf_ns.max(1),
+            min_usd,
+            max_usd,
+            bar_start: None,
+            buy_vol: 0.0,
+            sell_vol: 0.0,
+        }
+    }
+
+    /// Returns `Some((signed_delta, buy, sell))` of the just-closed bar when a
+    /// trade rolls the bucket, else `None` (in-bucket accumulation). A trade
+    /// priced out of this bucket's range still rolls the bucket (the closed
+    /// bar is real), it just does not contribute to the new one.
+    pub fn on_trade(
+        &mut self,
+        ts_ns: i64,
+        price: f64,
+        qty: f64,
+        side: Side,
+    ) -> Option<(f64, f64, f64)> {
+        let notional = price * qty;
+        let in_bucket = notional >= self.min_usd && notional < self.max_usd;
+        let bucket = ts_ns.div_euclid(self.tf_ns) * self.tf_ns;
+        let mut closed = None;
+        if let Some(cur) = self.bar_start {
+            if cur != bucket {
+                closed = Some((self.buy_vol - self.sell_vol, self.buy_vol, self.sell_vol));
+                self.bar_start = None;
+                self.buy_vol = 0.0;
+                self.sell_vol = 0.0;
+            }
+        }
+        if !in_bucket {
+            return closed;
+        }
+        if self.bar_start.is_none() {
+            self.bar_start = Some(bucket);
+        }
+        match side {
+            Side::Buy => self.buy_vol += qty,
+            Side::Sell => self.sell_vol += qty,
+        }
+        closed
+    }
+}
+
+/// `footprint.delta.{tf}.{bucket}` — per-bar signed orderflow delta
+/// (buy qty − sell qty) restricted to one size bucket (notional USD). Emitted
+/// at bucket rollover, exactly like a bar-close feature (no intra-bar repaint).
+pub struct FootprintDelta {
+    tf_ns: i64,
+    bucket: String,
+    acc: FootprintAccumulator,
+}
+impl FootprintDelta {
+    pub fn new(tf_ns: i64, bucket: &str, min_usd: f64, max_usd: f64) -> Self {
+        Self {
+            tf_ns,
+            bucket: bucket.to_owned(),
+            acc: FootprintAccumulator::new(tf_ns, min_usd, max_usd),
+        }
+    }
+}
+impl TickFeature for FootprintDelta {
+    fn id(&self) -> String {
+        format!("footprint.delta.{}.{}", tf_label(self.tf_ns), self.bucket)
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if let MarketEvent::Trade {
+            price, qty, side, ..
+        } = ev.body
+        {
+            self.acc
+                .on_trade(ev.recv_ts_ns, price, qty, side)
+                .map(|(d, _, _)| d)
+        } else {
+            None
+        }
+    }
+}
+
+/// `footprint.imb.{tf}.{bucket}` — per-bar imbalance (buy − sell)/(buy + sell)
+/// of one size bucket. Ranges [−1, 1]; 1 = the bucket's entire bar flow was
+/// buys. Silent while the closed bar had no bucket flow (no 0/0 emission).
+pub struct FootprintImbalance {
+    tf_ns: i64,
+    bucket: String,
+    acc: FootprintAccumulator,
+}
+impl FootprintImbalance {
+    pub fn new(tf_ns: i64, bucket: &str, min_usd: f64, max_usd: f64) -> Self {
+        Self {
+            tf_ns,
+            bucket: bucket.to_owned(),
+            acc: FootprintAccumulator::new(tf_ns, min_usd, max_usd),
+        }
+    }
+}
+impl TickFeature for FootprintImbalance {
+    fn id(&self) -> String {
+        format!("footprint.imb.{}.{}", tf_label(self.tf_ns), self.bucket)
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if let MarketEvent::Trade {
+            price, qty, side, ..
+        } = ev.body
+        {
+            self.acc
+                .on_trade(ev.recv_ts_ns, price, qty, side)
+                .and_then(|(_, b, s)| {
+                    if b + s > 0.0 {
+                        Some((b - s) / (b + s))
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        }
+    }
+}
+
 /// `cvd.{venue}` — cumulative signed trade quantity (buy +qty, sell −qty).
 pub struct Cvd {
     venue: Venue,
