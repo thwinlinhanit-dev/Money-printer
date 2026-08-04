@@ -115,7 +115,10 @@ impl Ctx for SimCtx {
 /// The backtester (orchestration only).
 pub struct Backtester {
     fe: FeatureEngine,
-    strat: Box<dyn Strategy>,
+    /// Strategies in registration order (deterministic dispatch, PD-3).
+    strats: Vec<Box<dyn Strategy>>,
+    /// Per-strategy subscription sets, captured at construction (audit C1).
+    strat_subs: Vec<Vec<String>>,
     acct: Accountant,
     clock: SimClock,
     cfg: SimConfig,
@@ -131,7 +134,10 @@ pub struct Backtester {
     allowed: Vec<(Venue, SymbolId)>,
     intent_ts: Vec<i64>,
     day_start: Option<(i64, f64)>,
-    rng: SplitMix64,
+    /// Per-strategy deterministic RNG (index-aligned with `strats`). Index 0 is
+    /// seeded verbatim so a single-strategy run is byte-identical to the
+    /// pre-multi-strategy engine; the rest are a deterministic mix.
+    strat_rngs: Vec<SplitMix64>,
     seq: u64,
     next_intent: u128,
     pending_timers: Vec<(i64, TimerId)>,
@@ -150,10 +156,33 @@ pub struct Backtester {
 }
 
 impl Backtester {
+    /// Single-strategy backtest (backward-compatible: a one-element multi run).
     pub fn new(fe: FeatureEngine, strat: Box<dyn Strategy>, cfg: SimConfig, seed: u64) -> Self {
+        Self::from_strategies(fe, vec![strat], cfg, seed)
+    }
+
+    /// Multi-strategy backtest (audit 08-04): run several strategies against one
+    /// shared simulated account and market feed. Event handlers (feature/fill/
+    /// timer) are dispatched to every strategy in registration order with an
+    /// isolated, per-strategy Ctx (own RNG, timers, logs) so dispatch stays
+    /// deterministic (PD-3). Intent ids are engine-namespaced (record_dispatch)
+    /// so a fill is always attributed to the strategy that emitted it. NOTE:
+    /// `Ctx::position`/`equity` are the shared simulated account — strategies
+    /// in one run observe the same positions.
+    pub fn from_strategies(
+        fe: FeatureEngine,
+        strats: Vec<Box<dyn Strategy>>,
+        cfg: SimConfig,
+        seed: u64,
+    ) -> Self {
+        let strat_subs = strats.iter().map(|s| s.subscriptions()).collect();
+        let strat_rngs = (0..strats.len())
+            .map(|i| Backtester::strategy_seed(seed, i))
+            .collect();
         Self {
             fe,
-            strat,
+            strats,
+            strat_subs,
             acct: Accountant::new(cfg.start_cash),
             clock: SimClock::new(0),
             cfg,
@@ -169,7 +198,7 @@ impl Backtester {
             allowed: Vec::new(),
             intent_ts: Vec::new(),
             day_start: None,
-            rng: SplitMix64::new(seed),
+            strat_rngs,
             seq: 0,
             next_intent: 0,
             pending_timers: Vec::new(),
@@ -178,6 +207,17 @@ impl Backtester {
             funding_count: BTreeMap::new(),
             hold_start: BTreeMap::new(),
             intent_strategy: BTreeMap::new(),
+        }
+    }
+
+    /// Deterministic per-strategy seed. Index 0 gets the run seed verbatim, so a
+    /// single-strategy run consumes randomness exactly as the legacy engine did;
+    /// additional strategies derive a fixed, index-dependent mix.
+    fn strategy_seed(seed: u64, idx: usize) -> SplitMix64 {
+        if idx == 0 {
+            SplitMix64::new(seed)
+        } else {
+            SplitMix64::new(seed.wrapping_add((idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)))
         }
     }
 
@@ -340,29 +380,26 @@ impl Backtester {
         let now = ev.recv_ts_ns;
         self.fire_timers(now);
 
-        let subs = self.strat.subscriptions();
-        let subscribed = |name: &str| {
-            subs.iter()
-                .any(|s| s == "*" || name.starts_with(s.as_str()))
-        };
-
         let ups = self.fe.on_event(ev);
         for u in ups {
             self.seq += 1;
             self.log.record_feature(self.seq, &u);
-            let feat_name = self.fe.resolve_name(u.feature);
+            let feat_name = self.fe.resolve_name(u.feature).to_owned();
             if feat_name.starts_with("vol.rv") {
                 self.latest_vol.insert(u.symbol, u.value);
             }
-            // Honor the strategy's subscriptions (audit C1: a funding-only
-            // strategy acting on a CVD update as if it were funding is a
-            // wrong-signal bug; the sim dispatches every feature update unless
-            // filtered here, and the strategy can't resolve feature ids).
-            if !subscribed(feat_name) {
-                continue;
+            // audit C1: dispatch each feature update only to the strategies whose
+            // subscription set matches it (each strategy also self-checks its
+            // feature name). Iteration order is registration order — deterministic
+            // under an injected clock (PD-3).
+            for i in 0..self.strats.len() {
+                if !self.subscribed(i, &feat_name) {
+                    continue;
+                }
+                let (mut intents, logs) =
+                    self.dispatch_one(now, i, |s, ctx| s.on_feature(&u, ctx));
+                self.record_dispatch(now, &mut intents, &logs);
             }
-            let (mut intents, logs) = self.dispatch_strategy(now, |s, ctx| s.on_feature(&u, ctx));
-            self.record_dispatch(now, &mut intents, &logs);
         }
     }
 
@@ -404,33 +441,65 @@ impl Backtester {
         }
         self.pending_timers = still;
         for timer_id in fired {
-            let (mut intents, logs) = self.dispatch_strategy(now, |s, ctx| s.on_timer(timer_id, ctx));
+            // Dispatch the fired timer to every strategy; each only reacts to
+            // its own opaque TimerIds, so there is no cross-strategy coupling.
+            let (mut intents, logs) =
+                self.dispatch_all(now, |s, ctx| s.on_timer(timer_id, ctx));
             self.record_dispatch(now, &mut intents, &logs);
         }
     }
 
-    /// Single strategy dispatch path for on_feature / on_fill / on_timer.
-    /// Returns (intents, strategy log lines). Log lines are routed through the
-    /// decision log so a strategy's rationale is replayable (audit H3).
-    fn dispatch_strategy(
+    /// Deterministic, per-strategy dispatch of one event handler. Builds an
+    /// isolated `Ctx` (own RNG, timers, log lines), runs `f` on strategy `idx`,
+    /// and folds that strategy's RNG/timers/logs back into the engine.
+    fn dispatch_one(
         &mut self,
         now: i64,
-        f: impl FnOnce(&mut dyn Strategy, &mut dyn Ctx) -> Vec<OrderIntent>,
+        idx: usize,
+        f: impl Fn(&mut dyn Strategy, &mut dyn Ctx) -> Vec<OrderIntent>,
     ) -> (Vec<OrderIntent>, Vec<String>) {
         let mut ctx = SimCtx {
             now,
             equity: self.acct.equity(),
             positions: self.acct.positions(),
-            rng: SplitMix64::from_state(self.rng.state()),
+            rng: self.strat_rngs[idx].clone(),
             queued_timers: Vec::new(),
             next_timer: self.next_timer_id,
             logs: Vec::new(),
         };
-        let intents = f(self.strat.as_mut(), &mut ctx);
-        self.rng = SplitMix64::from_state(ctx.rng.state());
+        let intents = f(self.strats[idx].as_mut(), &mut ctx);
+        self.strat_rngs[idx] = SplitMix64::from_state(ctx.rng.state());
         self.next_timer_id = ctx.next_timer;
         self.pending_timers.extend(ctx.queued_timers);
         (intents, ctx.logs)
+    }
+
+    /// Dispatch an event handler to every strategy, in registration order,
+    /// folding their intents + log lines deterministically (multi-strategy
+    /// support, audit 08-04). Strategies that don't care return no intents;
+    /// emitted intents are namespaced by `record_dispatch`, so each fill stays
+    /// attributed to the strategy that produced it.
+    fn dispatch_all(
+        &mut self,
+        now: i64,
+        f: impl Fn(&mut dyn Strategy, &mut dyn Ctx) -> Vec<OrderIntent>,
+    ) -> (Vec<OrderIntent>, Vec<String>) {
+        let mut all = Vec::new();
+        let mut logs = Vec::new();
+        for i in 0..self.strats.len() {
+            let (ints, ls) = self.dispatch_one(now, i, &f);
+            all.extend(ints);
+            logs.extend(ls);
+        }
+        (all, logs)
+    }
+
+    /// Whether strategy `idx` subscribes to `name` (its subscription set includes
+    /// `"*"` or a prefix of `name`, audit C1).
+    fn subscribed(&self, idx: usize, name: &str) -> bool {
+        self.strat_subs[idx]
+            .iter()
+            .any(|s| s == "*" || name.starts_with(s.as_str()))
     }
 
     fn on_trade(&mut self, symbol: SymbolId, price: f64, qty: f64, side: Side, now: i64) {
@@ -617,7 +686,7 @@ impl Backtester {
         self.log
             .record_fill_tagged(self.seq, &fill, p.optimism, strategy, p.venue);
 
-        let (mut follow, logs) = self.dispatch_strategy(now, |s, ctx| s.on_fill(&fill, ctx));
+        let (mut follow, logs) = self.dispatch_all(now, |s, ctx| s.on_fill(&fill, ctx));
         self.record_dispatch(now, &mut follow, &logs);
     }
 }

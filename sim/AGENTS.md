@@ -24,6 +24,7 @@ Deterministic backtesting engine that replays event logs through strategy + risk
 - Must produce identical results on repeated runs with same inputs (determinism enforced)
 - Fills must respect venue-specific latency models from config
 - Decision log entries must match the format consumed by research/grading
+- Multi-strategy: `Backtester::from_strategies` runs several strategies against one shared simulated account; event handlers dispatch to every strategy in registration order with per-strategy RNG/timers/subscriptions, and intent ids are engine-namespaced so fills stay attributed (audit 08-04). `Ctx` position/equity are the shared account — strategies in one run observe the same positions.
 
 ## Verification
 

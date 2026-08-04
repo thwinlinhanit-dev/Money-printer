@@ -434,3 +434,103 @@ fn sim_3_fill_waits_for_configured_latency() {
     assert_eq!(bt.position(SYM), 1.0);
     assert_eq!(bt.avg_cost(SYM), 102.0, "fills at the post-latency print");
 }
+
+// ---- audit 08-04: multi-strategy dispatch --------------------------------
+
+/// OneShot with a caller-chosen StrategyId so several strategies can run in one
+/// backtester and be told apart in the decision log.
+struct OneShotNamed {
+    fired: bool,
+    id: &'static str,
+    side: Side,
+    qty: f64,
+}
+
+impl Strategy for OneShotNamed {
+    fn id(&self) -> StrategyId {
+        StrategyId::new(self.id)
+    }
+    fn universe(&self) -> Universe {
+        Universe::default()
+    }
+    fn subscriptions(&self) -> Vec<String> {
+        vec!["cvd.bybit".to_string()]
+    }
+    fn warmup_ns(&self) -> i64 {
+        0
+    }
+    fn declared_regime(&self) -> RegimeMask {
+        RegimeMask::any()
+    }
+    fn on_feature(&mut self, u: &FeatureUpdate, _ctx: &mut dyn Ctx) -> Vec<OrderIntent> {
+        if self.fired {
+            return Vec::new();
+        }
+        self.fired = true;
+        vec![OrderIntent {
+            intent_id: IntentId(1), // same local id in every strategy
+            strategy: self.id(),
+            venue: Venue::Bybit,
+            symbol: u.symbol,
+            side: self.side,
+            kind: OrderKind::Market,
+            qty: SizeUnit::Contracts(self.qty),
+            tif: TimeInForce::Ioc,
+            reduce_only: false,
+            tag: "multi".into(),
+        }]
+    }
+    fn with_params(&self, _p: &std::collections::BTreeMap<String, f64>) -> Box<dyn Strategy> {
+        Box::new(OneShotNamed {
+            fired: false,
+            id: self.id,
+            side: self.side,
+            qty: self.qty,
+        })
+    }
+}
+
+#[test]
+fn audit_h2_multi_strategy_both_dispatch_fill_and_are_attributed() {
+    let mut bt = Backtester::from_strategies(
+        engine(),
+        vec![
+            Box::new(OneShotNamed {
+                fired: false,
+                id: "buyer",
+                side: Side::Buy,
+                qty: 1.0,
+            }),
+            Box::new(OneShotNamed {
+                fired: false,
+                id: "seller",
+                side: Side::Sell,
+                qty: 1.0,
+            }),
+        ],
+        cfg(FillModel::L1TopOfBook),
+        1,
+    );
+    let events = vec![
+        book_snapshot(0, 1, vec![(99.0, 10.0)], vec![(100.0, 10.0)]),
+        trade(MS, 100.0, 1.0, Side::Buy),    // triggers both strategies
+        trade(2 * MS, 100.0, 1.0, Side::Buy), // fills both pending market orders
+    ];
+    bt.run(&events).unwrap();
+
+    // Both strategies emitted (intent ids engine-namespaced) and both filled.
+    let flog = bt.decision_log();
+    assert!(
+        flog.fill_count() >= 2,
+        "expected >=2 fills, got {}",
+        flog.fill_count()
+    );
+    // Each fill carries its own strategy attribution — no misattribution even
+    // though both minted local IntentId(1).
+    let text = flog.lines().join("\n");
+    assert!(text.contains("buyer"), "buyer not attributed in:\n{text}");
+    assert!(text.contains("seller"), "seller not attributed in:\n{text}");
+    // On the shared simulated account the buyer(+1) + seller(-1) legs cancel.
+    assert_eq!(bt.position(SYM), 0.0);
+}
+
