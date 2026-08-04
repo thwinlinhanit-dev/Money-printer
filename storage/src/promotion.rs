@@ -97,7 +97,7 @@ pub fn check_promotion_n(scorecards: &[DailyScorecard], required: usize) -> Prom
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::{scorecard, RawLogAudit, AuditFinding};
+    use crate::audit::{scorecard, AuditFinding, RawLogAudit};
     use mp_core::Venue;
     use std::collections::BTreeMap;
 
@@ -116,7 +116,10 @@ mod tests {
 
     fn dirty_audit() -> RawLogAudit {
         RawLogAudit {
-            findings: vec![AuditFinding { code: "test".into(), detail: "fail".into() }],
+            findings: vec![AuditFinding {
+                code: "test".into(),
+                detail: "fail".into(),
+            }],
             ..clean_audit()
         }
     }
@@ -128,7 +131,9 @@ mod tests {
 
     #[test]
     fn promotion_requires_seven_consecutive_clean_days() {
-        let cards: Vec<_> = (1..=7).map(|d| card(&format!("2026070{d}"), true)).collect();
+        let cards: Vec<_> = (1..=7)
+            .map(|d| card(&format!("2026070{d}"), true))
+            .collect();
         let v = check_promotion(&cards);
         assert!(v.promoted);
         assert_eq!(v.consecutive_clean, 7);
@@ -138,7 +143,9 @@ mod tests {
 
     #[test]
     fn promotion_fails_with_six_clean_days() {
-        let cards: Vec<_> = (1..=6).map(|d| card(&format!("2026070{d}"), true)).collect();
+        let cards: Vec<_> = (1..=6)
+            .map(|d| card(&format!("2026070{d}"), true))
+            .collect();
         let v = check_promotion(&cards);
         assert!(!v.promoted);
         assert_eq!(v.consecutive_clean, 6);
@@ -146,7 +153,9 @@ mod tests {
 
     #[test]
     fn promotion_resets_on_dirty_day() {
-        let mut cards: Vec<_> = (1..=4).map(|d| card(&format!("2026070{d}"), true)).collect();
+        let mut cards: Vec<_> = (1..=4)
+            .map(|d| card(&format!("2026070{d}"), true))
+            .collect();
         cards.push(card("20260705", false)); // breaks streak
         cards.extend((6..=9).map(|d| card(&format!("2026070{d}"), true)));
         let v = check_promotion(&cards);

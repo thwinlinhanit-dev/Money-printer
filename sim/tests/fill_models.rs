@@ -513,7 +513,7 @@ fn audit_h2_multi_strategy_both_dispatch_fill_and_are_attributed() {
     );
     let events = vec![
         book_snapshot(0, 1, vec![(99.0, 10.0)], vec![(100.0, 10.0)]),
-        trade(MS, 100.0, 1.0, Side::Buy),    // triggers both strategies
+        trade(MS, 100.0, 1.0, Side::Buy), // triggers both strategies
         trade(2 * MS, 100.0, 1.0, Side::Buy), // fills both pending market orders
     ];
     bt.run(&events).unwrap();
@@ -533,4 +533,3 @@ fn audit_h2_multi_strategy_both_dispatch_fill_and_are_attributed() {
     // On the shared simulated account the buyer(+1) + seller(-1) legs cancel.
     assert_eq!(bt.position(SYM), 0.0);
 }
-

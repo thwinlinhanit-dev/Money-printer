@@ -33,7 +33,7 @@ should be updated).
 | 022 | [Screener Evaluation Cadence](022-screener-cadence.md) | intelligence | 📝 draft |
 | 023 | [String Interning in Features](023-string-interning.md) | intelligence | 📝 draft |
 | 024 | [Market-Data Integrity Gate](024-market-data-integrity.md) | data plane | ✅ implemented |
-| 025 | [Signal Catalog](025-signal-catalog.md) | intelligence | 🔨 implementing |
+| 025 | [Signal Catalog](025-signal-catalog.md) | intelligence | ✅ implemented |
 
 
 Status values: `draft` → `ready` (implementable) → `implementing` →

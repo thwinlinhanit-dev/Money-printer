@@ -271,12 +271,30 @@ impl Backtester {
                 required: self.cfg.min_coverage,
             });
         }
+        self.stream(events.iter().cloned());
+        self.check_funding_coverage()
+    }
+
+    /// Streaming event loop (paper mode, SIM-15/EXE-8). Feed events exactly as
+    /// they arrive from a live/recorded feed; identical input sequences
+    /// produce identical decision logs whether fed as one slice (replay) or in
+    /// many batches (paper tail) — that identity IS the G3 paper-vs-sim
+    /// comparison primitive. The run-end guards (SIM-4 funding, SIM-6
+    /// coverage) are the caller's `check_funding` responsibility for open
+    /// sessions; a closed replay should use `run_checked`.
+    pub fn stream(&mut self, events: impl IntoIterator<Item = EventEnvelope>) {
         for ev in events {
             self.run_start_ns.get_or_insert(ev.recv_ts_ns);
             self.clock.set(ev.recv_ts_ns);
-            self.on_event(ev);
+            self.on_event(&ev);
             self.metrics.sample_equity(self.acct.equity());
         }
+    }
+
+    /// SIM-4 run-end guard, callable by paper sessions on close: refuses to
+    /// certify a session whose held perp positions crossed a funding boundary
+    /// without a recorded Funding event.
+    pub fn check_funding(&self) -> Result<(), SimError> {
         self.check_funding_coverage()
     }
 
@@ -396,8 +414,7 @@ impl Backtester {
                 if !self.subscribed(i, &feat_name) {
                     continue;
                 }
-                let (mut intents, logs) =
-                    self.dispatch_one(now, i, |s, ctx| s.on_feature(&u, ctx));
+                let (mut intents, logs) = self.dispatch_one(now, i, |s, ctx| s.on_feature(&u, ctx));
                 self.record_dispatch(now, &mut intents, &logs);
             }
         }
@@ -443,8 +460,7 @@ impl Backtester {
         for timer_id in fired {
             // Dispatch the fired timer to every strategy; each only reacts to
             // its own opaque TimerIds, so there is no cross-strategy coupling.
-            let (mut intents, logs) =
-                self.dispatch_all(now, |s, ctx| s.on_timer(timer_id, ctx));
+            let (mut intents, logs) = self.dispatch_all(now, |s, ctx| s.on_timer(timer_id, ctx));
             self.record_dispatch(now, &mut intents, &logs);
         }
     }
@@ -752,7 +768,10 @@ mod tests {
             reduce_only: false,
             tag: "namespaced".into(),
         };
-        let mut intents = vec![intent("carry-v1", Side::Buy), intent("liq-fade", Side::Sell)];
+        let mut intents = vec![
+            intent("carry-v1", Side::Buy),
+            intent("liq-fade", Side::Sell),
+        ];
         bt.record_dispatch(0, &mut intents, &[]);
 
         // Both local id-7 intents were re-stamped with unique global ids.
@@ -766,4 +785,3 @@ mod tests {
         assert_eq!(bt.intent_strategy[&intents[1].intent_id.0], "liq-fade");
     }
 }
-

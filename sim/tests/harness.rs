@@ -472,5 +472,64 @@ fn sim_9_cli_backtest_mc_and_replay_live_work_end_to_end() {
         Some(1),
         "divergence must be a failing exit"
     );
+
+    // paper: same fill machinery as backtest, own tracker record (SIM-15).
+    let out = run(&[
+        "paper",
+        "--log",
+        log_s,
+        "--strategy",
+        "coinflip",
+        "--seed",
+        "42",
+        "--run-id",
+        "01JPAPERRUN",
+        "--runs-dir",
+        runs.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("run 01JPAPERRUN"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let idx = std::fs::read_to_string(runs.join("index.jsonl")).unwrap();
+    assert!(idx.contains("\"run_id\":\"01JPAPERRUN\""));
+
+    // paper-tail: a static log is fully consumed once, then closed on idle
+    // polls; session is idempotent across re-reads (SIM-15).
+    let out = run(&[
+        "paper-tail",
+        "--log",
+        log_s,
+        "--strategy",
+        "coinflip",
+        "--seed",
+        "42",
+        "--poll-ms",
+        "10",
+        "--max-idle-polls",
+        "3",
+        "--run-id",
+        "01JPAPERTAIL",
+        "--runs-dir",
+        runs.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("run 01JPAPERTAIL"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let idx = std::fs::read_to_string(runs.join("index.jsonl")).unwrap();
+    assert!(idx.contains("\"run_id\":\"01JPAPERTAIL\""));
     let _ = std::fs::remove_dir_all(&dir);
 }

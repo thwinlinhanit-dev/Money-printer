@@ -17,6 +17,7 @@ secrets*
 /cold
 /warm
 /runs
+/research/out
 /journal/briefs
 *.parquet
 *.ndjson.zst

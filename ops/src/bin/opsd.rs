@@ -54,7 +54,11 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<
     write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
 }
 
-fn handle(stream: &mut TcpStream, daemon: &mut OpsDaemon, token: Option<&str>) -> std::io::Result<()> {
+fn handle(
+    stream: &mut TcpStream,
+    daemon: &mut OpsDaemon,
+    token: Option<&str>,
+) -> std::io::Result<()> {
     let mut request = [0u8; 4096];
     let len = stream.read(&mut request)?;
     let request = String::from_utf8_lossy(&request[..len]);
@@ -143,7 +147,10 @@ mod tests {
             Some("secret")
         );
         // A non-auth request carries no token.
-        assert_eq!(request_token("GET /status HTTP/1.1\r\nHost: localhost\r\n"), None);
+        assert_eq!(
+            request_token("GET /status HTTP/1.1\r\nHost: localhost\r\n"),
+            None
+        );
     }
 
     #[test]

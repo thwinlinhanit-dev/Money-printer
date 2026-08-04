@@ -1,6 +1,7 @@
-//! `sim` CLI (SIM-9/10/11): backtest, walk-forward, plateau, Monte-Carlo, and
-//! the replay-live determinism diff — over a recorded event log, writing
-//! tracker runs (`runs/index.jsonl`).
+//! `sim` CLI (SIM-9/10/11/15): backtest, walk-forward, plateau, Monte-Carlo,
+//! replay-live, and paper (live-feed tail / one-shot replay through the same
+//! FillSimulator) — over recorded event logs, writing tracker runs
+//! (`runs/index.jsonl`).
 //!
 //! Usage:
 //!   sim backtest    --log <event.log> --strategy coinflip|null --seed N \
@@ -9,9 +10,17 @@
 //!   sim plateau     --base <expectancy> --point <delta:expectancy> …
 //!   sim mc          --log <event.log> --strategy … --seed N --resamples R
 //!   sim replay-live --log <live.log> --log-b <replay.log> --strategy … --seed N
+//!   sim paper       --log <live.log> --strategy … --seed N \
+//!                   --run-id <ulid> --runs-dir <dir> [--chunk-size N]
+//!   sim paper-tail  --log <live.log> --strategy … --seed N \
+//!                   [--poll-ms M] [--max-idle-polls K] [--max-polls P]
+//!                   --run-id <ulid> --runs-dir <dir>
 //!
 //! `replay-live` exits 1 on ANY decision-log divergence — that is a P1 bug
-//! (SIM-11). The run id is caller-supplied (a ULID at the ops layer, SIM-10)
+//! (SIM-11). `paper` runs the SAME FillSimulator as backtest over a live
+//! (tailing) event feed (EXE-8/SIM-15); `paper-tail` re-reads the growing log
+//! each poll and skips already-consumed frames (idempotent, v1 documented in
+//! spec 005). The run id is caller-supplied (a ULID at the ops layer, SIM-10)
 //! so this binary reads no wall clock at all (PD-3, even at the edge).
 
 use mp_core::log::LogReader;
@@ -19,8 +28,8 @@ use mp_core::{EventEnvelope, Venue};
 use mp_features::catalog::{Cvd, FundingRate};
 use mp_features::FeatureEngine;
 use mp_sim::{
-    monte_carlo, plateau_ok, Backtester, MetricsSummary, RunRecord, SimConfig, WalkForwardParams,
-    WindowResult,
+    monte_carlo, plateau_ok, Backtester, MetricsSummary, PaperSession, RunRecord, SimConfig,
+    WalkForwardParams, WindowResult,
 };
 use mp_strategies::{CarryConfig, CarryV1, CoinFlipStrategy, NullStrategy, Strategy, Universe};
 use std::io::Write;
@@ -126,12 +135,84 @@ fn run_backtest(
     Ok(bt)
 }
 
+/// Write a tracker run record + print the summary line (SIM-10).
+fn record_run(
+    runs_dir: &str,
+    run_id: &str,
+    git_sha: &str,
+    config_text: &str,
+    bt: &Backtester,
+    events: &[EventEnvelope],
+) -> Result<(), String> {
+    let (from, to) = (
+        events.first().map(|e| e.recv_ts_ns).unwrap_or(0),
+        events.last().map(|e| e.recv_ts_ns).unwrap_or(0),
+    );
+    let rec = RunRecord::new(
+        run_id.to_string(),
+        git_sha.to_string(),
+        config_text,
+        from,
+        to,
+        vec![],
+        bt.decision_log().hash(),
+        bt.summary(),
+    );
+    std::fs::create_dir_all(runs_dir).map_err(|e| e.to_string())?;
+    let mut idx = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{runs_dir}/index.jsonl"))
+        .map_err(|e| e.to_string())?;
+    writeln!(idx, "{}", rec.to_jsonl()).map_err(|e| e.to_string())?;
+    let s = bt.summary();
+    println!(
+        "run {run_id}: trades={} expectancy={:+.6} stress2x={:+.6} maxDD={:.2} log_hash={}",
+        s.trades,
+        s.expectancy,
+        s.stress_expectancy_2x,
+        s.max_drawdown,
+        bt.decision_log().hash()
+    );
+    Ok(())
+}
+
+/// One-shot paper replay: the recorded log fed through the paper path in
+/// batches — EXE-8's code-shape (same FillSimulator), SIM-15's batching.
+fn run_paper(
+    events: &[EventEnvelope],
+    strategy: &str,
+    seed: u64,
+    chunk: usize,
+) -> Result<Backtester, String> {
+    let mut cfg = SimConfig::default();
+    cfg.min_coverage = 1.0;
+    cfg.bar_tf_ns = 1_000_000;
+    cfg.latency_ns = 0;
+    cfg.fill_model = mp_sim::FillModel::L0BarFill;
+    let bt = Backtester::new(
+        engine(),
+        strategy_named(strategy, events, None, None)?,
+        cfg,
+        seed,
+    );
+    let mut session = PaperSession::new(bt);
+    for batch in events.chunks(chunk.max(1)) {
+        session
+            .push_batch(batch.to_vec())
+            .map_err(|e| format!("paper feed refused: {e}"))?;
+    }
+    session
+        .close()
+        .map_err(|e| format!("paper close refused: {e}"))
+}
+
 fn run() -> Result<ExitCode, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args
         .first()
         .cloned()
-        .ok_or("usage: sim backtest|wf|plateau|mc|replay-live …")?;
+        .ok_or("usage: sim backtest|wf|plateau|mc|replay-live|paper|paper-tail …")?;
     let rest = &args[1..];
 
     match cmd.as_str() {
@@ -155,36 +236,99 @@ fn run() -> Result<ExitCode, String> {
             let runs_dir = need(rest, "--runs-dir")?;
             let git_sha = flag(rest, "--git-sha").unwrap_or_else(|| "unknown".into());
             let config_text = format!("strategy={strategy};seed={seed};cfg=default");
-            let (from, to) = (
-                events.first().map(|e| e.recv_ts_ns).unwrap_or(0),
-                events.last().map(|e| e.recv_ts_ns).unwrap_or(0),
+            record_run(&runs_dir, &run_id, &git_sha, &config_text, &bt, &events)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "paper" => {
+            let events = read_log(&need(rest, "--log")?)?;
+            let strategy = need(rest, "--strategy")?;
+            let seed: u64 = need(rest, "--seed")?.parse().map_err(|_| "bad --seed")?;
+            let chunk: usize = flag(rest, "--chunk-size")
+                .map_or(Ok(10_000), |c| c.parse())
+                .map_err(|_| "bad --chunk-size")?;
+            let run_id = need(rest, "--run-id")?;
+            let runs_dir = need(rest, "--runs-dir")?;
+            let git_sha = flag(rest, "--git-sha").unwrap_or_else(|| "unknown".into());
+            let bt = run_paper(&events, &strategy, seed, chunk)?;
+            let config_text = format!("paper;strategy={strategy};seed={seed};chunk={chunk}");
+            record_run(&runs_dir, &run_id, &git_sha, &config_text, &bt, &events)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "paper-tail" => {
+            let log = need(rest, "--log")?;
+            let strategy = need(rest, "--strategy")?;
+            let seed: u64 = need(rest, "--seed")?.parse().map_err(|_| "bad --seed")?;
+            let run_id = need(rest, "--run-id")?;
+            let runs_dir = need(rest, "--runs-dir")?;
+            let git_sha = flag(rest, "--git-sha").unwrap_or_else(|| "unknown".into());
+            let poll_ms: u64 = flag(rest, "--poll-ms")
+                .map_or(Ok(5_000), |p| p.parse())
+                .map_err(|_| "bad --poll-ms")?;
+            let max_idle_polls: u32 = flag(rest, "--max-idle-polls")
+                .map_or(Ok(12), |p| p.parse())
+                .map_err(|_| "bad --max-idle-polls")?;
+            let max_polls: u32 = flag(rest, "--max-polls")
+                .map_or(Ok(u32::MAX), |p| p.parse())
+                .map_err(|_| "bad --max-polls")?;
+
+            // Live tail: re-read the growing log each poll; PaperSession skips
+            // already-consumed frames, so this is idempotent (SIM-15). The
+            // loop is time-free (PD-3): it sleeps a fixed duration and counts
+            // polls — no wall-clock reads on this decision path.
+            let cfg = SimConfig {
+                min_coverage: 1.0,
+                bar_tf_ns: 1_000_000,
+                latency_ns: 0,
+                fill_model: mp_sim::FillModel::L0BarFill,
+                ..SimConfig::default()
+            };
+            let mut session = PaperSession::new(Backtester::new(
+                engine(),
+                strategy_named(&strategy, &[], None, None)?,
+                cfg,
+                seed,
+            ));
+            let mut idle = 0u32;
+            for poll in 0..max_polls {
+                let mut batch = Vec::new();
+                let reader = LogReader::open(std::path::Path::new(&log))
+                    .map_err(|e| format!("open log {log}: {e}"))?;
+                for ev in reader {
+                    match ev {
+                        Ok(ev) => batch.push(ev),
+                        Err(e) => eprintln!("tail warn: {e}"),
+                    }
+                }
+                let before = session.consumed;
+                session
+                    .push_batch(batch)
+                    .map_err(|e| format!("paper feed refused: {e}"))?;
+                let grew = session.consumed > before;
+                println!(
+                    "paper-tail poll {poll}: consumed={} dup={} idle={idle}",
+                    session.consumed, session.duplicates
+                );
+                if grew {
+                    idle = 0;
+                } else {
+                    idle += 1;
+                    if idle >= max_idle_polls {
+                        println!(
+                            "paper-tail: no new frames for {max_idle_polls} polls — ending session"
+                        );
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+            }
+            let bt = session
+                .close()
+                .map_err(|e| format!("paper close refused (SIM-4): {e}"))?;
+            let events = read_log(&log)?;
+            let config_text = format!(
+                "paper-tail;strategy={strategy};seed={seed};poll_ms={poll_ms};idle={max_idle_polls}"
             );
-            let rec = RunRecord::new(
-                run_id.clone(),
-                git_sha,
-                &config_text,
-                from,
-                to,
-                vec![],
-                bt.decision_log().hash(),
-                bt.summary(),
-            );
-            std::fs::create_dir_all(&runs_dir).map_err(|e| e.to_string())?;
-            let mut idx = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(format!("{runs_dir}/index.jsonl"))
-                .map_err(|e| e.to_string())?;
-            writeln!(idx, "{}", rec.to_jsonl()).map_err(|e| e.to_string())?;
-            let s = bt.summary();
-            println!(
-                "run {run_id}: trades={} expectancy={:+.6} stress2x={:+.6} maxDD={:.2} log_hash={}",
-                s.trades,
-                s.expectancy,
-                s.stress_expectancy_2x,
-                s.max_drawdown,
-                bt.decision_log().hash()
-            );
+            record_run(&runs_dir, &run_id, &git_sha, &config_text, &bt, &events)?;
             Ok(ExitCode::SUCCESS)
         }
         "wf" => {

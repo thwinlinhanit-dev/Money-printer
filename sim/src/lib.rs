@@ -21,6 +21,7 @@ pub mod fills;
 pub mod gates;
 pub mod harness;
 pub mod metrics;
+pub mod paper;
 pub mod tracker;
 
 pub use account::Accountant;
@@ -34,4 +35,5 @@ pub use harness::{
     MetricsSummary, WalkForwardParams, WindowResult,
 };
 pub use metrics::Metrics;
+pub use paper::PaperSession;
 pub use tracker::{content_hash, RunRecord};

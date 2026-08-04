@@ -6,7 +6,7 @@
 
 use crate::engine::FeatureUpdate;
 use mp_core::SymbolId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Comparison operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +99,23 @@ impl Screener {
         self.feature_names = map;
     }
 
+    /// Reject rules referencing features no registered feature can emit.
+    /// PD-5: a rule that can never fire must fail loudly at setup, never
+    /// silently produce zero hits forever (FEA-13: no dead rules).
+    pub fn validate_features(&self, known: &BTreeSet<String>) -> Result<(), String> {
+        for rule in &self.rules {
+            for c in &rule.conds {
+                if !known.contains(&c.feature) {
+                    return Err(format!(
+                        "rule '{}' references unknown feature '{}'",
+                        rule.id, c.feature
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Set the evaluation interval (spec 022). Minimum 100ms (FEA-16).
     pub fn set_eval_interval_ns(&mut self, ns: i64) {
         self.eval_interval_ns = ns.max(100_000_000); // clamp to 100ms minimum
@@ -160,5 +177,37 @@ impl Screener {
 
         self.has_evaluated = true;
         hits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fea_13_dead_rules_are_rejected_loudly() {
+        let s = Screener::new(vec![Rule {
+            id: "r1".into(),
+            conds: vec![
+                Cond {
+                    feature: "footprint.imb.5m.whale".into(),
+                    op: Op::Ge,
+                    threshold: 0.35,
+                },
+                Cond {
+                    feature: "cvd.binance".into(),
+                    op: Op::Ge,
+                    threshold: 0.0,
+                },
+            ],
+        }]);
+        let known = BTreeSet::from(["footprint.imb.5m.whale".to_string()]);
+        let err = s.validate_features(&known).unwrap_err();
+        assert!(err.contains("cvd.binance"), "{err}");
+        let ok_known = BTreeSet::from([
+            "footprint.imb.5m.whale".to_string(),
+            "cvd.binance".to_string(),
+        ]);
+        assert!(s.validate_features(&ok_known).is_ok());
     }
 }

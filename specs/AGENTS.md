@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Design specification documents (000–024) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
+Design specification documents (000–025) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
 
 ## Ownership
 
@@ -32,6 +32,7 @@ Design specification documents (000–024) defining the system architecture, dat
 - `022-screener-cadence.md` — screener cadence
 - `023-string-interning.md` — string interning
 - `024-market-data-integrity.md` — market data integrity
+- `025-signal-catalog.md` — signal catalog
 
 ## Local Contracts
 

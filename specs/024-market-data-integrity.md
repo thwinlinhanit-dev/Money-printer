@@ -55,3 +55,21 @@ authenticated trading, strategy changes, and long-running hosting policy.
   when the raw log's audit is not clean).  `compact_day` stays the pure
   mechanics entry point for already-verified paths; promotion must go through
   the verified gate.
+- 2026-08-04: Raw log appends are recv-monotonic, enforced at the write
+  boundary by `mp_collectors::monotonicize` (each batch is sorted by
+  `(recv_ts_ns, stream_seq)` and stragglers clamped to the running clock;
+  EVT-5/STO-4 convention).  Root cause: REST-injected events regressed the
+  recv clock by their HTTP round-trip — the 30s open-interest poll is stamped
+  *after* its ~1.5 s fetch but appended *before* the WS frames read during it
+  (and depth reseeds are stamped *before* their fetch).  That produced
+  `recv_time_reversal` on every recording and made the promotion gate
+  unreachable.  WS frames are already monotonic (single FIFO reader stamps at
+  socket read), so the clamp only touches REST-injected stragglers.
+- 2026-08-04: `recv_time_reversal` is a non-blocking warning (`[warn]` in
+  `mp-audit`): it records pure arrival-order jitter with zero frame loss.
+  Cleanliness = no *blocking* findings (`is_blocking_finding`); every
+  data-loss / unattributable code — `legacy_or_malformed`, `unreadable_log`,
+  `empty_log`, `missing_stream`, `missing_provenance`, `venue_mismatch`,
+  `symbol_mismatch`, `invalid_symbol_table`, `missing_snapshot_source`,
+  `sequence_gap`, `backpressure_loss`, `coverage_gap`, `stale_stream` —
+  remains a blocker.

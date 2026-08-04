@@ -190,6 +190,10 @@ fn run() -> Result<ExitCode, String> {
     }
     let mut screener = Screener::new(rules);
     screener.set_name_map(fe.name_map().clone());
+    let known: std::collections::BTreeSet<String> = fe.name_map().values().cloned().collect();
+    screener
+        .validate_features(&known)
+        .map_err(|e| format!("rule setup refused (PD-5): {e}"))?;
 
     // ---- replay -------------------------------------------------------------
     let tape: Vec<(i64, f64)> = events
