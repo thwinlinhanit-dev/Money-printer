@@ -191,6 +191,13 @@ impl SignalRecord {
     /// transient `Decayed` marker (the caller journals it) and demotes to
     /// `Hypothesis` automatically — risk-off never needs a human.
     pub fn detect_decay(&mut self) -> bool {
+        // SIG-4: a killed signal is terminal. Decay re-test must never resurrect
+        // it — without this guard, a Killed record that retained ≥ 12 fading
+        // weekly points would be demoted back to Hypothesis (regression found in
+        // the 0a55460 review; see `sig_4_killed_resists_decay_retest`).
+        if self.stage == SignalStage::Killed {
+            return false;
+        }
         if self.weekly_avg_excess.len() < 12 {
             return false;
         }
@@ -301,13 +308,13 @@ impl SignalCatalog {
 mod tests {
     use super::*;
 
-    const NOW: i64 = 1784505600_000_000_000; // 2026-07-19T00:00:00Z, deterministic
+    const NOW: i64 = 1_784_505_600_000_000_000; // 2026-07-19T00:00:00Z, deterministic
 
     fn grade(run_id: &str, n: u64, avg_excess: f64, ts: i64) -> GradeSnapshot {
         GradeSnapshot {
             run_id: run_id.into(),
             created_ts_ns: ts,
-            horizon_ns: 3600_000_000_000,
+            horizon_ns: 3_600_000_000_000,
             n,
             win_rate: 0.6,
             avg_excess,
@@ -379,7 +386,7 @@ mod tests {
         let mut r = SignalRecord::register("sig", "hyp", "h").unwrap();
         // 12 weeks of strong edge, then a 4-week fade below half the trailing
         // 12-week mean (RES-3): decayed ⇒ automatic demotion to Hypothesis.
-        for w in 0..8 {
+        for _ in 0..8 {
             r.weekly_avg_excess.push(0.002);
         }
         for _ in 0..4 {
@@ -413,6 +420,28 @@ mod tests {
             .is_err());
         assert!(r.kill("again").is_err());
     }
+
+    #[test]
+    fn sig_4_killed_resists_decay_retest() {
+        // Regression (0a55460 review): detect_decay had no Killed guard, so a
+        // killed signal that retained ≥ 12 fading weekly points would be
+        // silently resurrected to Hypothesis — breaking SIG-4's terminal
+        // guarantee. Build exactly that history, kill, then re-test.
+        let mut r = SignalRecord::register("sig", "hyp", "h").unwrap();
+        // 8 strong weeks then 4 fading weeks (the decay signature from sig_3).
+        for _ in 0..8 {
+            r.weekly_avg_excess.push(0.002);
+        }
+        for _ in 0..4 {
+            r.weekly_avg_excess.push(0.0005);
+        }
+        r.kill("edge gone; autopsy on file").unwrap();
+        assert_eq!(r.stage, SignalStage::Killed);
+        // The re-test must NOT flag decay or move the stage off Killed.
+        assert!(!r.detect_decay());
+        assert_eq!(r.stage, SignalStage::Killed);
+    }
+
 
     #[test]
     fn sig_1_catalog_serde_roundtrip_and_duplicate_refusal() {

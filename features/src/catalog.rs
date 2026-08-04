@@ -193,6 +193,11 @@ impl FundingRate {
         Self
     }
 }
+impl Default for FundingRate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl TickFeature for FundingRate {
     fn id(&self) -> String {
         "funding.rate".into()
