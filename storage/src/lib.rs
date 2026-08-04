@@ -18,6 +18,7 @@ pub mod layout;
 pub mod manifest;
 pub mod migrate;
 pub mod parquet_trades;
+pub mod promotion;
 pub mod prune;
 pub mod scd2;
 
@@ -43,5 +44,8 @@ pub use feature_store::{
 };
 pub use manifest::{derive_manifest, Gap, GapKind, QualityManifest, StreamStats};
 pub use migrate::{migrate_log, MigrateError, MigrateOutcome};
+pub use promotion::{
+    check_promotion, check_promotion_n, PromotionVerdict, REQUIRED_CONSECUTIVE_CLEAN_DAYS,
+};
 pub use prune::{verify_prunable, PruneRefusal};
 pub use scd2::{Scd2AppendError, SymbolScd2, SymbolVersion};

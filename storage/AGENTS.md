@@ -16,7 +16,9 @@ Cold storage layer: transforms raw event logs into Hive-partitioned Parquet tabl
 - `src/prune.rs` — data pruning
 - `src/audit.rs` — audit logging
 - `src/migrate.rs` — legacy raw-log migration (schema-1 → current, W-6 write-new + verify)
+- `src/promotion.rs` — seven-day promotion gate (INT-5 / Phase 0)
 - `src/bin/mp-migrate.rs` — migration CLI
+- `src/bin/mp-audit.rs` — data-integrity audit CLI (INT-3); also surfaces the promotion gate
 
 ## Verification
 

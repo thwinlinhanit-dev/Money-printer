@@ -91,7 +91,7 @@ pub enum RejectReason {
     PortfolioLossBudget, // RG-9
     KillSwitchTripped,   // RG-10
     ReconcilerDiverged,  // RG-11
-    InvalidInput,        // RG-0: non-finite / negative qty, price or multiplier
+    InvalidInput,        // RG-0: non-finite / negative qty, price, multiplier, or state inputs
 }
 
 /// Gate verdict.
@@ -123,15 +123,23 @@ pub fn evaluate(limits: &RiskLimits, kills: &KillSwitches, i: &GateInput) -> Ver
     use RejectReason::*;
 
     // RG-0 conv-8: reject non-finite or negative inputs up front, before any
-    // comparison. A NaN qty/price/mark must never be *executed*; without this
-    // guard every `>` check below is trivially bypassed by NaN (audit C2).
+    // comparison. A NaN qty/price/mark must never be *executed*; and NaN state
+    // inputs (position / gross / PNL) must never be allowed to silently pass a
+    // limit check — without this guard every `>` / `<` check below (RG-3..9) is
+    // trivially bypassed by NaN, because `NaN > x` and `NaN < x` are both false
+    // (audit C2; 08-04 hardening extended the check to the loss-stop state).
     if !i.qty.is_finite()
         || !i.price.is_finite()
         || !i.mark.is_finite()
+        || !i.current_position_qty.is_finite()
+        || !i.gross_exposure_notional.is_finite()
+        || !i.strategy_daily_pnl.is_finite()
+        || !i.portfolio_daily_pnl.is_finite()
         || i.qty < 0.0
         || i.price <= 0.0
         || i.contract_multiplier <= 0.0
         || !i.contract_multiplier.is_finite()
+        || i.gross_exposure_notional < 0.0
     {
         return Verdict::Reject(InvalidInput);
     }

@@ -172,7 +172,7 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
     // INT-4: no compaction is allowed to turn contaminated raw data into a
     // trustworthy-looking cold dataset.  The audit runs before reading events.
     let config = audit_config(args, venue, &symbol)?;
-    clean_audit(&raw_path, &config)?;
+    let audit = clean_audit(&raw_path, &config)?;
 
     tracing::info!(path = %raw_path.display(), "compacting raw log");
 
@@ -187,7 +187,9 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
 
     std::fs::create_dir_all(&cold_root).map_err(|e| format!("create {cold_root:?}: {e}"))?;
 
-    let stats = compactor::compact_day(
+    // Compact through the verified INT-4 gate (spec 024 08-03 decision): the
+    // same `compact_day_verified` that refuses quarantined logs drives ingress.
+    let stats = compactor::compact_day_verified(
         &cold_root,
         venue,
         &date_dashed,
@@ -198,8 +200,9 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
         &source_hash,
         COMPACTOR_VERSION,
         created_ts_ns,
+        &audit,
     )
-    .map_err(|e| format!("compact_day failed: {e}"))?;
+    .map_err(|e| format!("compact_day_verified failed: {e}"))?;
 
     Ok(format!(
         "compact done: {} trade files written ({} rows), {} files skipped",

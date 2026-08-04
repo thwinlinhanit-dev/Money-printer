@@ -144,6 +144,39 @@ fn regression_gate_nan_mark_rejected() {
     assert_eq!(reject(&i), RejectReason::InvalidInput);
 }
 
+// 08-04 hardening: the state inputs the loss-stops read (RG-4/5/8/9) must be
+// finite at the gate boundary too, or a NaN/Inf silences the very checks that
+// C2 was meant to lock down (`NaN > x` and `NaN < x` are both false).
+#[test]
+fn regression_gate_nan_state_inputs_rejected() {
+    let mut i = base(ALLOWED);
+    i.current_position_qty = f64::NAN;
+    assert_eq!(reject(&i), RejectReason::InvalidInput);
+
+    let mut i = base(ALLOWED);
+    i.gross_exposure_notional = f64::NAN;
+    assert_eq!(reject(&i), RejectReason::InvalidInput);
+
+    let mut i = base(ALLOWED);
+    i.strategy_daily_pnl = f64::NAN;
+    assert_eq!(reject(&i), RejectReason::InvalidInput);
+
+    let mut i = base(ALLOWED);
+    i.portfolio_daily_pnl = f64::NAN;
+    assert_eq!(reject(&i), RejectReason::InvalidInput);
+
+    // Infinity is just as fatal: RG-8 reads `pnl < -budget`, and +Inf/NaN both
+    // skip that comparison silently.
+    let mut i = base(ALLOWED);
+    i.strategy_daily_pnl = f64::INFINITY;
+    assert_eq!(reject(&i), RejectReason::InvalidInput);
+
+    // Gross exposure is a sum of absolute notionals — it can never be negative.
+    let mut i = base(ALLOWED);
+    i.gross_exposure_notional = -1.0;
+    assert_eq!(reject(&i), RejectReason::InvalidInput);
+}
+
 #[test]
 fn regression_gate_reduce_only_close_allowed_despite_exceeding_position() {
     // A reduce-only order that merely CLOSES (no flip) is allowed even though the

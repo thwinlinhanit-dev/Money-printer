@@ -10,6 +10,7 @@ use mp_core::Venue;
 use mp_storage::audit::{
     audit_raw_log, discover_raw_logs, scorecard, AuditConfig, DailyScorecard, RawLogAudit,
 };
+use mp_storage::promotion::check_promotion;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -128,23 +129,35 @@ fn main() {
         }
     }
 
-    // Check promotion: 7 consecutive clean days.
-    if !json_output && scorecards.len() >= 7 {
-        let consecutive = longest_clean_run(&scorecards);
+    // Check promotion: REQUIRED_CONSECUTIVE_CLEAN_DAYS consecutive clean days
+    // (lib gate `check_promotion` — the same logic that gates promotion reads).
+    if !json_output && !scorecards.is_empty() {
+        let verdict = check_promotion(&scorecards);
+        println!("\n--- Promotion Gate ---");
         println!(
-            "\n--- Promotion Gate ---\nLongest consecutive clean days: {consecutive}\nRequired: 7\nResult: {}",
-            if consecutive >= 7 {
-                "✅ PROMOTABLE"
-            } else {
-                "❌ NOT YET"
-            }
+            "Consecutive clean days: {} (required {})",
+            verdict.consecutive_clean, verdict.required
         );
+        if verdict.promoted {
+            println!(
+                "Result: ✅ PROMOTABLE  window {}..{}",
+                verdict.window_start.as_deref().unwrap_or("?"),
+                verdict.window_end.as_deref().unwrap_or("?")
+            );
+        } else {
+            let why = verdict
+                .first_failure
+                .map(|date| format!("first break {date}"))
+                .unwrap_or_else(|| "no qualifying clean window yet".to_string());
+            println!("Result: ❌ NOT YET ({why})");
+        }
     }
 
     if json_output {
+        let verdict = check_promotion(&scorecards);
         let summary = serde_json::json!({
             "scorecards": scorecards,
-            "longest_clean_run": longest_clean_run(&scorecards),
+            "promotion": verdict,
             "all_clean": all_clean,
         });
         println!(
@@ -160,18 +173,4 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1).cloned())
-}
-
-fn longest_clean_run(scorecards: &[DailyScorecard]) -> usize {
-    let mut best = 0usize;
-    let mut current = 0usize;
-    for card in scorecards {
-        if card.promotable {
-            current += 1;
-            best = best.max(current);
-        } else {
-            current = 0;
-        }
-    }
-    best
 }
