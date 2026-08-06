@@ -8,7 +8,7 @@ Real-time market data ingestion from cryptocurrency exchange WebSocket streams a
 
 - `src/collector.rs` — generic `Collector` driver; `DriveOutcome` enum
 - `src/normalize.rs` — `Normalizer` trait for exchange-specific normalization
-- `src/binance.rs` — Binance normalizer, REST depth seeding, OI polling
+- `src/binance.rs` — Binance normalizer, REST depth seeding, OI polling, REST aggTrades trade ingestion (COL-25..27)
 - `src/bybit.rs`, `src/coinbase.rs`, `src/hyperliquid.rs`, `src/kraken.rs`, `src/okx.rs` — exchange normalizers
 - `src/transport.rs`, `src/ws.rs` — WebSocket transport with backpressure
 - `src/backoff.rs`, `src/backpressure.rs`, `src/rate.rs` — reconnection, backpressure, rate limiting
@@ -28,6 +28,7 @@ Real-time market data ingestion from cryptocurrency exchange WebSocket streams a
 - Data written as daily event logs: `{yyyymmdd}_{venue}_{symbol}.log` in `data/raw/`
 - Heartbeat file written every 15s: `mp-collector-{venue}-{symbol}.heartbeat`
 - Binance book seeded from REST snapshot immediately after WS connect (before processing depth deltas)
+- Binance trade source `trade_source = "ws" | "rest"` (config or `--trade-source`, default `ws`): REST mode polls `fapi/v1/aggTrades` on the shared rate budget with a fromId watermark, reports skipped id ranges as `Status::GapDetected`, and suppresses WS aggTrade frames (COL-25..27; required while fstream drops the trade stream — spec 024 incident 08-04)
 - Frame loss triggers book reset and `Status::BackpressureDrop` event emission
 - Backoff: 250ms base, 30s cap, full-jitter (COL-1)
 - Depth reseed retries are rate-budgeted AND time-bounded: a failed Binance reseed defers its next attempt ~2s (audit 08-04; no per-iteration busy-spin)

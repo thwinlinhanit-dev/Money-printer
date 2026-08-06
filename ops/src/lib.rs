@@ -26,6 +26,9 @@ pub use bot::{parse as parse_command, Bot, BotReply, Command, KillScope};
 pub use daemon::{OpsDaemon, ProcessHealth, StatusSnapshot};
 pub use deadman::DeadMan;
 pub use latch::{KillLatch, LatchError, LatchScope};
-pub use registry::{runbook_path, spec_for, AlertSpec, ALERTS};
-pub use report::{Benchmark, CostBreakdown, FunnelEvent, MonthlyReport, StrategyRow, TrackingRow};
+pub use registry::{runbook_path, spec_for, AlertSpec, ALERTS};pub use report::{
+    band_accuracy_decay_alert, load_band_accuracy_trend, parse_band_accuracy_trend,
+    write_monthly_report, BandAccuracyRow, Benchmark, CostBreakdown, FunnelEvent, MonthlyReport,
+    StrategyRow, TrackingRow,
+};
 pub use watch::{clock_skew_alert, disk_alert, keyfile_perms_alert};

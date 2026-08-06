@@ -34,6 +34,12 @@ should be updated).
 | 023 | [String Interning in Features](023-string-interning.md) | intelligence | 📝 draft |
 | 024 | [Market-Data Integrity Gate](024-market-data-integrity.md) | data plane | ✅ implemented |
 | 025 | [Signal Catalog](025-signal-catalog.md) | intelligence | ✅ implemented |
+| 026 | [Cross-Venue Gap Detector](026-cross-venue-gap-detector.md) | data plane | ✅ implemented |
+| 027 | [Historical Bootstrap](027-historical-bootstrap.md) | data plane | ✅ implemented |
+| 028 | [Hyperliquid Whale Position Collector](028-hyperliquid-whale-positions.md) | data plane | ✅ implemented |
+| 029 | [Liquidation Aggregation & Estimated Liq Bands](029-liquidation-features.md) | intelligence | ✅ implemented |
+| 030 | [Macro Data Collector (HIP-3 + FRED)](030-macro-collector.md) | data plane | ✅ implemented |
+| 031 | [Deribit Options Recorder](031-deribit-options-recorder.md) | data plane | ✅ implemented |
 
 
 Status values: `draft` → `ready` (implementable) → `implementing` →
@@ -60,7 +66,7 @@ Open questions — needs human input; do NOT guess these
 
 Requirement prefixes: CONV, EVT, COL, STO, FEA, SIM, STR, EXE, RSK, OPS,
 RES, UI, ZCP (012), BKP (013), FSP (014), MAT (016), GRD (017), MOD (018),
-INT (024).
+INT (024), WHL (028), MAC (030), OPT (031).
 
 ## How to implement a spec
 

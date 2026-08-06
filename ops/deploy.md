@@ -30,6 +30,18 @@ Fill them with a host-side editor. `chmod 0600` is enforced by the
 ```sh
 cargo build --release --features live-ws        # collectors with the WS transport
 cargo build --release -p mp-ops
+cargo build --release -p mp-features --bin whale_study   # RES-4 study binary
+```
+
+Install the built binaries into `/opt/money-printer/bin/` (`mp-collector`,
+`opsd`, `whale_study`) and the weekly-study wrapper (exec bit kept); the
+research job scripts live under `/opt/money-printer/research/` (as the
+grading/brief units already assume):
+
+```sh
+install -d /opt/money-printer/ops/scripts
+install -m 0755 ops/scripts/run_whale_study_weekly.sh /opt/money-printer/ops/scripts/
+install -m 0644 research/run_band_accuracy.py research/band_accuracy.py research/band_accuracy_job.py /opt/money-printer/research/
 ```
 
 ## 3. Run (systemd)
@@ -39,8 +51,18 @@ Copy the unit templates from `ops/systemd/` (below), fill the venue list, then:
 ```sh
 systemctl enable --now collector@bybit collector@okx collector@binance
 systemctl enable --now opsd
-systemctl status 'collector@*' opsd
+systemctl enable --now whale-study.timer
+systemctl status 'collector@*' opsd whale-study.timer
 ```
+
+`whale-study.timer` runs the RES-4 band-accuracy study weekly (Tue 06:30 UTC)
+and is `ConditionPathExists`-gated: it skips (never fails) until the spec 028
+`mp-whale` collector has written `data/raw/*_hyperliquid_positions.log`, then
+journals each run's SIM-10 record to `runs/index.jsonl`. After each study the
+wrapper also runs `mp-ops band-accuracy-decay` over the trend journal (OPS-13
+P3 drift/decay watch) — `mp-ops` installs to `/opt/money-printer/bin/` above.
+Make sure the `mp-whale` census collector (spec 028) is running, or the
+study stays a skip.
 
 Confirm `/status` in Telegram shows every collector heartbeating.
 

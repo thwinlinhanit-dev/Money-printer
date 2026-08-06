@@ -118,10 +118,10 @@ mod tests {
     use mp_core::{SymbolId, Venue};
 
     fn write_v1_log(path: &Path, n: u64) {
-        // The current writer stamps SCHEMA_VER=2, so a schema-1 fixture has to
-        // be hand-framed: header + FRAME_EVENT (kind=1) frames whose payload
-        // is `schema_ver:u16 || bincode(EnvelopeV1)` — the exact pre-2026-08
-        // collector byte layout.
+        // The current writer stamps SCHEMA_VER (3 since specs 028/030/031), so
+        // a schema-1 fixture has to be hand-framed: header + FRAME_EVENT
+        // (kind=1) frames whose payload is `schema_ver:u16 ||
+        // bincode(EnvelopeV1)` — the exact pre-2026-08 collector byte layout.
         let mut f = std::fs::File::create(path).unwrap();
         use std::io::Write;
         f.write_all(b"MPLOG\0\0\0").unwrap();

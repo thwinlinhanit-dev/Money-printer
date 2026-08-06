@@ -1,0 +1,29 @@
+# cross_venue.toml.example — Cross-Venue Gap Detector config (spec 026, CVG-9).
+# Safe defaults are baked into the binary; every field here overrides them.
+# Real config lives OUTSIDE the repo (CONV-16). Validate with:
+#   cargo run -p mp-storage --bin mp-cross-venue -- --config cross_venue.toml --check-config
+
+# Cohort size below this ⇒ the gap is `isolated_unknown` (CVG-3). Default 2.
+# min_cohort = 2
+# Corroborators needed to call a gap `corroborated_venue_side` (CVG-4). Default 1.
+# min_corroborators = 1
+# Minimum trades a cohort venue must have inside the gap window (CVG-4). Default 1.
+# min_trades = 1
+# A cohort venue is "itself gapped" if its own manifest gap overlaps more than
+# this fraction of the window (CVG-4). 0.5 = more than half. Default 0.5.
+# cohort_gap_overlap = 0.5
+# A corroborating venue's window VWP must stay within this % of its pre-gap VWP
+# (CVG-4). 5.0 = ±5%. Default 5.0.
+# max_price_band_pct = 5.0
+
+# One logical underlying → its per-venue tickers. venue slugs match
+# `mp_core::Venue::from_slug` (e.g. "binance_futures", "bybit", "okx",
+# "hyperliquid", "coinbase", "kraken_futures").
+[[symbol_cohorts]]
+underlying = "BTC"
+
+[symbol_cohorts.members]
+binance_futures = "BTCUSDT"
+bybit = "BTCUSDT"
+okx = "BTC-USDT-SWAP"
+hyperliquid = "BTC"

@@ -1,0 +1,27 @@
+# Weekly RES-4 band-accuracy study (spec 029 LIQ-6/LIQ-10). Runs as the
+# research user; the study can write ONLY its journals — the SIM-10 run
+# record (runs/index.jsonl) and the band-accuracy weekly ledger + trend
+# (RES-7 posture), never the recorded data. Skip-not-fail: the unit is
+# conditioned on the spec 028 mp-whale census existing (WHL-6 log pattern),
+# so the timer produces nothing until positions have been recorded.
+[Unit]
+Description=Money Printer weekly whale band-accuracy study
+# The study is pure offline replay of recorded logs (PD-3/LIQ-9) — no
+# network dependency.
+
+[Service]
+Type=oneshot
+User=printer
+# No __pycache__ writes: /opt/money-printer/research is read-only under
+# ProtectSystem=strict and the job must not depend on silent degradation.
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Glob: at least one recorded positions log must exist, else the unit is
+# skipped (not failed) — the study starts once spec 028 data exists.
+ConditionPathExists=/opt/money-printer/data/raw/*_hyperliquid_positions.log
+ExecStart=/opt/money-printer/ops/scripts/run_whale_study_weekly.sh
+ProtectSystem=strict
+# The study's only writable surfaces (RES-7): the RES-4 tracker + ledger.
+ReadWritePaths=/opt/money-printer/runs /opt/money-printer/research/band_accuracy
+# Inputs are read-only to the job (W-6: it can never alter recorded data).
+ReadOnlyPaths=/opt/money-printer/data/raw
+NoNewPrivileges=true

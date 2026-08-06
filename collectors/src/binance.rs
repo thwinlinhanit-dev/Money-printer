@@ -26,6 +26,18 @@ pub struct BinanceNormalizer {
     /// extrapolated into a fake snapshot. Trades/mark/funding still flow.
     seeded: BTreeMap<SymbolId, bool>,
     next_seq: u64,
+    /// COL-27: when true, WS `aggTrade` frames are dropped here (trades come
+    /// exclusively from the REST poller). Frame counts in the daily log then
+    /// reflect only depth/book streams, and a stale WS trade stream can never
+    /// churn the collector — the REST poller is the single source of truth.
+    suppress_ws_trades: bool,
+    /// COL-28: when true, WS `markPriceUpdate` frames are dropped here (mark
+    /// price + funding come exclusively from the REST premiumIndex poller).
+    /// Same rationale as `suppress_ws_trades`: fstream silently drops the
+    /// markPrice stream from this egress (spec 024 incident 2026-08-04), and
+    /// when a proxy later restores it, suppression keeps the recording
+    /// single-source instead of double-recording mark/funding events.
+    suppress_ws_mark_price: bool,
 }
 
 impl BinanceNormalizer {
@@ -71,6 +83,17 @@ impl BinanceNormalizer {
     }
     fn sym(&mut self, s: &str) -> SymbolId {
         self.symbols.intern_default(Venue::BinanceFutures, s)
+    }
+    /// COL-27: switch trade ingestion between the WS stream and the REST
+    /// poller. Off by default (WS is the normal path).
+    pub fn set_suppress_ws_trades(&mut self, on: bool) {
+        self.suppress_ws_trades = on;
+    }
+    /// COL-28: switch mark/funding ingestion between the WS `markPriceUpdate`
+    /// stream and the REST premiumIndex poller. Off by default (WS is the
+    /// normal path).
+    pub fn set_suppress_ws_mark_price(&mut self, on: bool) {
+        self.suppress_ws_mark_price = on;
     }
 }
 
@@ -280,6 +303,233 @@ pub fn fetch_open_interest_blocking(
     })
 }
 
+/// One Binance futures aggregated trade as returned by `GET /fapi/v1/aggTrades`
+/// (COL-25). Ids are globally increasing per symbol, which is what makes a
+/// `fromId` watermark a loss-free resume point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggTrade {
+    pub id: u64,
+    pub price: f64,
+    pub qty: f64,
+    /// `m` = "is buyer the market maker": true ⇒ aggressor is the seller.
+    pub maker: bool,
+    pub exch_ts_ns: i64,
+}
+
+/// Parse the `GET /fapi/v1/aggTrades` response body (an array). Pure, so the
+/// watermark logic and event mapping are unit-testable without HTTP.
+pub fn parse_agg_trades(raw: &serde_json::Value) -> Result<Vec<AggTrade>, NormError> {
+    let arr = raw
+        .as_array()
+        .ok_or(NormError::Parse("aggTrades: not an array".into()))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        let id = u64_field(v, "a").ok_or(NormError::Parse("aggTrades a".into()))?;
+        let price = f64_field(v, "p").ok_or(NormError::Parse("aggTrades p".into()))?;
+        let qty = f64_field(v, "q").ok_or(NormError::Parse("aggTrades q".into()))?;
+        let maker = v.get("m").and_then(|x| x.as_bool()).unwrap_or(false);
+        let t = i64_field(v, "T").map(ms_to_ns).unwrap_or(0);
+        out.push(AggTrade {
+            id,
+            price,
+            qty,
+            maker,
+            exch_ts_ns: t,
+        });
+    }
+    Ok(out)
+}
+
+/// One Binance futures mark-price/funding sample as returned by
+/// `GET /fapi/v1/premiumIndex` (COL-28): mark price, index price, last
+/// funding rate, next funding time. The WS `markPriceUpdate` stream normally
+/// carries this ~1/s; when fstream silently drops that stream (spec 024
+/// incident 2026-08-04), the collector polls this endpoint instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PremiumIndex {
+    pub mark: f64,
+    pub index: f64,
+    pub last_funding_rate: f64,
+    pub next_funding_ts_ns: i64,
+}
+
+/// Parse the `GET /fapi/v1/premiumIndex` response body (a single object).
+/// Pure, so the event mapping is unit-testable without HTTP. Mirrors the
+/// `markPriceUpdate` WS shape: mark (`markPrice`), index (`indexPrice`), last
+/// funding rate (`lastFundingRate`), next funding time (`nextFundingTime`, ms).
+pub fn parse_premium_index(raw: &serde_json::Value) -> Result<PremiumIndex, NormError> {
+    let mark =
+        f64_field(raw, "markPrice").ok_or(NormError::Parse("premiumIndex markPrice".into()))?;
+    let index = f64_field(raw, "indexPrice").unwrap_or(f64::NAN);
+    let last_funding_rate = f64_field(raw, "lastFundingRate").unwrap_or(0.0);
+    let next_funding_ts_ns = i64_field(raw, "nextFundingTime").map(ms_to_ns).unwrap_or(0);
+    Ok(PremiumIndex {
+        mark,
+        index,
+        last_funding_rate,
+        next_funding_ts_ns,
+    })
+}
+
+/// Fetch the latest futures mark price + funding rate via REST (COL-28).
+/// Shares the 429 ⇒ RetryAfter convention (COL-21).
+#[cfg(feature = "live-http")]
+pub fn fetch_premium_index_blocking(
+    symbol: &str,
+) -> Result<PremiumIndex, Box<dyn std::error::Error + Send + Sync>> {
+    let url = format!("https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}");
+    let resp = reqwest::blocking::get(&url)?;
+    let status = resp.status();
+    if status.as_u16() == 429 {
+        let wait = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        tracing::warn!(
+            symbol,
+            retry_after_s = wait,
+            "binance premiumIndex 429 — RetryAfter"
+        );
+        return Err(format!("Binance premiumIndex rate-limited (429); Retry-After {wait}s").into());
+    }
+    let raw: serde_json::Value = resp.error_for_status()?.json()?;
+    parse_premium_index(&raw).map_err(|e| e.to_string().into())
+}
+
+/// Advance the trade watermark over a fresh REST batch and return the new
+/// trades plus the count of ids skipped (COL-26). `fromId` is inclusive, so
+/// the first returned trade may already be recorded — skipped as a duplicate.
+/// A jump in ids is an honest loss report: the caller surfaces it as
+/// `Status::GapDetected` so the recording never hides a gap.
+pub fn advance_trade_watermark(watermark: &mut u64, trades: Vec<AggTrade>) -> (Vec<AggTrade>, u64) {
+    let mut missing = 0u64;
+    let mut fresh = Vec::new();
+    for t in trades {
+        if t.id <= *watermark {
+            continue;
+        }
+        if *watermark > 0 && t.id > *watermark + 1 {
+            missing += t.id - *watermark - 1;
+        }
+        *watermark = t.id;
+        fresh.push(t);
+    }
+    (fresh, missing)
+}
+
+/// Fetch the latest futures aggregated trades via REST (COL-25). With
+/// `from_id` the response starts at that id (inclusive) — the caller's
+/// watermark resumes loss-free. `None` fetches the most recent window, used
+/// on the very first poll. Shares the 429 ⇒ RetryAfter convention (COL-21).
+#[cfg(feature = "live-http")]
+pub fn fetch_agg_trades_blocking(
+    symbol: &str,
+    from_id: Option<u64>,
+) -> Result<Vec<AggTrade>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut url = format!("https://fapi.binance.com/fapi/v1/aggTrades?symbol={symbol}&limit=500");
+    if let Some(id) = from_id {
+        url.push_str(&format!("&fromId={id}"));
+    }
+    let resp = reqwest::blocking::get(&url)?;
+    let status = resp.status();
+    if status.as_u16() == 429 {
+        let wait = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        tracing::warn!(
+            symbol,
+            retry_after_s = wait,
+            "binance aggTrades 429 — RetryAfter"
+        );
+        return Err(format!("Binance aggTrades rate-limited (429); Retry-After {wait}s").into());
+    }
+    let raw: serde_json::Value = resp.error_for_status()?.json()?;
+    parse_agg_trades(&raw).map_err(|e| e.to_string().into())
+}
+
+/// Map a REST premiumIndex sample into `MarkPrice` + `Funding` envelopes
+/// (COL-28). The mapping is byte-identical to the WS `markPriceUpdate` branch
+/// — same `MarkPrice { mark, index }` body, same `Funding { rate,
+/// interval_s: 28_800, next_funding_ts_ns }` (the venue does not carry the
+/// interval on either payload; 8h is the documented default) — so a
+/// REST-fed recording and a WS-fed recording of the same mark/funding grade
+/// identically. `recv_ts_ns` is the poll time (REST-injected stragglers are
+/// handled by `monotonicize`).
+pub fn apply_premium_index(
+    normalizer: &mut BinanceNormalizer,
+    symbol: &str,
+    pi: &PremiumIndex,
+    recv_ts_ns: i64,
+    out: &mut Vec<mp_core::EventEnvelope>,
+) {
+    let id = normalizer
+        .symbols_mut()
+        .intern_default(mp_core::Venue::BinanceFutures, symbol);
+    let seq = normalizer.seq();
+    out.push(mp_core::EventEnvelope::new(
+        mp_core::Venue::BinanceFutures,
+        id,
+        0,
+        recv_ts_ns,
+        seq,
+        MarketEvent::MarkPrice {
+            mark: pi.mark,
+            index: pi.index,
+        },
+    ));
+    let seq = normalizer.seq();
+    out.push(mp_core::EventEnvelope::new(
+        mp_core::Venue::BinanceFutures,
+        id,
+        0,
+        recv_ts_ns,
+        seq,
+        MarketEvent::Funding {
+            rate: pi.last_funding_rate,
+            interval_s: 28_800,
+            next_funding_ts_ns: pi.next_funding_ts_ns,
+        },
+    ));
+}
+
+/// Map REST aggTrades into `Trade` events through the normalizer (COL-25).
+/// The mapping is byte-identical to the WS `aggTrade` branch — same side rule
+/// (`m`), same id, same exchange timestamp — so a REST-fed recording and a
+/// WS-fed recording of the same trades grade identically. `recv_ts_ns` is the
+/// poll time (REST-injected stragglers are handled by `monotonicize`).
+pub fn apply_agg_trades(
+    normalizer: &mut BinanceNormalizer,
+    symbol: &str,
+    trades: &[AggTrade],
+    recv_ts_ns: i64,
+    out: &mut Vec<mp_core::EventEnvelope>,
+) {
+    let id = normalizer
+        .symbols_mut()
+        .intern_default(mp_core::Venue::BinanceFutures, symbol);
+    for t in trades {
+        let seq = normalizer.seq();
+        out.push(mp_core::EventEnvelope::new(
+            mp_core::Venue::BinanceFutures,
+            id,
+            t.exch_ts_ns,
+            recv_ts_ns,
+            seq,
+            MarketEvent::Trade {
+                price: t.price,
+                qty: t.qty,
+                side: if t.maker { Side::Sell } else { Side::Buy },
+                trade_id: t.id,
+            },
+        ));
+    }
+}
+
 /// First-delta straddle check (COL-23), wired into
 /// [`crate::book_sync::BinanceBookSync::on_delta`]: a delta whose `U` is at or
 /// below the snapshot's `lastUpdateId` overlaps the snapshot, so applying it
@@ -407,6 +657,10 @@ impl Normalizer for BinanceNormalizer {
 
         match etype {
             "aggTrade" => {
+                if self.suppress_ws_trades {
+                    tracing::debug!("aggTrade frame dropped: REST trade source active");
+                    return Ok(());
+                }
                 let sym = str_field(d, "s").ok_or_else(|| NormError::Parse("bn s".into()))?;
                 let id = self.sym(sym);
                 let price = f64_field(d, "p").ok_or_else(|| NormError::Parse("bn p".into()))?;
@@ -482,6 +736,12 @@ impl Normalizer for BinanceNormalizer {
                 }
             }
             "markPriceUpdate" => {
+                if self.suppress_ws_mark_price {
+                    tracing::debug!(
+                        "markPriceUpdate frame dropped: REST premiumIndex source active"
+                    );
+                    return Ok(());
+                }
                 let sym = str_field(d, "s").ok_or_else(|| NormError::Parse("bn s".into()))?;
                 let id = self.sym(sym);
                 let mark = f64_field(d, "p")
@@ -739,5 +999,306 @@ mod tests {
             out.is_empty(),
             "no snapshot, no depth events before REST seed"
         );
+    }
+
+    #[test]
+    fn col_25_parse_agg_trades_from_rest_json() {
+        // Real /fapi/v1/aggTrades response shape: strings for p/q, numbers
+        // for a/T, bool for m.
+        let raw: serde_json::Value = serde_json::from_str(
+            r#"[{"a":601,"p":"50000","q":"0.1","f":100,"l":101,"T":1673280000000,"m":true},
+                {"a":602,"p":"50001.5","q":"2","f":102,"l":103,"T":1673280001000,"m":false}]"#,
+        )
+        .unwrap();
+        let trades = parse_agg_trades(&raw).unwrap();
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].id, 601);
+        assert_eq!(trades[0].price, 50_000.0);
+        assert_eq!(trades[0].qty, 0.1);
+        assert!(trades[0].maker);
+        assert_eq!(trades[0].exch_ts_ns, 1_673_280_000_000_000_000);
+        assert!(!trades[1].maker);
+    }
+
+    #[test]
+    fn col_25_parse_agg_trades_rejects_non_array() {
+        let raw: serde_json::Value = serde_json::from_str(r#"{"a":1}"#).unwrap();
+        assert!(parse_agg_trades(&raw).is_err());
+    }
+
+    #[test]
+    fn col_26_watermark_dedup_and_gap_counting() {
+        // First batch establishes the watermark without a gap.
+        let mut wm = 0u64;
+        let (fresh, missing) = advance_trade_watermark(
+            &mut wm,
+            vec![
+                AggTrade {
+                    id: 10,
+                    price: 1.0,
+                    qty: 1.0,
+                    maker: false,
+                    exch_ts_ns: 0,
+                },
+                AggTrade {
+                    id: 11,
+                    price: 1.0,
+                    qty: 1.0,
+                    maker: false,
+                    exch_ts_ns: 0,
+                },
+            ],
+        );
+        assert_eq!(wm, 11);
+        assert_eq!(missing, 0);
+        assert_eq!(fresh.len(), 2);
+
+        // fromId is inclusive — the id-11 overlap is a duplicate, skipped.
+        let (fresh, missing) = advance_trade_watermark(
+            &mut wm,
+            vec![
+                AggTrade {
+                    id: 11,
+                    price: 1.0,
+                    qty: 1.0,
+                    maker: false,
+                    exch_ts_ns: 0,
+                },
+                AggTrade {
+                    id: 12,
+                    price: 1.0,
+                    qty: 1.0,
+                    maker: false,
+                    exch_ts_ns: 0,
+                },
+            ],
+        );
+        assert_eq!(wm, 12);
+        assert_eq!(missing, 0);
+        assert_eq!(fresh.len(), 1);
+
+        // A jump of 15→20 (watermark 12) means 13..14 AND 16..19 were missed:
+        // every non-contiguous advance is counted, per segment — honest gap.
+        let (fresh, missing) = advance_trade_watermark(
+            &mut wm,
+            vec![
+                AggTrade {
+                    id: 15,
+                    price: 1.0,
+                    qty: 1.0,
+                    maker: false,
+                    exch_ts_ns: 0,
+                },
+                AggTrade {
+                    id: 20,
+                    price: 1.0,
+                    qty: 1.0,
+                    maker: false,
+                    exch_ts_ns: 0,
+                },
+            ],
+        );
+        assert_eq!(wm, 20);
+        assert_eq!(missing, 6);
+        assert_eq!(fresh.len(), 2);
+    }
+
+    #[test]
+    fn col_26_rest_trades_match_ws_normalization() {
+        // The same trade through the WS path and through apply_agg_trades must
+        // produce identical events — a mixed or migrated recording grades the
+        // same either way (the audit compares streams, not transport).
+        let mut n = BinanceNormalizer::new();
+        let mut out = Vec::new();
+        n.normalize(
+            1,
+            br#"{"e":"aggTrade","E":1,"s":"BTCUSDT","a":5,"p":"50000","q":"0.1","T":1,"m":true}"#,
+            &mut out,
+        )
+        .unwrap();
+        let MarketEvent::Trade {
+            price,
+            qty,
+            side,
+            trade_id,
+        } = &out[0].body
+        else {
+            panic!("expected Trade");
+        };
+        let ws_trade = (price, qty, side, trade_id);
+
+        let mut n2 = BinanceNormalizer::new();
+        let mut out2 = Vec::new();
+        apply_agg_trades(
+            &mut n2,
+            "BTCUSDT",
+            &[AggTrade {
+                id: 5,
+                price: 50_000.0,
+                qty: 0.1,
+                maker: true,
+                exch_ts_ns: 1_000_000,
+            }],
+            7_000_000,
+            &mut out2,
+        );
+        let MarketEvent::Trade {
+            price,
+            qty,
+            side,
+            trade_id,
+        } = &out2[0].body
+        else {
+            panic!("expected Trade");
+        };
+        assert_eq!(ws_trade, (price, qty, side, trade_id));
+        // Envelope: exchange ts from the trade's T, recv stamped at poll time.
+        assert_eq!(out2[0].exch_ts_ns, 1_000_000);
+        assert_eq!(out2[0].recv_ts_ns, 7_000_000);
+    }
+
+    #[test]
+    fn col_27_suppress_ws_trades_drops_frames_but_rest_path_flows() {
+        let mut n = BinanceNormalizer::new();
+        n.set_suppress_ws_trades(true);
+        let mut out = Vec::new();
+        n.normalize(
+            1,
+            br#"{"e":"aggTrade","E":1,"s":"BTCUSDT","a":5,"p":"50000","q":"0.1","T":1,"m":true}"#,
+            &mut out,
+        )
+        .unwrap();
+        assert!(out.is_empty(), "WS aggTrade suppressed in rest mode");
+
+        // The REST path still emits the same trade.
+        let mut out2 = Vec::new();
+        apply_agg_trades(
+            &mut n,
+            "BTCUSDT",
+            &[AggTrade {
+                id: 5,
+                price: 50_000.0,
+                qty: 0.1,
+                maker: true,
+                exch_ts_ns: 1_000_000,
+            }],
+            7_000_000,
+            &mut out2,
+        );
+        assert_eq!(out2.len(), 1);
+        assert!(matches!(out2[0].body, MarketEvent::Trade { .. }));
+    }
+
+    #[test]
+    fn col_28_parse_premium_index_from_rest_json() {
+        // Real /fapi/v1/premiumIndex response shape: strings for prices/rates,
+        // ms number for nextFundingTime.
+        let raw: serde_json::Value = serde_json::from_str(
+            r#"{"symbol":"BTCUSDT","markPrice":"28200.5","indexPrice":"28195.3",
+                "estimatedSettlePrice":"28205.5","lastFundingRate":"0.000125",
+                "interestRate":"0.0001","nextFundingTime":1621267200000,"time":1621267199000}"#,
+        )
+        .unwrap();
+        let pi = parse_premium_index(&raw).unwrap();
+        assert_eq!(pi.mark, 28_200.5);
+        assert_eq!(pi.index, 28_195.3);
+        assert_eq!(pi.last_funding_rate, 0.000125);
+        assert_eq!(pi.next_funding_ts_ns, 1_621_267_200_000_000_000);
+    }
+
+    #[test]
+    fn col_28_parse_premium_index_missing_mark_is_error() {
+        let raw: serde_json::Value = serde_json::from_str(r#"{"symbol":"BTCUSDT"}"#).unwrap();
+        assert!(parse_premium_index(&raw).is_err());
+    }
+
+    #[test]
+    fn col_28_rest_premium_index_matches_ws_normalization() {
+        // The same mark/funding through the WS path and through
+        // apply_premium_index must produce identical event bodies — a mixed or
+        // migrated recording grades the same either way.
+        let mut n = BinanceNormalizer::new();
+        let mut out = Vec::new();
+        n.normalize(
+            1,
+            br#"{"e":"markPriceUpdate","E":1,"s":"BTCUSDT","p":"28200.5","i":"28195.3","r":"0.000125","T":1621267200000}"#,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        let (
+            MarketEvent::MarkPrice { mark, index },
+            MarketEvent::Funding {
+                rate,
+                interval_s,
+                next_funding_ts_ns,
+            },
+        ) = (&out[0].body, &out[1].body)
+        else {
+            panic!("expected MarkPrice then Funding");
+        };
+        let ws = (*mark, *index, *rate, *interval_s, *next_funding_ts_ns);
+
+        let mut n2 = BinanceNormalizer::new();
+        let mut out2 = Vec::new();
+        apply_premium_index(
+            &mut n2,
+            "BTCUSDT",
+            &PremiumIndex {
+                mark: 28_200.5,
+                index: 28_195.3,
+                last_funding_rate: 0.000125,
+                next_funding_ts_ns: 1_621_267_200_000_000_000,
+            },
+            7_000_000,
+            &mut out2,
+        );
+        assert_eq!(out2.len(), 2);
+        let (
+            MarketEvent::MarkPrice { mark, index },
+            MarketEvent::Funding {
+                rate,
+                interval_s,
+                next_funding_ts_ns,
+            },
+        ) = (&out2[0].body, &out2[1].body)
+        else {
+            panic!("expected MarkPrice then Funding");
+        };
+        assert_eq!(ws, (*mark, *index, *rate, *interval_s, *next_funding_ts_ns));
+        // Envelope: recv stamped at poll time.
+        assert_eq!(out2[0].recv_ts_ns, 7_000_000);
+    }
+
+    #[test]
+    fn col_28_suppress_ws_mark_price_drops_frames_but_rest_path_flows() {
+        let mut n = BinanceNormalizer::new();
+        n.set_suppress_ws_mark_price(true);
+        let mut out = Vec::new();
+        n.normalize(
+            1,
+            br#"{"e":"markPriceUpdate","E":1,"s":"BTCUSDT","p":"28200.5","i":"28195.3","r":"0.000125","T":1621267200000}"#,
+            &mut out,
+        )
+        .unwrap();
+        assert!(out.is_empty(), "WS markPriceUpdate suppressed in rest mode");
+
+        // The REST path still emits the same MarkPrice + Funding.
+        let mut out2 = Vec::new();
+        apply_premium_index(
+            &mut n,
+            "BTCUSDT",
+            &PremiumIndex {
+                mark: 28_200.5,
+                index: 28_195.3,
+                last_funding_rate: 0.000125,
+                next_funding_ts_ns: 1_621_267_200_000_000_000,
+            },
+            7_000_000,
+            &mut out2,
+        );
+        assert_eq!(out2.len(), 2);
+        assert!(matches!(out2[0].body, MarketEvent::MarkPrice { .. }));
+        assert!(matches!(out2[1].body, MarketEvent::Funding { .. }));
     }
 }

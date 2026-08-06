@@ -368,6 +368,15 @@ impl LogReader {
                         let schema_ver = u16::from_le_bytes([payload[0], payload[1]]);
                         let e = match schema_ver {
                             crate::SCHEMA_VER => codec::decode_event(&payload[2..])?,
+                            // Schema-2: byte-identical envelope layout to the
+                            // current one (provenance included). The 2→3 bump
+                            // (specs 028/030/031) only *appended* enum variants
+                            // to `MarketEvent`/`Venue`/`InstrumentKind`, which
+                            // bincode maps by index, so old frames decode with
+                            // the current types — no shape change, no legacy
+                            // struct needed. Historical schema-2 recordings
+                            // stay readable and promotable (W-6 / CONV-20).
+                            2 => codec::decode_event(&payload[2..])?,
                             // Schema-1 (pre-provenance): decode the historical
                             // layout and normalize to the current envelope with
                             // synthetic provenance. All market data is
@@ -625,6 +634,58 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].schema_ver, crate::SCHEMA_VER);
         assert_eq!(got[0].recv_ts_ns, 20);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn conv_20_schema_2_log_still_reads_with_appended_variants() {
+        // Spec 001 amendment (specs 028/030/031): the 2→3 bump appended enum
+        // variants only (MarketEvent, Venue, InstrumentKind), which bincode
+        // maps by index — so a schema-2 frame (current envelope layout with
+        // provenance) must decode cleanly with the current types. Historical
+        // schema-2 recordings stay readable and promotable (W-6).
+        let dir = std::env::temp_dir().join(format!("mplog-v2b-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("schema2b.log");
+        let _ = std::fs::remove_file(&path);
+
+        let (mut w, _) = EventLogWriter::open(&path).unwrap();
+        let mut legacy = EventEnvelope::new(
+            Venue::Bybit,
+            SymbolId(1),
+            10,
+            20,
+            3,
+            MarketEvent::Trade {
+                price: 1.0,
+                qty: 2.0,
+                side: Side::Sell,
+                trade_id: 9,
+            },
+        );
+        // Simulate a frame written before the 028/030/031 amendment.
+        legacy.schema_ver = 2;
+        w.append(&legacy).unwrap();
+        w.sync().unwrap();
+        drop(w);
+
+        let got: Vec<_> = LogReader::open(&path)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].schema_ver, 2);
+        assert_eq!(got[0].recv_ts_ns, 20);
+        assert_eq!(got[0].stream_seq, 3);
+        // Schema-2 envelopes already carried provenance — it must survive.
+        assert_eq!(got[0].provenance, EventProvenance::synthetic());
+        match &got[0].body {
+            MarketEvent::Trade { price, side, .. } => {
+                assert_eq!(*price, 1.0);
+                assert_eq!(*side, Side::Sell);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
         let _ = std::fs::remove_file(&path);
     }
 }

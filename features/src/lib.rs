@@ -15,11 +15,19 @@ pub mod catalog;
 pub mod config;
 pub mod engine;
 pub mod hit_journal;
+pub mod leverage;
+pub mod liquidation;
 pub mod screener;
 pub mod signal_catalog;
+pub mod whale;
 
 pub use bar::{Bar, BarBuilder};
 pub use config::{ConfigError, FeaturesConfig};
 pub use engine::{BarFeature, FeatureEngine, FeatureUpdate, Locality, TickFeature};
 pub use hit_journal::{HitJournal, HitRecord};
+pub use leverage::{calibrate_leverage_weights, tier_leverages, LeverageTierCalibration};
+pub use liquidation::{
+    band_accuracy, BandAccuracy, BandObservation, LiqAgg, LiqEstBands, WhaleBandStudy,
+};
 pub use screener::{Cond, Op, Rule, Screener, ScreenerHit};
+pub use whale::{WhaleNet, WhaleNetDelta};

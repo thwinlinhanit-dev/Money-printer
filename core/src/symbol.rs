@@ -13,6 +13,10 @@ pub enum InstrumentKind {
     Spot,
     Perp,
     Future,
+    /// On-chain TradFi-synthetic perpetual (spec 030 MAC-1, Hyperliquid HIP-3:
+    /// Crude Oil, SP500, …). Appended so old bincode symbol frames keep their
+    /// variant indices. Correlation-grade, never execution-grade (MAC-5).
+    TradFiSynthetic,
 }
 
 /// Per-symbol metadata (CONV-6). Rounding to these precisions happens only at

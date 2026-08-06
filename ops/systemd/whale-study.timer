@@ -1,0 +1,15 @@
+# RES-4 (spec 029 LIQ-10): the whale band-accuracy study runs weekly, on
+# Tuesday 06:30 UTC — clear of the Monday 06:00 grading run (RES-2) and the
+# 07:00 daily brief — so it grades the completed Mon–Sun week of recorded
+# Hyperliquid logs. Persistent: a missed fire (host down) runs on the next
+# boot; the job is idempotent on the weekly ledger (RES-2), so a re-fire
+# never double-journals.
+[Unit]
+Description=Weekly whale band-accuracy study timer
+
+[Timer]
+OnCalendar=Tue *-*-* 06:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

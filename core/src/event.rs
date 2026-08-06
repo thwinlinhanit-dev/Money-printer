@@ -18,6 +18,12 @@ pub enum Venue {
     Hyperliquid,
     Coinbase,
     KrakenFutures,
+    /// Options venue (spec 031). Appended so old bincode frames keep their
+    /// variant indices (CONV-20: schema 2→3 was append-only).
+    Deribit,
+    /// FRED (St. Louis Fed) economic series (spec 030). Not a trading venue;
+    /// used as the envelope venue for [`MarketEvent::MacroPoint`] events.
+    Fred,
 }
 
 impl Venue {
@@ -30,6 +36,8 @@ impl Venue {
             Venue::Hyperliquid => "hyperliquid",
             Venue::Coinbase => "coinbase",
             Venue::KrakenFutures => "kraken",
+            Venue::Deribit => "deribit",
+            Venue::Fred => "fred",
         }
     }
 
@@ -44,6 +52,8 @@ impl Venue {
             "hyperliquid" => Venue::Hyperliquid,
             "coinbase" => Venue::Coinbase,
             "kraken" | "krakenfutures" | "kraken_futures" => Venue::KrakenFutures,
+            "deribit" => Venue::Deribit,
+            "fred" => Venue::Fred,
             _ => return None,
         })
     }
@@ -136,6 +146,38 @@ pub enum SnapshotSource {
     Synthetic,
 }
 
+/// Option type (spec 031).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OptionKind {
+    Call,
+    Put,
+}
+
+/// Option instrument metadata parsed from a venue instrument name such as
+/// Deribit's `BTC-28JUN26-100000-C` (spec 031, OPT-2). Attached to every
+/// option market event so downstream Parquet rows carry the full leg.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OptionLeg {
+    /// Underlying asset, e.g. "BTC".
+    pub underlying: String,
+    /// Strike price in quote units (Deribit BTC strike is in cents of USD).
+    pub strike: f64,
+    /// Expiry date as ns at UTC midnight of the instrument's expiry date.
+    pub expiry_ts_ns: i64,
+    pub kind: OptionKind,
+}
+
+/// Greeks at record time (spec 031, OPT-2: "greeks-at-record if in the
+/// ticker"). Recording only — no analytics in this scope (OPT-6). Missing
+/// values use the `f64::NAN` sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OptionGreeks {
+    pub delta: f64,
+    pub gamma: f64,
+    pub theta: f64,
+    pub vega: f64,
+}
+
 /// The normalized market event body (EVT-1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MarketEvent {
@@ -186,6 +228,64 @@ pub enum MarketEvent {
     Status {
         kind: StatusKind,
         detail: SmallString,
+    },
+    // ---- spec 028/030/031 additions (schema 2→3, append-only — do NOT
+    // reorder or remove anything above: old bincode frames map by index).
+    /// Hyperliquid on-chain per-user perpetual position census (spec 028,
+    /// WHL-2). The envelope carries venue/symbol (the coin)/timestamps; this
+    /// variant carries the position fields. DATA ONLY — never a strategy
+    /// input before event-study grading (WHL-5).
+    WhalePosition {
+        /// Opaque 0x address (WHL-3 — never external labels/PII).
+        address: String,
+        /// Signed position size in base units (positive long, negative short).
+        size: f64,
+        /// Entry price.
+        entry: f64,
+        /// Leverage value (e.g. 10.0 = 10x).
+        leverage: f64,
+        /// Liquidation price; `f64::NAN` if the venue omits it.
+        liq_price: f64,
+    },
+    /// FRED daily economic observation (spec 030, MAC-3). Envelope venue is
+    /// [`Venue::Fred`]. Correlation-grade, not execution-grade (MAC-5).
+    MacroPoint {
+        /// FRED series id, e.g. "DGS10".
+        series_id: String,
+        /// Observation value.
+        value: f64,
+        /// Observation date as ns at UTC midnight.
+        date: i64,
+    },
+    /// Deribit option trade (spec 031, OPT-2).
+    OptionTrade {
+        leg: OptionLeg,
+        price: f64,
+        qty: f64,
+        /// Aggressor side.
+        side: Side,
+        trade_id: u64,
+    },
+    /// Deribit option book message (spec 031, OPT-2). `is_snapshot`
+    /// distinguishes full-book snapshots from changes; `change_id` is the
+    /// Deribit book change id used for continuity/gap detection (COL-7).
+    OptionBook {
+        leg: OptionLeg,
+        bids: Levels,
+        asks: Levels,
+        change_id: u64,
+        is_snapshot: bool,
+    },
+    /// Deribit option ticker — mark IV + greeks at record (spec 031, OPT-2).
+    /// Recording only; analytics are out of scope (OPT-6). Missing values use
+    /// the `f64::NAN` sentinel.
+    OptionTicker {
+        leg: OptionLeg,
+        mark_iv: f64,
+        mark_price: f64,
+        underlying_price: f64,
+        open_interest: f64,
+        greeks: Option<OptionGreeks>,
     },
 }
 

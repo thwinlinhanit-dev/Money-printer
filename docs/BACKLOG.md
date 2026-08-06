@@ -32,7 +32,10 @@ decision), or **[maybe-never]** (recorded so it stops being re-proposed).
   + Kraken (spot cross-check), Hyperliquid (complete liq visibility).
 - **[v1.x] spot venues for basis truth** — perp-vs-spot features need spot legs.
 - **[v1.x] liquidation-level estimator** — OI + leverage-tier assumptions →
-  projected liq bands; overlay for liq-fade and the terminal.
+  projected liq bands; overlay for liq-fade and the terminal. ✅ SPEC'D +
+  BUILT as spec 029 `liq.est_bands`; validated against spec 028 real liq
+  prices via the RES-4 `whale_study` study (band accuracy, SIM-10-journaled).
+  Remaining: calibrate tier weights from recorded real leverage.
 - **[v1.x] orderflow dataset exports** — clean labeled Parquet extracts
   (events + forward returns) as the ML substrate, from the feature store.
 - **[v1.x] positioning collectors (whale tracking, tier 1)** — poll the free
@@ -48,8 +51,13 @@ decision), or **[maybe-never]** (recorded so it stops being re-proposed).
   from REAL positions (upgrades liq-fade-v1 context vs leverage-assumption
   bands), and wallet-cohort grading (score wallets by realized PnL from our
   recorded history; cohort flow becomes a feature only after its event study
-  clears). Needs its own small spec: API surface, wallet identity handling,
-  storage layout. Explicitly NOT copy trading — see rejected list.
+  clears). ✅ SPEC'D + BUILT as spec 028 (collector + `WhalePosition` event +
+  cold `positions/` stream); real liq prices now grade spec 029's bands via
+  the  RES-4 `whale_study` study (WHL-5: data → graded feature → strategy).
+  Aggregate whale net positioning + deltas BUILT as `whale.net.{venue}` /
+  `whale.delta.{venue}` in the feature engine (004), gated on the RES-4 study
+  (spec 028 Decisions 2026-08-05). Remaining: wallet-cohort grading (after
+  the event-study gate). Explicitly NOT copy trading — see rejected list.
 - **[v2] on-chain collectors (whale tracking, tier 3)** — stablecoin flows,
   exchange wallet balances, dormant-wallet awakenings, bridge flows; new
   source class, own spec (rate limits, providers, trust). Noisiest whale

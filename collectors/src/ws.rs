@@ -8,12 +8,18 @@
 //! the whole `Collector` driver stays transport-agnostic and unit-testable.
 
 use crate::backpressure::BackpressurePolicy;
-use crate::transport::{Transport, TransportEvent};
+use crate::transport::{Transport, TransportEvent, TransportMetrics};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Response;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
 /// Endpoint + subscription messages for one venue connection. Endpoints are
 /// public; put no credentials here.
@@ -26,16 +32,29 @@ pub struct WsEndpoint {
     /// Frame/message caps so a venue cannot memory-exhaust the process.
     /// Defaults: 1 MiB frames / 4 MiB messages (public market data is byte-sized).
     pub limits: WsLimits,
+    /// Optional egress proxy for the WebSocket connection (spec 024
+    /// 2026-08-04 incident: some networks are geo-filtered at the venue edge
+    /// — Binance futures silently drops non-book streams — so a proxy/VPN in
+    /// an allowed region restores full data).
+    /// Supported: `http://host:port` (HTTP CONNECT) and `socks5://host:port`.
+    pub proxy: Option<String>,
 }
 
 impl WsEndpoint {
-    /// Convenience constructor with the default frame limits.
+    /// Convenience constructor with the default frame limits and no proxy.
     pub fn new(url: impl Into<String>, subscribe: Vec<String>) -> Self {
         Self {
             url: url.into(),
             subscribe,
             limits: WsLimits::default(),
+            proxy: None,
         }
+    }
+
+    /// Route this connection through an HTTP CONNECT or SOCKS5 proxy.
+    pub fn with_proxy(mut self, proxy: Option<String>) -> Self {
+        self.proxy = proxy;
+        self
     }
 }
 
@@ -60,13 +79,6 @@ impl Default for WsLimits {
 pub struct WsTransport {
     queue: FrameQueue,
     _rt: tokio::runtime::Runtime,
-}
-
-/// Backpressure telemetry exported to the collector health/status path.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TransportMetrics {
-    pub dropped_frames: u64,
-    pub queue_high_water: usize,
 }
 
 #[derive(Default)]
@@ -200,18 +212,18 @@ impl WsTransport {
 
         Ok(Self { queue, _rt: rt })
     }
-
-    /// Consume the aggregated loss/high-water telemetry since the prior call.
-    /// The collector writes a durable status event and invalidates its book for
-    /// every loss batch (BKP-3 and INT-3).
-    pub fn take_metrics(&self) -> TransportMetrics {
-        self.queue.take_metrics()
-    }
 }
 
 impl Transport for WsTransport {
     fn poll(&mut self) -> Option<TransportEvent> {
         self.queue.poll()
+    }
+
+    /// Consume the aggregated loss/high-water telemetry since the prior call.
+    /// The collector writes a durable status event and invalidates its book
+    /// for every loss batch (BKP-3 and INT-3).
+    fn take_metrics(&mut self) -> TransportMetrics {
+        self.queue.take_metrics()
     }
 }
 
@@ -223,18 +235,24 @@ fn now_ns() -> i64 {
     }
 }
 
+/// Type-erased stream so the proxied path (TCP -> CONNECT/SOCKS5 -> TLS) and
+/// the direct path produce the same downstream type.
+/// `dyn A + B` is not allowed for non-auto traits, so we define a supertrait.
+trait BoxedIo: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> BoxedIo for T {}
+type BoxedStream = Box<dyn BoxedIo>;
+
 async fn run(
     endpoint: WsEndpoint,
     queue: FrameQueue,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // tungstenite 0.24 exposes the limits as struct fields, not setters.
-    let cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    let cfg = WebSocketConfig {
         max_frame_size: Some(endpoint.limits.max_frame_size),
         max_message_size: Some(endpoint.limits.max_message_size),
         ..Default::default()
     };
-    let (ws, _resp) =
-        tokio_tungstenite::connect_async_with_config(&endpoint.url, Some(cfg), false).await?;
+    let (ws, _resp) = connect_through_proxy(&endpoint.url, endpoint.proxy.as_deref(), &cfg).await?;
     let (mut write, mut read) = ws.split();
 
     for sub in &endpoint.subscribe {
@@ -270,6 +288,168 @@ async fn run(
     Ok(())
 }
 
+/// Connect to `url`, optionally through an HTTP CONNECT (`http://`) or SOCKS5
+/// (`socks5://`) proxy.  Used when the venue edge geo-filters this network
+/// (spec 024 2026-08-04 incident: Binance futures delivers only depth streams
+/// from some regions).  The TLS handshake (for `wss://`) is done against the
+/// *target* host with webpki roots — the proxy only carries bytes, it never
+/// terminates TLS.  With no proxy this is a plain direct connection (same
+/// handshake, one code path, one stream type).
+///
+/// Returns `(WebSocketStream, Response)` — same shape as
+/// `tokio_tungstenite::connect_async_with_config` — so callers are unchanged.
+async fn connect_through_proxy(
+    url: &str,
+    proxy: Option<&str>,
+    cfg: &WebSocketConfig,
+) -> Result<(WebSocketStream<BoxedStream>, Response), Box<dyn std::error::Error + Send + Sync>> {
+    let target = url::Url::parse(url)?;
+    let target_host = target
+        .host_str()
+        .ok_or("target URL has no host")?
+        .to_string();
+    let target_port = target
+        .port_or_known_default()
+        .ok_or("target URL has no port")?;
+
+    // Open TCP, optionally tunneled through the proxy (CONNECT/SOCKS5).
+    let tcp: BoxedStream = if let Some(proxy) = proxy {
+        let proxy_url = url::Url::parse(proxy)?;
+        // Proxy authentication is not supported: reject URLs that embed
+        // credentials so they can never be silently dropped (and the raw URL,
+        // which would contain them, is never logged here).
+        if !proxy_url.username().is_empty() || proxy_url.password().is_some() {
+            return Err("proxy URLs with embedded credentials are not supported".into());
+        }
+        let proxy_host = proxy_url
+            .host_str()
+            .ok_or("proxy URL has no host")?
+            .to_string();
+        let proxy_port = proxy_url.port().unwrap_or(match proxy_url.scheme() {
+            "socks5" | "socks5h" => 1080,
+            _ => 3128,
+        });
+        let tcp = TcpStream::connect((proxy_host.as_str(), proxy_port)).await?;
+        match proxy_url.scheme() {
+            "http" | "https" => {
+                Box::new(http_connect_tunnel(tcp, &target_host, target_port).await?)
+            }
+            "socks5" | "socks5h" => Box::new(socks5_tunnel(tcp, &target_host, target_port).await?),
+            other => return Err(format!("unsupported proxy scheme: {other}").into()),
+        }
+    } else {
+        Box::new(TcpStream::connect((target_host.as_str(), target_port)).await?)
+    };
+
+    // wss:// = TLS over the (tunneled) TCP stream, then the WS handshake.
+    // TLS is always terminated against the *target* venue with webpki roots —
+    // the proxy only carries ciphertext.  Uses the ring provider explicitly
+    // (builder_with_provider) so this path does not depend on any global
+    // `install_default()` having been called by the caller.
+    let stream: BoxedStream = if target.scheme() == "wss" {
+        let roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
+        };
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("tls protocol config: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let server_name = rustls::pki_types::ServerName::try_from(target_host.clone())
+            .map_err(|e| format!("bad server name {target_host}: {e}"))?;
+        Box::new(connector.connect(server_name, tcp).await?)
+    } else {
+        tcp
+    };
+
+    let request = url.to_string().into_client_request()?;
+    let (ws, resp) =
+        tokio_tungstenite::client_async_with_config(request, stream, Some(*cfg)).await?;
+    Ok((ws, resp))
+}
+
+/// HTTP CONNECT tunnel: `CONNECT host:port HTTP/1.1`, require `200`.
+async fn http_connect_tunnel(
+    mut tcp: TcpStream,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream, Box<dyn std::error::Error + Send + Sync>> {
+    let request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
+    tcp.write_all(request.as_bytes()).await?;
+    // Read until end of headers (\r\n\r\n), bounded.
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    loop {
+        let n = tcp.read(&mut chunk).await?;
+        if n == 0 {
+            return Err("proxy closed during CONNECT".into());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 64 * 1024 {
+            return Err("proxy CONNECT response headers too large".into());
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let status_line = head.lines().next().unwrap_or("");
+    // Parse the numeric status from "HTTP/1.1 200 Connection established".
+    let code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok());
+    match code {
+        Some(200) => Ok(tcp),
+        other => Err(format!("proxy CONNECT rejected: {status_line} (status {other:?})").into()),
+    }
+}
+
+/// SOCKS5 tunnel with no-auth: greeting, then CONNECT with a domain target.
+async fn socks5_tunnel(
+    mut tcp: TcpStream,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream, Box<dyn std::error::Error + Send + Sync>> {
+    if host.len() > 255 {
+        return Err("SOCKS5 domain too long".into());
+    }
+    // Greeting: version 5, one method, no-auth (0x00).
+    tcp.write_all(&[0x05, 0x01, 0x00]).await?;
+    let mut reply = [0u8; 2];
+    tcp.read_exact(&mut reply).await?;
+    if reply != [0x05, 0x00] {
+        return Err(format!("SOCKS5 no-auth not accepted: {reply:?}").into());
+    }
+    // CONNECT request, ATYP=0x03 (domain).
+    let mut request = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
+    request.extend_from_slice(host.as_bytes());
+    request.extend_from_slice(&port.to_be_bytes());
+    tcp.write_all(&request).await?;
+    let mut head = [0u8; 4];
+    tcp.read_exact(&mut head).await?;
+    if head[1] != 0x00 {
+        return Err(format!("SOCKS5 connect failed: rep={}", head[1]).into());
+    }
+    // Consume the server's bound-address payload (ATYP-dependent).
+    let addr_len = match head[3] {
+        0x01 => 4usize, // IPv4
+        0x03 => {
+            let mut len = [0u8; 1];
+            tcp.read_exact(&mut len).await?;
+            len[0] as usize
+        }
+        0x04 => 16usize, // IPv6
+        _ => return Err(format!("SOCKS5 unexpected ATYP: {}", head[3]).into()),
+    };
+    let mut rest = vec![0u8; addr_len + 2]; // address + port
+    tcp.read_exact(&mut rest).await?;
+    Ok(tcp)
+}
+
 /// Public endpoint presets (URLs only — no credentials). Verify against current
 /// venue docs at implementation time; they drift (spec 002 pitfall #2).
 pub mod endpoints {
@@ -289,6 +469,8 @@ pub mod endpoints {
     pub const KRAKEN_FUTURES: &str = "wss://futures.kraken.com/ws/v1";
     /// Hyperliquid.
     pub const HYPERLIQUID: &str = "wss://api.hyperliquid.xyz/ws";
+    /// Deribit public market-data WS (spec 031 — no auth for market data).
+    pub const DERIBIT: &str = "wss://www.deribit.com/ws/api/v2";
 }
 
 #[cfg(test)]
@@ -356,5 +538,58 @@ mod tests {
         let queue = FrameQueue::new(1, BackpressurePolicy::Block);
         assert!(matches!(queue.push(frame(1)), PushResult::Queued));
         assert!(matches!(queue.push(frame(2)), PushResult::TimedOut));
+    }
+
+    /// HTTP CONNECT tunnel: happy path (proxy answers 200) and rejection
+    /// (proxy answers 403). Uses a local mock proxy listener — no network.
+    #[tokio::test]
+    async fn proxy_http_connect_accepts_200_and_rejects_403() {
+        async fn mock_proxy(respond: &'static str) -> u16 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 512];
+                let _ = sock.read(&mut buf).await.unwrap();
+                let _ = sock.write_all(respond.as_bytes()).await;
+            });
+            port
+        }
+
+        // 200 -> tunnel succeeds.
+        let port = mock_proxy("HTTP/1.1 200 Connection established\r\n\r\n").await;
+        let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let ok = http_connect_tunnel(tcp, "example.com", 443).await;
+        assert!(ok.is_ok(), "200 CONNECT must succeed: {ok:?}");
+
+        // 403 -> tunnel refused.
+        let port = mock_proxy("HTTP/1.1 403 Forbidden\r\n\r\n").await;
+        let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let err = http_connect_tunnel(tcp, "example.com", 443).await;
+        assert!(err.is_err(), "403 CONNECT must be refused");
+    }
+
+    /// SOCKS5 tunnel: greeting + CONNECT handshake against a mock server that
+    /// answers no-auth and a successful connect with an IPv4 bound address.
+    #[tokio::test]
+    async fn proxy_socks5_handshake_completes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 512];
+            // Greeting: version 5, 1 method, no-auth.
+            let _ = sock.read(&mut buf).await.unwrap();
+            let _ = sock.write_all(&[0x05, 0x00]).await;
+            // CONNECT request (domain).
+            let _ = sock.read(&mut buf).await.unwrap();
+            // Reply: ver=5 rep=0 rsv=0 atyp=1 (IPv4), then 4 addr bytes + 2 port.
+            let _ = sock
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await;
+        });
+        let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let result = socks5_tunnel(tcp, "example.com", 443).await;
+        assert!(result.is_ok(), "SOCKS5 handshake must complete: {result:?}");
     }
 }

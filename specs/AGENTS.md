@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Design specification documents (000–025) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
+Design specification documents (000–031) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
 
 ## Ownership
 
@@ -33,6 +33,12 @@ Design specification documents (000–025) defining the system architecture, dat
 - `023-string-interning.md` — string interning
 - `024-market-data-integrity.md` — market data integrity
 - `025-signal-catalog.md` — signal catalog
+- `026-cross-venue-gap-detector.md` — cross-venue gap detector
+- `027-historical-bootstrap.md` — historical bootstrap from Binance public archive
+- `028-hyperliquid-whale-positions.md` — Hyperliquid whale position collector
+- `029-liquidation-features.md` — cross-venue liquidation aggregation & estimated liq bands
+- `030-macro-collector.md` — macro data collector (HIP-3 + FRED)
+- `031-deribit-options-recorder.md` — Deribit options market-data recorder
 
 ## Local Contracts
 

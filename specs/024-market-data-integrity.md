@@ -72,4 +72,78 @@ authenticated trading, strategy changes, and long-running hosting policy.
   `empty_log`, `missing_stream`, `missing_provenance`, `venue_mismatch`,
   `symbol_mismatch`, `invalid_symbol_table`, `missing_snapshot_source`,
   `sequence_gap`, `backpressure_loss`, `coverage_gap`, `stale_stream` —
-  remains a blocker.
+  remains a blocker.  Consumers of an audit must judge cleanliness by the
+  `clean` flag / `is_blocking_finding`, never by "findings non-empty".
+- 2026-08-04: `mp-audit --json` emits a lightweight per-recording summary
+  (clean flag, counts, per-code findings histogram) instead of the full
+  findings Vec — legacy files hold millions of findings, and serializing them
+  ballooned `--json` to multi-GB output.  Text mode keeps full per-finding
+  detail.
+- 2026-08-04: the daily integrity pipeline runs on the native Windows host as
+  a Scheduled Task (`MoneyPrinterDailyPipeline`, 00:05 UTC — right after the
+  collector's UTC-midnight log rotation, so yesterday's file is closed and
+  auditable).  `ops/scripts/daily_pipeline.ps1` is the Windows port of
+  `ops/scripts/daily_maintenance.sh`: it archives the daily scorecard to
+  `data/scorecards/<date>.json`, exits 1 (Task Scheduler flags the run) when
+  the day is not promotable, compacts through the INT-4 verified gate when it
+  is, and prints the promotion streak verdict (longest run of promotable
+  scorecards).  The 7-day streak is thus tracked from scorecard history, and
+  the promotion gate advances automatically once clean days accumulate.  A
+  DST/clock-drift guard no-ops runs outside the 00:00–02:00 UTC window;
+  `-RegisterTask` recomputes the local wall-clock of 00:05 UTC.
+- 2026-08-04 (incident): from this network, `fstream.binance.com` (futures)
+  delivers ONLY orderbook streams — `depth@100ms` and `bookTicker` flow, while
+  `aggTrade`, `markPrice@1s`, `ticker`, and `miniTicker` are silently dropped
+  (verified with a raw WS probe: combined-stream URL, single-stream path,
+  SUBSCRIBE method, multiple symbols — identical result; spot
+  `stream.binance.com` delivers `aggTrade` normally).  Not a collector defect:
+  subscription URLs are correct.  Regional egress restriction on futures
+  non-book streams.  Consequence: recordings since 2026-08-03 16:15 UTC are
+  book-only; they fail the required-streams check and are NOT promotable,
+  which is correct.  Recovery: change egress (VPN/proxy in an allowed region)
+  and restart collectors; verify with a raw probe that `aggTrade` frames
+  arrive before trusting the recording.
+- 2026-08-04 (incident follow-up, verified evidence): the futures-WS filter is
+  at Binance's edge for this egress IP, not a network/DNS block.
+  `fstream.binance.com` TCP-connects (101 Switching Protocols) but only
+  `depth` frames flow; `aggTrade`/`markPrice`/`forceOrder` are silently
+  dropped.  The documented alternative futures host `fstream.binance.vision`
+  is **globally NXDOMAIN** (even via 8.8.8.8/1.1.1.1) — that mirror is dead;
+  `data-stream.binance.vision` (spot) resolves but fails the TLS handshake
+  from this network.  `fapi.binance.com` REST works (trades, premiumIndex,
+  OI all return) — only the WS non-book streams are filtered.  Bybit, OKX and
+  Hyperliquid WS all connect normally from this network.
+- 2026-08-04 (fix): the collector WS transport now supports an egress proxy —
+  `proxy = "http://host:port"` (HTTP CONNECT) or `"socks5://host:port"` in
+  the collector config, or the `MP_WS_PROXY` env var (overrides config on
+  both the `--config` and flag paths).  The proxy only carries bytes: TLS is
+  terminated against the venue with webpki roots, never the proxy.  Verified
+  with mock-proxy unit tests (`proxy_http_connect_accepts_200_and_rejects_403`,
+  `proxy_socks5_handshake_completes`).  **Runbook:** set up a proxy/VPN whose
+  egress IP is in an allowed region, set `MP_WS_PROXY`, restart the collectors
+  (Stop-ScheduledTask MoneyPrinterCollectorsWatchdog → Start-ScheduledTask),
+  then verify with the raw probe that `aggTrade`/`markPrice`/`forceOrder`
+  frames arrive before trusting new recordings.
+- 2026-08-04 (interim mitigation, COL-25/26/27): while the WS trade stream is
+  filtered, the collector can ingest trades from `GET /fapi/v1/aggTrades`
+  (REST works from this network) with a loss-free `fromId` watermark
+  (`trade_source = "rest"` in config; WS aggTrade frames are suppressed at
+  the normalizer, watermark jumps surface as `Status::GapDetected`).  This
+  keeps the trade stream populated but does NOT restore the WS `markPrice`/
+  `forceOrder` streams — those still need the proxy fix above.
+- 2026-08-04 (interim mitigation, COL-28): the same REST path now closes the
+  mark/funding gap.  `mark_source = "rest"` (config or `--mark-source`)
+  polls `GET /fapi/v1/premiumIndex` every 15s and injects `MarkPrice` +
+  `Funding` envelopes that are byte-identical to the WS `markPriceUpdate`
+  branch (mark, index, lastFundingRate, nextFundingTime; interval default
+  8h — the venue carries no interval on either payload).  WS markPriceUpdate
+  frames are suppressed at the normalizer so a later-restored WS stream can
+  never double-record.  Independent of `trade_source` so each stream can be
+  restored separately.  Verified live: BTCUSDT/ETHUSDT recordings now show
+  `mark_price` + `funding` streams (audit `streams` map).  The proxy fix
+  still matters for full fidelity — 1s WS mark cadence, `forceOrder`
+  liquidations, and the other blocked streams — but the carry-v1 funding
+  dataset no longer depends on it.
+- 2026-08-04: `mp-audit --json` per-recording summaries now include the
+  `streams` map (per-stream event counts) so operators can verify a stream
+  is populated without a separate reader.

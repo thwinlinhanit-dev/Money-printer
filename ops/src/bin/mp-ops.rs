@@ -4,15 +4,24 @@
 //!   compact --date YYYY-MM-DD --venue bybit --symbol BTCUSDT
 //!           Compacts a raw event log into partitioned Parquet files.
 //!           Date also accepts YYYYMMDD (backward compatible).
+//!   band-accuracy-decay --trend PATH [--dedupe-ns N]
+//!           OPS-13 drift/decay watch over the RES-4 band-accuracy trend
+//!           journal (research/band_accuracy/band_accuracy.jsonl): prints a
+//!           JSON verdict {decayed: bool, alert: {...}}; exit 2 on a corrupt
+//!           journal (fail-closed), never a fabricated verdict.
 //!
 //! Usage:
 //!   cargo run --package mp-ops --bin mp-ops -- compact --date 2026-07-15 --venue bybit --symbol BTCUSDT
+//!   cargo run --package mp-ops --bin mp-ops -- band-accuracy-decay --trend research/band_accuracy/band_accuracy.jsonl
 
 use mp_core::log::LogReader;
 use mp_core::{EventEnvelope, SymbolTable, Venue};
-use mp_storage::{audit_raw_log, compactor, scorecard, AuditConfig, RawLogAudit};
+use mp_ops::{band_accuracy_decay_alert, load_band_accuracy_trend};
+use mp_storage::promotion::check_promotion;
+use mp_storage::{audit_raw_log, compactor, AuditConfig, DailyScorecard, RawLogAudit};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -42,6 +51,8 @@ fn parse_venue(s: &str) -> Result<Venue, String> {
         "hyperliquid" => Ok(Venue::Hyperliquid),
         "coinbase" => Ok(Venue::Coinbase),
         "kraken" | "kraken_futures" => Ok(Venue::KrakenFutures),
+        "deribit" => Ok(Venue::Deribit),
+        "fred" => Ok(Venue::Fred),
         _ => Err(format!("unknown venue: {s}")),
     }
 }
@@ -204,8 +215,27 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
     )
     .map_err(|e| format!("compact_day_verified failed: {e}"))?;
 
+    let mut extra = String::new();
+    if stats.positions_files_written + stats.positions_files_skipped > 0 {
+        extra.push_str(&format!(
+            ", {} positions files ({} rows)",
+            stats.positions_files_written, stats.position_rows
+        ));
+    }
+    if stats.macro_files_written + stats.macro_files_skipped > 0 {
+        extra.push_str(&format!(
+            ", {} macro files ({} rows)",
+            stats.macro_files_written, stats.macro_rows
+        ));
+    }
+    if stats.options_files_written + stats.options_files_skipped > 0 {
+        extra.push_str(&format!(
+            ", {} options files ({} rows)",
+            stats.options_files_written, stats.option_rows
+        ));
+    }
     Ok(format!(
-        "compact done: {} trade files written ({} rows), {} files skipped",
+        "compact done: {} trade files written ({} rows), {} files skipped{extra}",
         stats.trades_files_written, stats.trade_rows, stats.trades_files_skipped
     ))
 }
@@ -223,6 +253,160 @@ fn cmd_audit(args: &[String]) -> Result<String, String> {
         .join(format!("{date}_{venue_name}_{symbol}.log"));
     let audit = audit_raw_log(&path, &audit_config(args, venue, &symbol)?);
     serde_json::to_string_pretty(&audit).map_err(|error| error.to_string())
+}
+
+/// Lightweight scorecard file schema (data/scorecards/YYYY-MM-DD.json).
+/// Written by `mp-ops scorecard`; read by `mp-ops promote`.  Deliberately does
+/// NOT carry the full findings Vec — legacy days hold millions of findings and
+/// serializing them balloons the file to GB scale (the same defect fixed in
+/// mp-audit --json on 2026-08-04).  The gate only needs date, clean flags and
+/// counts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScorecardFile {
+    date: String,
+    promotable: bool,
+    recordings: Vec<ScorecardFileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScorecardFileEntry {
+    venue: String,
+    symbol: String,
+    clean: bool,
+    #[serde(default)]
+    event_count: u64,
+    #[serde(default)]
+    coverage: f64,
+    #[serde(default)]
+    findings: usize,
+    #[serde(default)]
+    blocking_findings: usize,
+}
+
+/// Lightweight per-recording entry (no findings Vec — see `ScorecardFile`).
+fn light_entry(venue: &Venue, symbol: &str, audit: &RawLogAudit) -> ScorecardFileEntry {
+    let mut blocking = 0usize;
+    for f in &audit.findings {
+        if mp_storage::audit::is_blocking_finding(&f.code) {
+            blocking += 1;
+        }
+    }
+    ScorecardFileEntry {
+        venue: venue.slug().to_owned(),
+        symbol: symbol.to_owned(),
+        clean: audit.is_clean(),
+        event_count: audit.event_count,
+        coverage: audit.coverage,
+        findings: audit.findings.len(),
+        blocking_findings: blocking,
+    }
+}
+
+fn cmd_promote(args: &[String]) -> Result<String, String> {
+    let dir = flag(args, "--scorecards-dir").unwrap_or_else(|| "data/scorecards".to_string());
+    let required = flags(args, "--required")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let path = PathBuf::from(&dir);
+    if !path.is_dir() {
+        return Err(format!("scorecards directory not found: {dir}"));
+    }
+    // Load every YYYY-MM-DD.json scorecard, sorted by date.
+    let mut files: Vec<ScorecardFile> = Vec::new();
+    for entry in std::fs::read_dir(&path)
+        .map_err(|e| format!("read {dir}: {e}"))?
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Accept YYYY-MM-DD.json and YYYYMMDD.json (normalize on load).
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) if e == "json" => (s.to_string(), true),
+            _ => continue,
+        };
+        if !ext || !(stem.len() == 10 && stem.contains('-') || stem.len() == 8) {
+            continue;
+        }
+        let text = std::fs::read_to_string(entry.path())
+            .map_err(|e| format!("read {}: {e}", entry.path().display()))?;
+        // Strip a UTF-8 BOM: the daily pipeline writes scorecards via
+        // PowerShell Set-Content -Encoding UTF8, which emits one.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        let mut card: ScorecardFile = serde_json::from_str(text)
+            .map_err(|e| format!("parse {}: {e}", entry.path().display()))?;
+        // Normalize date to YYYY-MM-DD so ordering and the verdict are stable.
+        if card.date.len() == 8 && !card.date.contains('-') {
+            card.date = format!(
+                "{}-{}-{}",
+                &card.date[0..4],
+                &card.date[4..6],
+                &card.date[6..8]
+            );
+        }
+        files.push(card);
+    }
+    files.sort_by(|a, b| a.date.cmp(&b.date));
+    if files.is_empty() {
+        return Err(format!("no scorecards found in {dir}"));
+    }
+    if !required.is_empty() {
+        // Filter to days that include every required venue:symbol recording.
+        // Invariant: the daily pipeline always generates scorecards with the
+        // FULL required set (a missing raw log audits as unreadable_log =>
+        // clean=false => promotable=false), so no day is ever silently
+        // dropped from the streak here.
+        files.retain(|card| {
+            required.iter().all(|req| {
+                let (venue, symbol) = req.split_once(':').unwrap_or((req.as_str(), ""));
+                card.recordings
+                    .iter()
+                    .any(|r| r.venue == venue && r.symbol == symbol)
+            })
+        });
+        if files.is_empty() {
+            return Err("no scorecards cover the required venue:symbol set".into());
+        }
+    }
+    // Feed the gate only what it reads: date + promotable.
+    let scorecards: Vec<DailyScorecard> = files
+        .into_iter()
+        .map(|f| DailyScorecard {
+            date: f.date,
+            recordings: vec![],
+            promotable: f.promotable,
+        })
+        .collect();
+    let verdict = check_promotion(&scorecards);
+    let summary = if verdict.promoted {
+        format!(
+            "PROMOTED: {} consecutive clean days {}..{}",
+            verdict.consecutive_clean,
+            verdict.window_start.as_deref().unwrap_or("?"),
+            verdict.window_end.as_deref().unwrap_or("?")
+        )
+    } else {
+        let why = verdict
+            .first_failure
+            .as_deref()
+            .map(|d| format!("first break {d}"))
+            .unwrap_or_else(|| "no qualifying clean window yet".to_string());
+        format!(
+            "NOT YET: {} consecutive clean day(s) of {} required ({why})",
+            verdict.consecutive_clean, verdict.required
+        )
+    };
+    // Return the JSON verdict as the command's message: `main` prints it
+    // exactly once (the tracing line is silenced by RUST_LOG=off in callers).
+    Ok(serde_json::to_string(&serde_json::json!({
+        "promoted": verdict.promoted,
+        "consecutive_clean": verdict.consecutive_clean,
+        "required": verdict.required,
+        "window_start": &verdict.window_start,
+        "window_end": &verdict.window_end,
+        "first_failure": &verdict.first_failure,
+        "scorecards": scorecards.len(),
+        "summary": summary,
+    }))
+    .map_err(|e| e.to_string())?)
 }
 
 fn cmd_scorecard(args: &[String]) -> Result<String, String> {
@@ -247,7 +431,59 @@ fn cmd_scorecard(args: &[String]) -> Result<String, String> {
         entries.push((venue, symbol.to_owned(), audit));
     }
     let dashed = format!("{}-{}-{}", &date[0..4], &date[4..6], &date[6..8]);
-    serde_json::to_string_pretty(&scorecard(dashed, entries)).map_err(|error| error.to_string())
+    // Lightweight file: verdict + per-recording counts only, never the full
+    // findings Vec (legacy days balloon to GB otherwise — 2026-08-04).
+    let promotable = !entries.is_empty() && entries.iter().all(|(_, _, a)| a.is_clean());
+    let file = ScorecardFile {
+        date: dashed,
+        promotable,
+        recordings: entries
+            .iter()
+            .map(|(venue, symbol, audit)| light_entry(venue, symbol, audit))
+            .collect(),
+    };
+    serde_json::to_string_pretty(&file).map_err(|error| error.to_string())
+}
+
+/// OPS-13 drift/decay watch: load the RES-4 band-accuracy trend journal and
+/// report whether the `liq.est_bands` validation quality has decayed over the
+/// trailing weeks (coverage halved / MRE doubled vs the 12-week baseline).
+///
+/// Prints a JSON verdict — `{"decayed": bool, "alert": {...}|null}` with the
+/// alert id/severity/detail/runbook when it fires (`alert` is `null` when the
+/// trend is healthy) — and exits 0 either way. A corrupt journal is a failed
+/// command (exit 2, CONV-8): the check never fabricates a verdict; a missing
+/// journal is a "no data" month (RES-5, `decayed: false`). `--dedupe-ns` sets
+/// the alert's dedupe window for a future stateful consumer (e.g. a Telegram
+/// bot transport that routes through `AlertRouter`); a one-shot process has no
+/// dedupe state of its own. The weekly wrapper (`run_whale_study_weekly.sh`)
+/// runs this after each study; the Telegram send remains a deployment artifact.
+fn cmd_band_accuracy_decay(args: &[String]) -> Result<String, String> {
+    let trend = flag(args, "--trend")
+        .unwrap_or_else(|| "research/band_accuracy/band_accuracy.jsonl".to_string());
+    let dedupe_ns = match flag(args, "--dedupe-ns") {
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|_| "--dedupe-ns must be an integer")?,
+        None => 7 * 24 * 3600 * 1_000_000_000i64, // 7 days: weekly cadence
+    };
+    if dedupe_ns <= 0 {
+        return Err("--dedupe-ns must be positive".into());
+    }
+    let rows = load_band_accuracy_trend(Path::new(&trend))
+        .map_err(|e| format!("band-accuracy-decay: {e}"))?;
+    let alert = band_accuracy_decay_alert(&rows, dedupe_ns);
+    let verdict = serde_json::json!({
+        "decayed": alert.is_some(),
+        "alert": alert.as_ref().map(|a| serde_json::json!({
+            "id": a.id,
+            "severity": a.severity.as_str(),
+            "detail": a.detail,
+            "runbook": a.runbook,
+            "dedupe_key": a.dedupe_key,
+        })),
+    });
+    serde_json::to_string(&verdict).map_err(|e| e.to_string())
 }
 
 fn main() -> ExitCode {
@@ -256,7 +492,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: mp-ops <subcommand> [options]");
-        eprintln!("Subcommands: compact, audit, scorecard");
+        eprintln!("Subcommands: compact, audit, scorecard, promote, band-accuracy-decay");
         return ExitCode::FAILURE;
     }
 
@@ -264,6 +500,8 @@ fn main() -> ExitCode {
         "compact" => cmd_compact(&args[2..]),
         "audit" => cmd_audit(&args[2..]),
         "scorecard" => cmd_scorecard(&args[2..]),
+        "promote" => cmd_promote(&args[2..]),
+        "band-accuracy-decay" => cmd_band_accuracy_decay(&args[2..]),
         other => Err(format!("unknown subcommand: {other}")),
     };
 
@@ -289,6 +527,61 @@ mod tests {
         EventEnvelope, EventProvenance, InstrumentKind, MarketEvent, Side, SnapshotSource,
         SymbolId, SymbolMeta,
     };
+
+    /// promote: a BOM-prefixed scorecard parses and a single DIRTY day yields
+    /// `promoted=false` with the correct first_failure.
+    #[test]
+    fn promote_reads_bom_scorecards_and_reports_not_yet() {
+        let dir = std::env::temp_dir().join(format!("mp-promote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let card = serde_json::json!({
+            "date": "2026-08-03",
+            "recordings": [
+                {"venue": "binance", "symbol": "BTCUSDT", "clean": false,
+                 "event_count": 1, "coverage": 1.0, "findings": 1, "blocking_findings": 1}
+            ],
+            "promotable": false
+        });
+        // PowerShell Set-Content -Encoding UTF8 writes a BOM prefix.
+        let mut text = "\u{feff}".to_string();
+        text.push_str(&serde_json::to_string(&card).unwrap());
+        std::fs::write(dir.join("2026-08-03.json"), text).unwrap();
+        let verdict = cmd_promote(&["--scorecards-dir".into(), dir.to_string_lossy().into()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let ok = verdict.expect("promote should succeed on a parseable scorecard");
+        assert!(ok.contains("NOT YET"), "dirty day must not promote: {ok}");
+    }
+
+    /// promote: seven consecutive promotable scorecards pass the gate.
+    #[test]
+    fn promote_passes_after_seven_clean_days() {
+        let dir = std::env::temp_dir().join(format!("mp-promote-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for day in 1..=7 {
+            let card = serde_json::json!({
+                "date": format!("2026-08-{day:02}"),
+                "recordings": [
+                    {"venue": "binance", "symbol": "BTCUSDT", "clean": true,
+                     "event_count": 1, "coverage": 1.0, "findings": 0, "blocking_findings": 0}
+                ],
+                "promotable": true
+            });
+            std::fs::write(
+                dir.join(format!("2026-08-{day:02}.json")),
+                serde_json::to_string(&card).unwrap(),
+            )
+            .unwrap();
+        }
+        let verdict = cmd_promote(&["--scorecards-dir".into(), dir.to_string_lossy().into()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let ok = verdict.expect("promote should succeed");
+        assert!(
+            ok.contains("PROMOTED"),
+            "seven clean days must promote: {ok}"
+        );
+    }
 
     #[test]
     fn int_4_compaction_refuses_quarantined_log() {
@@ -336,5 +629,77 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("quarantined raw log"));
         let _ = std::fs::remove_file(path);
+    }
+
+    /// One `band_accuracy.jsonl` trend line (the exact shape the research job
+    /// appends; provenance echoes omitted are allowed by the parser).
+    fn trend_line(week: u32, coverage: f64, mre: f64) -> String {
+        format!(
+            "{{\"week\":\"2026-W{week:02}\",\"n\":100,\"mean_relative_error\":{mre},\"coverage\":{coverage}}}"
+        )
+    }
+
+    #[test]
+    fn ops_13_mp_ops_decay_subcommand_reports_verdict() {
+        let dir = std::env::temp_dir().join(format!("mpops13-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let trend = dir.join("band_accuracy.jsonl");
+
+        // 8 healthy weeks (94% coverage, 2% MRE) + 4 collapsed weeks (25%
+        // coverage, 12% MRE): trailing 4-wk mean 0.25 < half of 12-wk mean
+        // 0.71, MRE 0.12 > double 0.053 — decayed.
+        let mut lines = (1..=8)
+            .map(|w| trend_line(w, 0.94, 0.02))
+            .collect::<Vec<_>>();
+        lines.extend((9..=12).map(|w| trend_line(w, 0.25, 0.12)));
+        std::fs::write(&trend, lines.join("\n") + "\n").unwrap();
+        let out = cmd_band_accuracy_decay(&["--trend".into(), trend.to_string_lossy().into()])
+            .expect("decayed verdict");
+        assert!(out.contains("\"decayed\":true"), "{out}");
+        assert!(out.contains("\"id\":\"band-accuracy-decay\""), "{out}");
+        assert!(out.contains("\"severity\":\"P3\""), "{out}");
+
+        // Steady healthy trend ⇒ no alert.
+        let healthy = (1..=12)
+            .map(|w| trend_line(w, 0.94, 0.02))
+            .collect::<Vec<_>>();
+        std::fs::write(&trend, healthy.join("\n") + "\n").unwrap();
+        let out = cmd_band_accuracy_decay(&["--trend".into(), trend.to_string_lossy().into()])
+            .expect("healthy verdict");
+        assert!(out.contains("\"decayed\":false"), "{out}");
+
+        // Missing journal (study not run yet) ⇒ no-data month, not an error.
+        let out = cmd_band_accuracy_decay(&[
+            "--trend".into(),
+            dir.join("nope.jsonl").to_string_lossy().into(),
+        ])
+        .expect("missing journal verdict");
+        assert!(out.contains("\"decayed\":false"), "{out}");
+
+        // Corrupt journal ⇒ fail closed (CONV-8), never a fabricated verdict.
+        std::fs::write(&trend, "not json\n").unwrap();
+        let err = cmd_band_accuracy_decay(&["--trend".into(), trend.to_string_lossy().into()])
+            .expect_err("corrupt journal must fail");
+        assert!(err.contains("line 1"), "error names the line: {err}");
+
+        // Bad --dedupe-ns values are rejected, not silently absorbed.
+        let bad = cmd_band_accuracy_decay(&[
+            "--trend".into(),
+            trend.to_string_lossy().into(),
+            "--dedupe-ns".into(),
+            "abc".into(),
+        ])
+        .expect_err("non-integer dedupe must fail");
+        assert!(bad.contains("must be an integer"), "{bad}");
+        let zero = cmd_band_accuracy_decay(&[
+            "--trend".into(),
+            trend.to_string_lossy().into(),
+            "--dedupe-ns".into(),
+            "0".into(),
+        ])
+        .expect_err("non-positive dedupe must fail");
+        assert!(zero.contains("must be positive"), "{zero}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

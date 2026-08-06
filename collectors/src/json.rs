@@ -73,12 +73,18 @@ pub fn parse_pair_levels(v: Option<&Value>) -> Result<Levels, NormError> {
     Ok(out)
 }
 
-fn pair_num(v: &Value) -> Option<f64> {
+/// Read a number from a JSON string or number (public — used by venues with
+/// `[action, price, amount]` level shapes, e.g. Deribit book deltas).
+pub fn pair_num_like(v: &Value) -> Option<f64> {
     match v {
         Value::String(s) => s.parse().ok(),
         Value::Number(n) => n.as_f64(),
         _ => None,
     }
+}
+
+fn pair_num(v: &Value) -> Option<f64> {
+    pair_num_like(v)
 }
 
 /// Parse `[{"price":..,"qty":..}, ...]` object levels. Skip invalid levels.

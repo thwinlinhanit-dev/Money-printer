@@ -1,0 +1,196 @@
+//! Shared helper utilities for the collector binaries (mp-collector, mp-whale,
+//! mp-macro). Pure std — no network stack, so any binary can use them.
+//! Wall-clock reads here are binary-edge only (recv stamping, rotation,
+//! heartbeats) — never decision-path values (PD-3/CONV-5).
+
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Value of a CLI flag `--name <value>`; `None` if absent.
+pub fn flag(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned())
+}
+
+/// True when `--name` is present as a bare switch.
+pub fn has_flag(args: &[String], name: &str) -> bool {
+    args.iter().any(|a| a == name)
+}
+
+/// `--check-config` (CONV-18): validate config and exit 0; otherwise exit 2.
+/// Call when `--check-config` is present, AFTER the config has been parsed.
+pub fn check_config_exit() -> ! {
+    eprintln!("config OK");
+    std::process::exit(0);
+}
+
+/// `--version` (CONV-18): print the embedded git SHA (or a fallback) and exit.
+pub fn version_exit() -> ! {
+    let sha = option_env!("GIT_SHA").unwrap_or("unknown").to_string();
+    let sha = if sha.is_empty() {
+        "unknown".into()
+    } else {
+        sha
+    };
+    println!("{} {sha}", env!("CARGO_PKG_VERSION"));
+    std::process::exit(0);
+}
+
+/// Current UTC date as `YYYYMMDD` (log rotation key). Pure arithmetic — no
+/// chrono dependency, exact for the Gregorian calendar.
+pub fn utc_date_str() -> String {
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = d / 86400;
+    let mut y = 1970i64;
+    let mut rem = days as i64;
+    loop {
+        let days_yr = if is_leap(y) { 366 } else { 365 };
+        if rem < days_yr {
+            break;
+        }
+        rem -= days_yr;
+        y += 1;
+    }
+    let months = [
+        31,
+        if is_leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0usize;
+    while m < 12 && rem >= months[m] {
+        rem -= months[m];
+        m += 1;
+    }
+    format!("{:04}{:02}{:02}", y, m + 1, rem + 1)
+}
+
+fn is_leap(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+/// Wall clock as ns — recv stamping / timers at the binary edge only.
+pub fn now_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64
+}
+
+/// Exclusive create/open of a lock file (platform-specific; see
+/// [`InstanceLock`]).
+fn exclusive_lock_file(path: &Path) -> io::Result<File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // share_mode(0) = exclusive; second process gets ERROR_SHARING_VIOLATION.
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(0)
+            .open(path)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(path)
+        {
+            Ok(f) => Ok(f),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "lock file exists — another collector is running, or a stale \
+                 lock remains after a crash (delete the .lock_* file if sure)",
+            )),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        OpenOptions::new().write(true).create_new(true).open(path)
+    }
+}
+
+/// Process-lifetime exclusive lock so two collectors cannot write the same
+/// log (one process owns one recording). Held open for the whole run.
+pub struct InstanceLock {
+    _file: File,
+    path: PathBuf,
+}
+
+impl InstanceLock {
+    pub fn acquire(raw_dir: &Path, name: &str) -> io::Result<Self> {
+        std::fs::create_dir_all(raw_dir)?;
+        let path = raw_dir.join(format!(".lock_{name}"));
+        let mut file = exclusive_lock_file(&path).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "another collector already owns {name} (lock {}): {e}",
+                    path.display()
+                ),
+            )
+        })?;
+        let _ = writeln!(file, "pid={} name={name}", std::process::id());
+        let _ = file.flush();
+        Ok(Self { _file: file, path })
+    }
+}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        // Best-effort cleanup; exclusive handle release is the real unlock.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// PID file for systemd/monitoring; removed on clean exit (COL-18/19).
+pub struct PidFile {
+    path: PathBuf,
+}
+
+impl PidFile {
+    pub fn write(raw_dir: &Path, name: &str) -> io::Result<Self> {
+        let path = raw_dir.join(format!("mp-collector-{name}.pid"));
+        std::fs::write(&path, format!("{}\n", std::process::id()))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for PidFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Write/refresh a heartbeat file (every `interval`, per loop edge).
+pub fn touch_heartbeat(raw_dir: &Path, name: &str) {
+    let path = raw_dir.join(format!("mp-collector-{name}.heartbeat"));
+    let ts_sec = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let _ = std::fs::write(
+        path,
+        format!("ts={ts_sec} pid={} name={name}\n", std::process::id()),
+    );
+}

@@ -15,7 +15,7 @@ path = "src/lib.rs"
 # Live public market-data WebSocket transport (tokio + tokio-tungstenite).
 # Off by default so the pure normalization/logic builds with no network stack.
 # PD-1: public data only — this transport never sends orders or auth.
-live-ws = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:url", "dep:rustls"]
+live-ws = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:url", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 # Live HTTP client for REST snapshot fetches (spec 020). Separate from live-ws
 # so snapshot fetch can be added independently.
 live-http = ["dep:reqwest"]
@@ -31,10 +31,15 @@ smallvec.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"], optional = true }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
 futures-util = { version = "0.3", optional = true }
 url = { version = "2", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true

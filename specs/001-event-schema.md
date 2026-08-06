@@ -17,7 +17,7 @@ Every event is wrapped in:
 | field | type | notes |
 |---|---|---|
 | `schema_ver` | u16 | starts at 1 (CONV-20) |
-| `venue` | enum `Venue` | `BinanceFutures, Bybit, Okx, Hyperliquid, Coinbase, KrakenFutures, …` |
+| `venue` | enum `Venue` | `BinanceFutures, Bybit, Okx, Hyperliquid, Coinbase, KrakenFutures, Deribit, Fred` |
 | `symbol` | `SymbolId` (u32) | interned; string form in symbol table only |
 | `exch_ts_ns` | i64 | exchange-reported time (0 if venue omits) |
 | `recv_ts_ns` | i64 | local receive time, from `WallClock` at socket read |
@@ -38,7 +38,20 @@ OpenInterest { oi_contracts: f64, oi_notional: f64 /*NaN if absent*/ }
 Liquidation  { price: f64, qty: f64, side: Side /*side being liquidated*/ }
 IndexPrice   { index: f64 }
 Status       { kind: StatusKind /*Connected|Disconnected|GapDetected|
-               Throttled|VenueHalt|Stale*/, detail: SmallString }
+               Throttled|VenueHalt|Stale|BackpressureDrop{dropped}*/, detail: SmallString }
+
+— schema 2→3 additions (spec 028/030/031, append-only — see Decisions) —
+WhalePosition { address: String /*opaque 0x id*/, size: f64 /*signed*/, entry: f64,
+                leverage: f64, liq_price: f64 /*NaN if null*/ }
+MacroPoint    { series_id: String, value: f64, date: i64 /*UTC midnight ns*/ }
+OptionTrade   { leg: OptionLeg, price: f64, qty: f64, side: Side, trade_id: u64 }
+OptionBook    { leg: OptionLeg, bids: Levels, asks: Levels, change_id: u64,
+                is_snapshot: bool }
+OptionTicker  { leg: OptionLeg, mark_iv: f64, mark_price: f64, underlying_price: f64,
+                open_interest: f64, greeks: Option<OptionGreeks> }
+
+OptionLeg = { underlying: String, strike: f64, expiry_ts_ns: i64, kind: Call|Put }
+OptionGreeks = { delta, gamma, theta, vega: f64 }
 ```
 
 `Side = Buy | Sell`. Status events flow through the same pipe: gaps and
@@ -112,6 +125,16 @@ downstream), never block the producer.
   schema-1 frames (`EnvelopeV1` layout, provenance synthesized empty) so
   historical recordings stay readable; writes always stamp the current
   version.  See spec 024 Decisions for the promotion policy.
+- 2026-08-05 (spec 028/030/031, owner sign-off): `SCHEMA_VER` 2→3, APPEND-ONLY
+  (CONV-20 — old variant indices unchanged, so schema-2 frames stay readable):
+  `Venue::{Deribit, Fred}` appended; `InstrumentKind::TradFiSynthetic` added
+  (HIP-3 macro metadata, spec 030 MAC-1); new variants `WhalePosition`
+  (028 WHL-2), `MacroPoint` (030 MAC-3),  `OptionTrade`/`OptionBook`/
+  `OptionTicker` + `OptionLeg`/`OptionGreeks` types (031 OPT-2). Because the
+  bump only *appended* enum variants (bincode maps variants by index, and the
+  envelope layout never changed), schema-2 frames decode with the current
+  types — no legacy `EnvelopeV2` struct is needed; proven by a golden compat
+  test. Writes always stamp the current version.
 
 ## Open questions
 - None.

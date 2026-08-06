@@ -3,8 +3,9 @@
 
 use mp_core::Venue;
 use mp_ops::{
-    Alert, AlertRouter, Benchmark, Channel, CostBreakdown, DeadMan, FunnelEvent, KillLatch,
-    LatchScope, MonthlyReport, QuietHours, RouteOutcome, Severity, StrategyRow, TrackingRow,
+    Alert, AlertRouter, BandAccuracyRow, Benchmark, Channel, CostBreakdown, DeadMan, FunnelEvent,
+    KillLatch, LatchScope, MonthlyReport, QuietHours, RouteOutcome, Severity, StrategyRow,
+    TrackingRow,
 };
 
 const S: i64 = 1_000_000_000; // 1s in ns
@@ -176,6 +177,20 @@ fn fixture_report() -> MonthlyReport {
             to_stage: "shadow".to_string(),
             demotion: false,
         }],
+        band_accuracy: vec![
+            BandAccuracyRow {
+                week: "2026-W25".to_string(),
+                observations: 142,
+                mean_relative_error: 0.0214,
+                coverage: 0.936,
+            },
+            BandAccuracyRow {
+                week: "2026-W26".to_string(),
+                observations: 98,
+                mean_relative_error: 0.0198,
+                coverage: 0.948,
+            },
+        ],
         benchmark: Benchmark {
             book_return: 0.031,
             btc_hold_return: 0.088,
@@ -193,6 +208,7 @@ fn ops_6_report_has_all_sections_and_benchmark_row() {
         "## Tracking Error",
         "## Cost Breakdown",
         "## Funnel Transitions & Kills",
+        "## Whale Band Accuracy (RES-4)",
         "## Benchmark",
     ] {
         assert!(md.contains(header), "missing section: {header}");
@@ -212,12 +228,99 @@ fn ops_6_report_numbers_are_grounded_not_invented() {
     assert!(md.contains("+3.10%")); // blended/net return
     assert!(md.contains("-1.20%")); // max drawdown
     assert!(md.contains("-0.90%")); // tracking error
-                                    // Empty inputs render explicit "no data", never a blank cell.
+                                    // RES-4 trend numbers render exactly as loaded from band_accuracy.jsonl.
+    assert!(md.contains("| 2026-W25 | 142 | 2.14% | 93.6% |"));
+    assert!(md.contains("| 2026-W26 | 98 | 1.98% | 94.8% |"));
+    // Empty inputs render explicit "no data", never a blank cell.
     let mut empty = fixture_report();
     empty.strategies.clear();
     empty.tracking.clear();
+    empty.band_accuracy.clear();
     let md2 = empty.render_markdown();
     assert!(md2.contains("_no data_"));
+    assert!(md2.contains("## Whale Band Accuracy (RES-4)"));
+}
+
+#[test]
+fn ops_6_band_accuracy_trend_loads_from_jsonl_sorted_and_grounded() {
+    // The EXACT journal shape `run_band_accuracy.py` appends (sort_keys=True:
+    // week/run_id/n/mean_relative_error/coverage/config_hash) — written out
+    // of order on disk, so the loader must sort by ISO week.
+    let dir = std::env::temp_dir().join(format!("mpba6-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("band_accuracy.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            "{\"week\":\"2026-W31\",\"run_id\":\"01JBA6TEST0000000000000000\",\"n\":98,\"mean_relative_error\":0.0198,\"coverage\":0.948,\"config_hash\":\"abc123\"}\n",
+            "{\"week\":\"2026-W30\",\"run_id\":\"01JBA5TEST0000000000000000\",\"n\":142,\"mean_relative_error\":0.0214,\"coverage\":0.936,\"config_hash\":\"abc123\"}\n",
+        ),
+    )
+    .unwrap();
+
+    let rows = mp_ops::load_band_accuracy_trend(&path).expect("load trend");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].week, "2026-W30", "rows sorted by ISO week");
+    assert_eq!(rows[0].observations, 142);
+    assert!((rows[0].mean_relative_error - 0.0214).abs() < 1e-12);
+    assert!((rows[0].coverage - 0.936).abs() < 1e-12);
+    assert_eq!(rows[1].week, "2026-W31");
+    assert_eq!(rows[1].observations, 98);
+    assert!((rows[1].mean_relative_error - 0.0198).abs() < 1e-12);
+
+    // Rendered into the report, the numbers appear exactly as loaded.
+    let mut r = fixture_report();
+    r.band_accuracy = rows;
+    let md = r.render_markdown();
+    assert!(md.contains("## Whale Band Accuracy (RES-4)"));
+    assert!(md.contains("| 2026-W30 | 142 | 2.14% | 93.6% |"));
+    assert!(md.contains("| 2026-W31 | 98 | 1.98% | 94.8% |"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_6_band_accuracy_trend_fails_closed_on_corruption_and_missing_is_no_data() {
+    // A corrupt line fails the whole load (CONV-8), naming the line — evidence
+    // corruption must never become a silently dropped graded week.
+    let dir = std::env::temp_dir().join(format!("mpba6b-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("band_accuracy.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            "{\"week\":\"2026-W30\",\"n\":142,\"mean_relative_error\":0.0214,\"coverage\":0.936}\n",
+            "not json\n",
+        ),
+    )
+    .unwrap();
+    let err = mp_ops::load_band_accuracy_trend(&path).expect_err("corrupt line must fail");
+    assert!(
+        err.contains("line 2"),
+        "error names the corrupt line: {err}"
+    );
+
+    // A present-but-type-wrong week also fails closed (coverage out of [0,1]).
+    std::fs::write(
+        &path,
+        "{\"week\":\"2026-W30\",\"n\":142,\"mean_relative_error\":0.0214,\"coverage\":1.7}\n",
+    )
+    .unwrap();
+    assert!(mp_ops::load_band_accuracy_trend(&path).is_err());
+
+    // A missing journal (study not run yet) is a "no data" month, not an
+    // error (RES-5) — and the section renders the honest empty line.
+    let missing = dir.join("nope.jsonl");
+    assert!(mp_ops::load_band_accuracy_trend(&missing)
+        .expect("missing journal is a no-data month")
+        .is_empty());
+    let mut empty = fixture_report();
+    empty.band_accuracy.clear();
+    assert!(empty
+        .render_markdown()
+        .contains("| _no data_ | — | — | — |"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Audit bug 3: all dead-man alerts share the id "process-deadman", and the
@@ -529,6 +632,269 @@ fn ops_5_restore_drill_restores_a_backup_and_verifies() {
         "missing journal/ must fail the drill"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- OPS-13: weekly band-accuracy drift/decay watch ------------------------
+
+/// A flat trend of `weeks` graded rows numbered 2026-W01.. — the caller
+/// overrides the trailing weeks for a decay signature.
+fn trend_rows(weeks: usize, coverage: f64, mre: f64) -> Vec<BandAccuracyRow> {
+    (0..weeks)
+        .map(|i| BandAccuracyRow {
+            week: format!("2026-W{:02}", i + 1),
+            observations: 100,
+            mean_relative_error: mre,
+            coverage,
+        })
+        .collect()
+}
+
+#[test]
+fn ops_13_band_accuracy_decay_alerts_on_sustained_quality_loss() {
+    // 8 healthy weeks (94% coverage, 2.0% MRE) then 4 degraded weeks: coverage
+    // 0.45/0.40/0.30/0.25 (trailing mean 0.350 < half of 0.940), MRE
+    // 0.06/0.08/0.10/0.12 (trailing mean 0.090 > double 0.020) — both metrics
+    // flag under the RES-3 trailing-window semantics (OPS-13).
+    let mut rows = trend_rows(8, 0.94, 0.020);
+    for (i, (cov, mre)) in [(0.45, 0.06), (0.40, 0.08), (0.30, 0.10), (0.25, 0.12)]
+        .into_iter()
+        .enumerate()
+    {
+        rows.push(BandAccuracyRow {
+            week: format!("2026-W{:02}", 9 + i),
+            observations: 100,
+            mean_relative_error: mre,
+            coverage: cov,
+        });
+    }
+    let alert =
+        mp_ops::band_accuracy_decay_alert(&rows, 7 * 24 * 3600 * S).expect("decay must fire");
+    assert_eq!(alert.id, "band-accuracy-decay");
+    assert_eq!(alert.severity, Severity::P3);
+    assert_eq!(alert.runbook, "ops/runbooks/band-accuracy-decay.md");
+    assert!(alert.detail.contains("coverage trailing 4-wk mean 0.350"));
+    assert!(alert.detail.contains("MRE trailing 4-wk mean 0.090"));
+
+    // A P3 routes through the router (daytime ⇒ sent on the quiet channel).
+    let mut router = AlertRouter::new(None);
+    assert!(matches!(
+        router.route(&alert, 12 * 60 * MIN),
+        RouteOutcome::Sent(_)
+    ));
+}
+
+#[test]
+fn ops_13_band_accuracy_decay_ignores_healthy_and_young_trends() {
+    // Steady healthy trend ⇒ no flag.
+    assert!(mp_ops::band_accuracy_decay_alert(&trend_rows(12, 0.94, 0.020), MIN).is_none());
+    // < 12 graded weeks ⇒ not enough history (RES-3).
+    assert!(mp_ops::band_accuracy_decay_alert(&trend_rows(11, 0.94, 0.020), MIN).is_none());
+    // A grade that was never good (baseline coverage 0.40 < 0.5) is not
+    // "decay" — even when the trailing weeks collapse further.
+    let mut never_good = trend_rows(8, 0.40, 0.020);
+    for i in 0..4 {
+        never_good.push(BandAccuracyRow {
+            week: format!("2026-W{:02}", 9 + i),
+            observations: 100,
+            mean_relative_error: 0.02,
+            coverage: 0.10,
+        });
+    }
+    assert!(mp_ops::band_accuracy_decay_alert(&never_good, MIN).is_none());
+    // Empty/absent trend ⇒ no flag (nothing to decay).
+    assert!(mp_ops::band_accuracy_decay_alert(&[], MIN).is_none());
+}
+
+#[test]
+fn ops_13_weekly_wrapper_invokes_decay_check_after_study() {
+    // After the study, `run_whale_study_weekly.sh` runs `mp-ops
+    // band-accuracy-decay --trend <out>/band_accuracy.jsonl` on the freshly
+    // updated journal (OPS-13). A stub MP_OPS_CMD proves the wiring; a
+    // missing binary skips gracefully — best-effort P3, never a study failure.
+    let data = std::env::temp_dir().join(format!("mpops13d-{}", std::process::id()));
+    let out = std::env::temp_dir().join(format!("mpops13o-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("20260803_hyperliquid_positions.log"), "").unwrap();
+    std::fs::write(data.join("20260803_hyperliquid_BTC.log"), "").unwrap();
+    let runs = data.join("runs");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("scripts/run_whale_study_weekly.sh");
+
+    // Hook present: the wrapper invokes the check with the trend path.
+    let hook = std::process::Command::new("bash")
+        .args(["-c", &format!(
+            "MP_DATA_DIR='{}' MP_OUT_DIR='{}' MP_RUNS_DIR='{}' MP_PYTHON=/bin/echo MP_OPS_CMD=/bin/echo MP_REPO_DIR='{}' '{}'",
+            wsl(&data), wsl(&out), wsl(&runs), wsl(&data), wsl(&script)
+        )])
+        .output()
+        .expect("run wrapper (decay hook)");
+    assert_eq!(
+        hook.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&hook.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&hook.stdout);
+    assert!(
+        stdout.contains("band-accuracy-decay") && stdout.contains("--trend"),
+        "decay check invoked: {stdout}"
+    );
+    assert!(
+        stdout.contains("band_accuracy.jsonl"),
+        "trend journal wired: {stdout}"
+    );
+
+    // Hook absent: best-effort skip, the study's exit 0 still stands.
+    let skip = std::process::Command::new("bash")
+        .args(["-c", &format!(
+            "MP_DATA_DIR='{}' MP_OUT_DIR='{}' MP_RUNS_DIR='{}' MP_PYTHON=/bin/echo MP_OPS_CMD=/opt/mp/does-not-exist MP_REPO_DIR='{}' '{}'",
+            wsl(&data), wsl(&out), wsl(&runs), wsl(&data), wsl(&script)
+        )])
+        .output()
+        .expect("run wrapper (decay skip)");
+    assert_eq!(
+        skip.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&skip.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&skip.stdout).contains("skipping the band-accuracy decay check")
+    );
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+// ---- LIQ-10 (spec 029): weekly RES-4 whale-study timer ---------------------
+
+#[test]
+fn liq_10_whale_study_timer_skips_without_logs_and_journals_runs() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    // The weekly schedule + skip gate exist and are shaped right (LIQ-10).
+    let service = std::fs::read_to_string(root.join("systemd/whale-study.service"))
+        .expect("whale-study.service");
+    assert!(
+        service.contains(
+            "ConditionPathExists=/opt/money-printer/data/raw/*_hyperliquid_positions.log"
+        ),
+        "LIQ-10: skip gate on the spec 028 census log (WHL-6 pattern)"
+    );
+    assert!(
+        service.contains("run_whale_study_weekly.sh"),
+        "LIQ-10: the service runs the weekly wrapper"
+    );
+    assert!(service.contains("ProtectSystem=strict"));
+    assert!(
+        service.contains(
+            "ReadWritePaths=/opt/money-printer/runs /opt/money-printer/research/band_accuracy"
+        ),
+        "LIQ-10: the study writes only its journals (RES-7/W-6)"
+    );
+    assert!(
+        service.contains("ReadOnlyPaths=/opt/money-printer/data/raw"),
+        "LIQ-10: recorded data is read-only to the study"
+    );
+    assert!(service.contains("User=printer"));
+
+    let timer =
+        std::fs::read_to_string(root.join("systemd/whale-study.timer")).expect("whale-study.timer");
+    assert!(timer.contains("OnCalendar=Tue *-*-* 06:30:00 UTC"));
+    assert!(
+        timer.contains("Persistent=true"),
+        "LIQ-10: missed fires are caught up"
+    );
+
+    let script = root.join("scripts/run_whale_study_weekly.sh");
+    assert!(
+        script.exists(),
+        "LIQ-10: wrapper script is checked in (OPS-8)"
+    );
+    let text = std::fs::read_to_string(&script).unwrap();
+    assert!(
+        text.contains("--runs-dir"),
+        "LIQ-10: journals to runs/index.jsonl"
+    );
+    assert!(
+        text.contains("_hyperliquid_positions.log"),
+        "LIQ-10: gated on the mp-whale census log"
+    );
+
+    // Skip-not-fail: no positions log ⇒ exit 0, nothing journaled.
+    let empty = std::env::temp_dir().join(format!("mpli10-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&empty);
+    std::fs::create_dir_all(&empty).unwrap();
+    // `Command::new("bash")` resolves to WSL bash on this box, so paths must
+    // be converted via `wsl()` (same as the restore-drill tests above).
+    let skip = std::process::Command::new("bash")
+        .args([
+            "-c",
+            &format!(
+                "MP_DATA_DIR='{}' MP_REPO_DIR='{}' '{}'",
+                wsl(&empty),
+                wsl(&empty),
+                wsl(&script)
+            ),
+        ])
+        .output()
+        .expect("run wrapper (skip)");
+    assert_eq!(
+        skip.status.code(),
+        Some(0),
+        "no positions log ⇒ clean skip; stderr: {}",
+        String::from_utf8_lossy(&skip.stderr)
+    );
+    assert!(String::from_utf8_lossy(&skip.stdout).contains("skipping"));
+    assert!(!empty.join("index.jsonl").exists());
+
+    // Wiring: fresh logs in the window reach the job as --log args, with
+    // --runs-dir + a stamped git sha (echo stands in for the python job).
+    let data = std::env::temp_dir().join(format!("mpli10d-{}", std::process::id()));
+    let out = std::env::temp_dir().join(format!("mpli10o-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("20260803_hyperliquid_positions.log"), "").unwrap();
+    std::fs::write(data.join("20260803_hyperliquid_BTC.log"), "").unwrap();
+    let runs = data.join("runs");
+    let wire = std::process::Command::new("bash")
+        .args(["-c", &format!(
+            "MP_DATA_DIR='{}' MP_OUT_DIR='{}' MP_RUNS_DIR='{}' MP_PYTHON=/bin/echo MP_REPO_DIR='{}' '{}'",
+            wsl(&data), wsl(&out), wsl(&runs), wsl(&data), wsl(&script)
+        )])
+        .output()
+        .expect("run wrapper (wired)");
+    assert_eq!(
+        wire.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&wire.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&wire.stdout);
+    assert!(
+        stdout.contains("--log"),
+        "wrapper passes discovered logs: {stdout}"
+    );
+    assert!(
+        stdout.contains("hyperliquid_positions.log"),
+        "positions log wired: {stdout}"
+    );
+    assert!(
+        stdout.contains("hyperliquid_BTC.log"),
+        "market log wired: {stdout}"
+    );
+    assert!(
+        stdout.contains("--runs-dir") && stdout.contains("runs"),
+        "runs dir wired: {stdout}"
+    );
+    assert!(
+        stdout.contains("--git-sha unknown"),
+        "git sha stamped (unknown without a repo): {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&empty);
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&out);
 }
 
 #[test]

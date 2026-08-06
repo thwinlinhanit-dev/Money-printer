@@ -11,6 +11,13 @@ description = "Parquet cold store, quality manifests, dataset reader — spec 00
 name = "mp_storage"
 path = "src/lib.rs"
 
+[features]
+# Live downloads from data.binance.vision (spec 027 HBS-1/HBS-8). Off by
+# default so the offline historical-bootstrap core (HBS-2..7, HBS-9, HBS-10)
+# builds with no network stack. Owner-approved 2026-08-05 (CLAUDE.md safety
+# table: new external egress host) — Binance's public no-auth archive.
+live-http = ["dep:reqwest", "dep:zip"]
+
 [dependencies]
 mp-core = { path = "../core" }
 serde.workspace = true
@@ -19,6 +26,9 @@ thiserror.workspace = true
 tracing.workspace = true
 arrow = { version = "53", default-features = false }
 parquet = { version = "53", default-features = false, features = ["arrow", "zstd"] }
+toml.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"], optional = true }
+zip = { version = "0.6", default-features = false, features = ["deflate", "time"], optional = true }
 
 [dev-dependencies]
 bincode.workspace = true

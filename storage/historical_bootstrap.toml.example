@@ -1,0 +1,32 @@
+# historical_bootstrap.toml.example — Historical Bootstrap config (spec 027, HBS-9).
+# Real config lives OUTSIDE the repo (CONV-16). Validate:
+#   cargo run -p mp-storage --bin mp-bootstrap -- --config historical_bootstrap.toml --check-config
+#
+# Two source modes:
+#   1. --input <aggTrades.csv>  — local CSV, no network (any build).
+#   2. default                  — live download from data.binance.vision (HBS-1;
+#      owner-approved 2026-08-05). Needs the `live-http` feature:
+#        cargo run -p mp-storage --features live-http --bin mp-bootstrap -- \
+#            --symbol BTCUSDT --start-date 2026-01-01 --end-date 2026-01-31
+
+# "aggregated" (default): Binance aggTrades are bucketed, so backtests on this
+# data are upper-bound on maker fills (SIM-2 trade-print rule).
+fidelity = "aggregated"
+
+# ---- Live-archive download tuning (HBS-1/HBS-8; inert for --input mode) ----
+
+# Max archive downloads per second (default 1 — the archive has no formal rate
+# limit, but bulk backfill should stay polite).
+download_rate_per_sec = 1.0
+
+# Retries for transient HTTP faults (5xx/transport); 404 is NOT retried.
+download_max_retries = 3
+
+# Exponential-backoff floor/ceiling for retries, ms (deterministic jitter).
+download_backoff_base_ms = 1000
+download_backoff_cap_ms = 30000
+
+# Archive base URL (override only for mirrors/local fixtures) and data path.
+# `futures/um` = USDⓈ-M perps — matches the cold/historical writer's venue.
+download_base_url = "https://data.binance.vision"
+download_data_class = "futures/um"

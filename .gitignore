@@ -13,6 +13,7 @@ secrets*
 
 # Recorded market data & run artifacts — W-6 (never commit data)
 /data
+/data-migrated
 /raw
 /cold
 /warm
@@ -31,8 +32,10 @@ stdout.txt
 stderr.txt
 collector_stdout.log
 collector_stderr.log
---help
 .omx/
+.pytest_cache/
 __pycache__/
 *.pyc
 *.pdb
+research/py_err.txt
+research/py_out.txt

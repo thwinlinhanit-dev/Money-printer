@@ -40,6 +40,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             MarketEvent::Liquidation { .. } => "Liquidation",
             MarketEvent::IndexPrice { .. } => "IndexPrice",
             MarketEvent::Status { .. } => "Status",
+            MarketEvent::WhalePosition { .. } => "WhalePosition",
+            MarketEvent::MacroPoint { .. } => "MacroPoint",
+            MarketEvent::OptionTrade { .. } => "OptionTrade",
+            MarketEvent::OptionBook { .. } => "OptionBook",
+            MarketEvent::OptionTicker { .. } => "OptionTicker",
         };
 
         *type_counts.entry(type_name.to_string()).or_insert(0) += 1;

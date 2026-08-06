@@ -7,16 +7,20 @@
 
 #[cfg(feature = "live-ws")]
 mod inner {
+    use mp_collectors::binutil::{self, InstanceLock, PidFile};
     use mp_collectors::ws::{endpoints, WsEndpoint, WsTransport};
     use mp_collectors::{
         Backoff, BackpressurePolicy, BinanceNormalizer, Collector, CollectorConfig, DriveOutcome,
-        Normalizer, RateBudget, Staleness,
+        HyperliquidNormalizer, Normalizer, RateBudget, Staleness, TeeTransport, Transport,
     };
     use mp_core::log::EventLogWriter;
-    use mp_core::{EventEnvelope, EventProvenance, MarketEvent, SnapshotSource, StatusKind, Venue};
+    use mp_core::{
+        EventEnvelope, EventProvenance, InstrumentKind, MarketEvent, SnapshotSource, StatusKind,
+        SymbolMeta, Venue,
+    };
     use serde::Deserialize;
     use std::fs::{File, OpenOptions};
-    use std::io::{self, Write};
+    use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -26,12 +30,6 @@ mod inner {
     /// reconnect (COL-2). Depth@100ms + markPrice@1s mean anything quiet
     /// longer than this is a dead subscription, not a slow venue.
     const STALE_AFTER_NS: i64 = 15_000_000_000;
-
-    fn flag(args: &[String], name: &str) -> Option<String> {
-        args.iter()
-            .position(|a| a == name)
-            .and_then(|i| args.get(i + 1).cloned())
-    }
 
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -44,6 +42,57 @@ mod inner {
         channel_capacity: usize,
         #[serde(default)]
         backpressure: Option<String>,
+        /// COL-25/27: `"ws"` (default) or `"rest"`. REST mode ingests trades
+        /// from `GET /fapi/v1/aggTrades` and drops WS aggTrade frames at the
+        /// normalizer — the documented recovery path when fstream silently
+        /// drops the trade stream (spec 024 incident 2026-08-04).
+        #[serde(default)]
+        trade_source: Option<String>,
+        /// COL-28: `"ws"` (default) or `"rest"`. REST mode ingests mark price
+        /// + funding from `GET /fapi/v1/premiumIndex` and drops WS
+        /// markPriceUpdate frames at the normalizer — the recovery path when
+        /// fstream silently drops the markPrice stream (spec 024 incident
+        /// 2026-08-04). Independent of `trade_source` so either stream can be
+        /// restored without disturbing the other.
+        #[serde(default)]
+        mark_source: Option<String>,
+        /// Egress proxy for the WS connection (spec 024 2026-08-04):
+        /// `http://host:port` (HTTP CONNECT) or `socks5://host:port`.  The
+        /// `MP_WS_PROXY` env var overrides this when set.  The proxy only
+        /// carries bytes — TLS is terminated against the venue, not the proxy.
+        #[serde(default)]
+        proxy: Option<String>,
+        /// Deribit options recorder (spec 031 OPT-7): margin currency, e.g.
+        /// "BTC" or "ETH". Used as the record's symbol + instrument universe.
+        #[serde(default)]
+        currency: Option<String>,
+        /// Deribit (spec 031 OPT-7): also subscribe ticker channels (mark IV
+        /// + greeks at record). Default off — bounds volume.
+        #[serde(default)]
+        record_ticker: Option<bool>,
+        /// Deribit (spec 031 OPT-7): instrument subscription filter bounds.
+        #[serde(default)]
+        instrument_filter: Option<DeribitFilterConfig>,
+        /// Deribit (spec 031 OPT-3): capture raw frames verbatim pre-parse to
+        /// `{data_dir}/raw/deribit/{date}/frames.ndjson`.
+        #[serde(default = "default_true")]
+        raw_capture: bool,
+        /// HIP-3 TradFi-synthetic coins for the hyperliquid venue (spec 030
+        /// MAC-1), e.g. ["xyz:XYZ100", "xyz:SP500"]. Recorded through the
+        /// existing hyperliquid normalizer with `asset_class: tradfi_synthetic`
+        /// metadata (InstrumentKind::TradFiSynthetic).
+        #[serde(default)]
+        hip3_symbols: Option<Vec<String>>,
+    }
+
+    /// Deribit instrument filter (spec 031 Decisions: near-expiry subset).
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DeribitFilterConfig {
+        #[serde(default = "default_max_instruments")]
+        max_instruments: usize,
+        #[serde(default = "default_expiry_window_days")]
+        expiry_window_days: u64,
     }
 
     fn default_data_dir() -> String {
@@ -52,9 +101,18 @@ mod inner {
     fn default_channel_capacity() -> usize {
         10_000
     }
+    fn default_true() -> bool {
+        true
+    }
+    fn default_max_instruments() -> usize {
+        200
+    }
+    fn default_expiry_window_days() -> u64 {
+        45
+    }
 
     fn config_from_args(args: &[String]) -> Result<FileConfig, String> {
-        if let Some(path) = flag(args, "--config") {
+        if let Some(path) = binutil::flag(args, "--config") {
             let text = std::fs::read_to_string(&path)
                 .map_err(|error| format!("read collector config {path}: {error}"))?;
             let config: FileConfig = toml::from_str(&text)
@@ -65,14 +123,34 @@ mod inner {
                         .into(),
                 );
             }
+            // MP_WS_PROXY env override applies on the config path too.
+            if let Ok(proxy) = std::env::var("MP_WS_PROXY") {
+                return Ok(FileConfig {
+                    proxy: Some(proxy),
+                    ..config
+                });
+            }
             return Ok(config);
         }
         Ok(FileConfig {
-            venue: flag(args, "--venue").unwrap_or_else(|| "binance".to_string()),
-            symbol: flag(args, "--symbol").unwrap_or_else(|| "BTCUSDT".to_string()),
+            venue: binutil::flag(args, "--venue").unwrap_or_else(|| "binance".to_string()),
+            symbol: binutil::flag(args, "--symbol").unwrap_or_else(|| "BTCUSDT".to_string()),
             data_dir: default_data_dir(),
             channel_capacity: default_channel_capacity(),
             backpressure: None,
+            trade_source: binutil::flag(args, "--trade-source"),
+            mark_source: binutil::flag(args, "--mark-source"),
+            proxy: std::env::var("MP_WS_PROXY").ok(),
+            currency: binutil::flag(args, "--currency"),
+            record_ticker: None,
+            instrument_filter: None,
+            raw_capture: default_true(),
+            hip3_symbols: binutil::flag(args, "--hip3-symbols").map(|s| {
+                s.split(',')
+                    .map(|c| c.trim().to_owned())
+                    .filter(|c| !c.is_empty())
+                    .collect()
+            }),
         })
     }
 
@@ -102,160 +180,6 @@ mod inner {
         .clone()
     }
 
-    /// PID file per spec 019 COL-18/19: `{data_dir}/mp-collector-{venue}.pid`
-    /// on this platform (Linux systemd target uses the same data-relative
-    /// path so operators find it next to the logs). Removed on clean exit.
-    struct PidFile {
-        path: PathBuf,
-    }
-
-    impl PidFile {
-        fn write(raw_dir: &Path, venue: &str) -> io::Result<Self> {
-            let path = raw_dir.join(format!("mp-collector-{venue}.pid"));
-            std::fs::write(&path, format!("{}\n", std::process::id()))?;
-            Ok(Self { path })
-        }
-    }
-
-    impl Drop for PidFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-
-    /// Process-lifetime exclusive lock so two collectors cannot write the same
-    /// `{venue}_{symbol}` log. Held open for the whole run; released on exit.
-    struct InstanceLock {
-        _file: File,
-        path: PathBuf,
-    }
-
-    impl InstanceLock {
-        fn acquire(raw_dir: &Path, venue: &str, symbol: &str) -> io::Result<Self> {
-            std::fs::create_dir_all(raw_dir)?;
-            let path = raw_dir.join(format!(".lock_{venue}_{symbol}"));
-            let mut file = exclusive_lock_file(&path).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "another mp-collector already owns {venue}/{symbol} \
-                         (lock {}): {e}",
-                        path.display()
-                    ),
-                )
-            })?;
-            let _ = writeln!(
-                file,
-                "pid={} venue={venue} symbol={symbol}",
-                std::process::id()
-            );
-            let _ = file.flush();
-            Ok(Self { _file: file, path })
-        }
-    }
-
-    impl Drop for InstanceLock {
-        fn drop(&mut self) {
-            // Best-effort cleanup; exclusive handle release is the real unlock.
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-
-    fn exclusive_lock_file(path: &Path) -> io::Result<File> {
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            // share_mode(0) = exclusive; second process gets ERROR_SHARING_VIOLATION.
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .share_mode(0)
-                .open(path)
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // O_EXCL|O_CREAT when missing; if exists, try open + fail if stale
-            // not recoverable without flock — remove stale only if create_new works
-            // after a failed exclusive create by rewriting via create_new on a
-            // temp and rename is racy. Prefer: open existing exclusive via
-            // flock(LOCK_EX|LOCK_NB) using libc when available; without libc,
-            // use create_new and refuse if the file already exists (operator
-            // deletes stale lock after crash).
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o644)
-                .open(path)
-            {
-                Ok(f) => Ok(f),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "lock file exists — another collector is running, or a stale \
-                     lock remains after a crash (delete the .lock_* file if sure)",
-                )),
-                Err(e) => Err(e),
-            }
-        }
-        #[cfg(not(any(windows, unix)))]
-        {
-            OpenOptions::new().write(true).create_new(true).open(path)
-        }
-    }
-
-    fn utc_date_str() -> String {
-        let d = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let days = d / 86400;
-        let mut y = 1970i64;
-        let mut rem = days as i64;
-        loop {
-            let days_yr = if is_leap(y) { 366 } else { 365 };
-            if rem < days_yr {
-                break;
-            }
-            rem -= days_yr;
-            y += 1;
-        }
-        let months = [
-            31,
-            if is_leap(y) { 29 } else { 28 },
-            31,
-            30,
-            31,
-            30,
-            31,
-            31,
-            30,
-            31,
-            30,
-            31,
-        ];
-        let mut m = 0usize;
-        while m < 12 && rem >= months[m] {
-            rem -= months[m];
-            m += 1;
-        }
-        format!("{:04}{:02}{:02}", y, m + 1, rem + 1)
-    }
-
-    fn is_leap(y: i64) -> bool {
-        (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
-    }
-
-    /// Wall-clock as ns for the binary edge: recv stamping, rate-budget
-    /// refill, watchdog timers — never a feature/decision value (PD-3).
-    fn now_ns() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as i64
-    }
-
     fn hl_coin(symbol: &str) -> String {
         symbol
             .trim_end_matches("USDT")
@@ -264,7 +188,35 @@ mod inner {
             .to_string()
     }
 
-    fn subscribe_for(venue: &str, symbol: &str) -> Vec<String> {
+    /// Open (append-only, W-6) the verbatim raw-frame capture file for a
+    /// connection: `{dir}/{date}/frames.ndjson` (spec 031 OPT-3).
+    fn open_raw_capture_file(dir: &Path, symbol: &str) -> io::Result<File> {
+        let day = dir.join(binutil::utc_date_str());
+        std::fs::create_dir_all(&day)?;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(day.join(format!("{symbol}_frames.ndjson")))
+    }
+
+    /// Hyperliquid channel set for one coin (trades + snapshot-only l2Book +
+    /// activeAssetCtx = mark/funding/OI). HIP-3 TradFi-synthetic coins get the
+    /// same channels (spec 030 MAC-1 — zero new code paths).
+    fn hl_channels(coin: &str) -> Vec<String> {
+        vec![
+            format!(
+                r#"{{"method":"subscribe","subscription":{{"type":"trades","coin":"{coin}"}}}}"#
+            ),
+            format!(
+                r#"{{"method":"subscribe","subscription":{{"type":"l2Book","coin":"{coin}"}}}}"#
+            ),
+            format!(
+                r#"{{"method":"subscribe","subscription":{{"type":"activeAssetCtx","coin":"{coin}"}}}}"#
+            ),
+        ]
+    }
+
+    fn subscribe_for(venue: &str, symbol: &str, hip3_symbols: &[String]) -> Vec<String> {
         match venue {
             "bybit" => vec![format!(
                 r#"{{"op":"subscribe","args":["publicTrade.{symbol}","tickers.{symbol}","liquidation.{symbol}"]}}"#
@@ -274,22 +226,20 @@ mod inner {
             "binance" => vec![],
             "hyperliquid" => {
                 let coin = hl_coin(symbol);
-                // Subscribe to all channels the normalizer supports
-                vec![
-                    format!(
-                        r#"{{"method":"subscribe","subscription":{{"type":"trades","coin":"{coin}"}}}}"#
-                    ),
-                    format!(
-                        r#"{{"method":"subscribe","subscription":{{"type":"l2Book","coin":"{coin}"}}}}"#
-                    ),
-                    format!(
-                        r#"{{"method":"subscribe","subscription":{{"type":"activeAssetCtx","coin":"{coin}"}}}}"#
-                    ),
-                ]
+                let mut subs = hl_channels(&coin);
+                for h in hip3_symbols {
+                    // HIP-3 coins carry the dex prefix in their venue name
+                    // (e.g. "xyz:XYZ100") — used verbatim in the subscription.
+                    subs.extend(hl_channels(h));
+                }
+                subs
             }
             "okx" => vec![format!(
                 r#"{{"op":"subscribe","args":[{{"channel":"trades","instId":"{symbol}"}}]}}"#
             )],
+            // Deribit subscriptions are computed dynamically in `Stream::new`
+            // (instrument discovery — spec 031).
+            "deribit" => vec![],
             _ => vec![],
         }
     }
@@ -311,6 +261,7 @@ mod inner {
             }
             "okx" => endpoints::OKX_PUBLIC.to_string(),
             "hyperliquid" => endpoints::HYPERLIQUID.to_string(),
+            "deribit" => endpoints::DERIBIT.to_string(),
             other => return Err(format!("unsupported venue: {other}")),
         })
     }
@@ -321,8 +272,27 @@ mod inner {
             "binance" => Venue::BinanceFutures,
             "okx" => Venue::Okx,
             "hyperliquid" => Venue::Hyperliquid,
+            "deribit" => Venue::Deribit,
             other => return Err(format!("unsupported venue: {other}")),
         })
+    }
+
+    /// Per-stream construction options (kept small — one process owns one
+    /// recording, so most venues use defaults).
+    #[derive(Debug, Clone, Default)]
+    struct StreamOpts {
+        /// HIP-3 TradFi-synthetic coins for the hyperliquid venue (spec 030
+        /// MAC-1); recorded with `InstrumentKind::TradFiSynthetic` metadata.
+        hip3_symbols: Vec<String>,
+        /// Deribit margin currency (spec 031 OPT-7), e.g. "BTC".
+        deribit_currency: Option<String>,
+        /// Deribit instrument subscription filter (OPT-7).
+        #[cfg(feature = "live-http")]
+        deribit_filter: mp_collectors::deribit::rest::InstrumentFilter,
+        /// Deribit: also subscribe ticker channels (OPT-7; default off).
+        deribit_record_ticker: bool,
+        /// Deribit raw-frame capture dir (OPT-3); `None` = no verbatim capture.
+        raw_capture_dir: Option<PathBuf>,
     }
 
     struct Stream {
@@ -333,13 +303,15 @@ mod inner {
         /// For Binance streams, the symbol name used to seed the book via REST.
         binance_symbol: Option<String>,
         collector: Collector<Box<dyn Normalizer>>,
-        transport: Option<WsTransport>,
+        transport: Option<Box<dyn Transport>>,
         backoff: Backoff,
         connection_id: u64,
         channel_capacity: usize,
         backpressure: BackpressurePolicy,
         /// COL-2 staleness watchdog (last `recv_ts_ns` of any valid event).
         staleness: Staleness,
+        /// Deribit verbatim raw-frame capture dir (spec 031 OPT-3/COL-9).
+        raw_capture_dir: Option<PathBuf>,
         /// COL-21 REST rate budget for snapshot reseeds (futures weights/min).
         #[cfg(feature = "live-http")]
         rest_budget: RateBudget,
@@ -350,6 +322,7 @@ mod inner {
     }
 
     impl Stream {
+        #[allow(clippy::too_many_arguments)]
         fn new(
             name: String,
             venue_str: &str,
@@ -357,28 +330,108 @@ mod inner {
             seed: u64,
             channel_capacity: usize,
             backpressure: BackpressurePolicy,
+            proxy: Option<String>,
+            opts: StreamOpts,
         ) -> Result<Self, String> {
             let venue = parse_venue(venue_str)?;
             let url = endpoint_for(venue_str, symbol)?;
-            let subscribe = subscribe_for(venue_str, symbol);
-            // Binance embeds streams in the URL (empty subscribe is OK).
-            if subscribe.is_empty() && venue_str != "binance" {
+            let mut subscribe = subscribe_for(venue_str, symbol, &opts.hip3_symbols);
+
+            // Deribit (spec 031): discover the near-expiry option instrument
+            // set via public REST and build the channel list (book + trades +
+            // optional ticker). Requires the live-http feature.
+            #[cfg(feature = "live-http")]
+            if venue_str == "deribit" {
+                let currency = opts
+                    .deribit_currency
+                    .as_deref()
+                    .unwrap_or("BTC")
+                    .to_uppercase();
+                let instruments =
+                    mp_collectors::deribit::rest::discover_option_instruments_blocking(
+                        &currency,
+                        &opts.deribit_filter,
+                        binutil::now_ns(),
+                    )?;
+                if instruments.is_empty() {
+                    return Err(format!(
+                        "deribit instrument discovery returned no instruments for {currency}"
+                    ));
+                }
+                tracing::info!(
+                    venue = %venue_str,
+                    currency = %currency,
+                    instruments = instruments.len(),
+                    "deribit instrument universe discovered"
+                );
+                let mut channels: Vec<String> = Vec::new();
+                for instr in &instruments {
+                    channels.push(format!("book.{instr}.10.100ms"));
+                    channels.push(format!("trades.{instr}.100ms"));
+                    if opts.deribit_record_ticker {
+                        channels.push(format!("ticker.{instr}.100ms"));
+                    }
+                }
+                subscribe = vec![serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "public/subscribe",
+                    "params": { "channels": channels },
+                })
+                .to_string()];
+            }
+            #[cfg(not(feature = "live-http"))]
+            if venue_str == "deribit" {
+                return Err(
+                    "deribit venue requires the live-http feature (instrument discovery)".into(),
+                );
+            }
+
+            // Binance embeds streams in the URL (empty subscribe is OK);
+            // Deribit subscribes via the computed JSON-RPC frame above.
+            if subscribe.is_empty() && venue_str != "binance" && venue_str != "deribit" {
                 return Err(format!("no subscribe frames for {venue_str}"));
             }
+
+            // Build the normalizer once so HIP-3 symbol seeding (spec 030
+            // MAC-1: asset_class = tradfi_synthetic metadata) survives into
+            // the collector.
+            let mut normalizer = mp_collectors::normalizer_for(venue);
+            if venue_str == "hyperliquid" && !opts.hip3_symbols.is_empty() {
+                if let Some(hl) = normalizer
+                    .as_any_mut()
+                    .and_then(|a| a.downcast_mut::<HyperliquidNormalizer>())
+                {
+                    for h in &opts.hip3_symbols {
+                        let coin = h.clone();
+                        hl.symbols_mut().intern(Venue::Hyperliquid, &coin, |id| {
+                            SymbolMeta::new(
+                                id,
+                                Venue::Hyperliquid,
+                                &coin,
+                                "",
+                                "",
+                                InstrumentKind::TradFiSynthetic,
+                                f64::NAN,
+                                f64::NAN,
+                                f64::NAN,
+                            )
+                        });
+                    }
+                }
+            }
+
             Ok(Self {
                 name,
                 symbol: symbol.to_owned(),
-                endpoint: WsEndpoint::new(url, subscribe),
+                endpoint: WsEndpoint::new(url, subscribe).with_proxy(proxy),
                 venue,
                 binance_symbol: if venue_str == "binance" {
                     Some(symbol.to_string())
                 } else {
                     None
                 },
-                collector: Collector::new(
-                    mp_collectors::normalizer_for(venue),
-                    CollectorConfig::default(),
-                ),
+                collector: Collector::new(normalizer, CollectorConfig::default()),
                 transport: None,
                 // 250ms base, 30s cap — COL-1 full-jitter backoff
                 backoff: Backoff::new(250, 30_000, seed),
@@ -386,8 +439,9 @@ mod inner {
                 channel_capacity,
                 backpressure,
                 staleness: Staleness::new(STALE_AFTER_NS),
+                raw_capture_dir: opts.raw_capture_dir,
                 #[cfg(feature = "live-http")]
-                rest_budget: RateBudget::binance_futures(now_ns()),
+                rest_budget: RateBudget::binance_futures(binutil::now_ns()),
                 #[cfg(feature = "live-http")]
                 next_reseed_at_ns: 0,
             })
@@ -407,6 +461,11 @@ mod inner {
                 MarketEvent::Liquidation { .. } => "liquidation",
                 MarketEvent::IndexPrice { .. } => "index_price",
                 MarketEvent::Status { .. } => "status",
+                MarketEvent::WhalePosition { .. } => "whale_positions",
+                MarketEvent::MacroPoint { .. } => "macro",
+                MarketEvent::OptionTrade { .. } => "option_trades",
+                MarketEvent::OptionBook { .. } => "option_books",
+                MarketEvent::OptionTicker { .. } => "option_tickers",
             };
             EventProvenance {
                 stream: stream.to_owned(),
@@ -440,7 +499,24 @@ mod inner {
                     tracing::info!(stream = %self.name, venue = ?self.venue, "connected");
                     self.backoff.reset();
                     self.connection_id = self.connection_id.saturating_add(1);
-                    self.transport = Some(t);
+                    // Deribit (spec 031 OPT-3/COL-9): tee raw frames verbatim
+                    // pre-parse for re-normalization after venue/schema drift.
+                    let transport: Box<dyn Transport> = if let Some(dir) = &self.raw_capture_dir {
+                        match open_raw_capture_file(dir, &self.symbol) {
+                            Ok(sink) => Box::new(TeeTransport::new(t, sink)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    stream = %self.name,
+                                    error = %e,
+                                    "raw capture unavailable; continuing without it"
+                                );
+                                Box::new(t)
+                            }
+                        }
+                    } else {
+                        Box::new(t)
+                    };
+                    self.transport = Some(transport);
 
                     // Seed Binance book from REST immediately after WS connect,
                     // BEFORE any depthUpdate messages are processed (COL-22).
@@ -574,7 +650,7 @@ mod inner {
                     self.check_stale(out, now_recv_ns);
                     return !out.is_empty();
                 };
-                let outcome = self.collector.drive(t, out);
+                let outcome = self.collector.drive(t.as_mut(), out);
                 (outcome, t.take_metrics())
             };
             let new_events = &mut out[before..];
@@ -641,7 +717,14 @@ mod inner {
 
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let args: Vec<String> = std::env::args().collect();
+        // CONV-18: every binary supports --version and --check-config.
+        if binutil::has_flag(&args, "--version") {
+            binutil::version_exit();
+        }
         let config = config_from_args(&args)?;
+        if binutil::has_flag(&args, "--check-config") {
+            binutil::check_config_exit();
+        }
         let venue = config.venue;
         let symbol = config.symbol;
         let backpressure = match config.backpressure.as_deref() {
@@ -649,9 +732,70 @@ mod inner {
                 .ok_or_else(|| format!("invalid backpressure policy: {value}"))?,
             None => BackpressurePolicy::default(),
         };
+        let trade_source = match config.trade_source.as_deref() {
+            None | Some("ws") => "ws",
+            Some("rest") => "rest",
+            Some(other) => {
+                return Err(format!(
+                    "invalid trade_source {other:?}: expected \"ws\" or \"rest\" (COL-25)"
+                )
+                .into())
+            }
+        };
+        let mark_source = match config.mark_source.as_deref() {
+            None | Some("ws") => "ws",
+            Some("rest") => "rest",
+            Some(other) => {
+                return Err(format!(
+                    "invalid mark_source {other:?}: expected \"ws\" or \"rest\" (COL-28)"
+                )
+                .into())
+            }
+        };
+        #[cfg(not(feature = "live-http"))]
+        if trade_source == "rest" || mark_source == "rest" {
+            return Err(
+                "trade_source=rest/mark_source=rest requires the live-http feature (COL-25/28)"
+                    .into(),
+            );
+        }
 
         let _ = rustls::crypto::ring::default_provider().install_default();
 
+        if let Some(ref proxy) = config.proxy {
+            tracing::info!(proxy = %proxy, "routing WS through egress proxy (MP_WS_PROXY/config.proxy)");
+        }
+        // HIP-3 (spec 030 MAC-1) + Deribit (spec 031) stream options.
+        let hip3_symbols = config.hip3_symbols.unwrap_or_default();
+        if !hip3_symbols.is_empty() && venue != "hyperliquid" {
+            return Err("--hip3-symbols requires the hyperliquid venue (spec 030 MAC-1)".into());
+        }
+        let deribit_currency = config.currency.clone();
+        if deribit_currency.is_some() && venue != "deribit" {
+            return Err("--currency/currency requires the deribit venue (spec 031 OPT-7)".into());
+        }
+        let record_ticker = config.record_ticker.unwrap_or(false);
+        if record_ticker && venue != "deribit" {
+            return Err("record_ticker requires the deribit venue (spec 031 OPT-7)".into());
+        }
+        #[cfg(feature = "live-http")]
+        let deribit_filter = mp_collectors::deribit::rest::InstrumentFilter {
+            max_instruments: config
+                .instrument_filter
+                .as_ref()
+                .map(|f| f.max_instruments)
+                .unwrap_or(default_max_instruments()),
+            expiry_window_days: config
+                .instrument_filter
+                .as_ref()
+                .map(|f| f.expiry_window_days)
+                .unwrap_or(default_expiry_window_days()),
+        };
+        let raw_capture_dir = if venue == "deribit" && config.raw_capture {
+            Some(Path::new(&config.data_dir).join("raw").join("deribit"))
+        } else {
+            None
+        };
         let mut streams = vec![Stream::new(
             "primary".into(),
             &venue,
@@ -659,12 +803,55 @@ mod inner {
             1,
             config.channel_capacity,
             backpressure,
+            config.proxy.clone(),
+            StreamOpts {
+                hip3_symbols: hip3_symbols.clone(),
+                deribit_currency: deribit_currency.clone(),
+                #[cfg(feature = "live-http")]
+                deribit_filter,
+                deribit_record_ticker: record_ticker,
+                raw_capture_dir: raw_capture_dir.clone(),
+            },
         )?];
+
+        if trade_source == "rest" {
+            // COL-27: trades come exclusively from the REST poller below; WS
+            // aggTrade frames are dropped at the normalizer so a degraded
+            // trade stream can never churn the collector via staleness
+            // reconnects (spec 024 incident 2026-08-04).
+            let norm = streams[0].collector.normalizer_mut();
+            if let Some(bn) = norm
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<BinanceNormalizer>())
+            {
+                bn.set_suppress_ws_trades(true);
+            } else {
+                return Err("trade_source=rest requires a Binance normalizer (COL-27)".into());
+            }
+            tracing::info!(symbol = %symbol, "trade source: REST aggTrades (WS aggTrade suppressed)");
+        }
+
+        if mark_source == "rest" {
+            // COL-28: mark/funding come exclusively from the REST premiumIndex
+            // poller below; WS markPriceUpdate frames are dropped at the
+            // normalizer (same rationale as COL-27 — a degraded or restored
+            // WS mark stream must never double-record).
+            let norm = streams[0].collector.normalizer_mut();
+            if let Some(bn) = norm
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<BinanceNormalizer>())
+            {
+                bn.set_suppress_ws_mark_price(true);
+            } else {
+                return Err("mark_source=rest requires a Binance normalizer (COL-28)".into());
+            }
+            tracing::info!(symbol = %symbol, "mark source: REST premiumIndex (WS markPriceUpdate suppressed)");
+        }
 
         let raw_dir = Path::new(&config.data_dir).join("raw");
         std::fs::create_dir_all(&raw_dir)?;
         // Held for process lifetime — prevents dual-writer log corruption.
-        let _instance_lock = InstanceLock::acquire(&raw_dir, &venue, &symbol)?;
+        let _instance_lock = InstanceLock::acquire(&raw_dir, &format!("{venue}_{symbol}"))?;
         tracing::info!(venue = %venue, symbol = %symbol, "instance lock acquired");
         // COL-18/19: PID file for systemd/monitoring; removed on clean exit.
         let _pid_file = PidFile::write(&raw_dir, &venue)?;
@@ -683,6 +870,24 @@ mod inner {
         let mut last_oi_poll = std::time::Instant::now();
         #[cfg(feature = "live-http")]
         let oi_poll_interval = Duration::from_secs(30);
+        // COL-25: REST aggTrades poll cadence + fromId watermark (inclusive
+        // resume point; dedup skips the overlap). `0` = no watermark yet: the
+        // first poll fetches the most recent window, establishing it.
+        #[cfg(feature = "live-http")]
+        let mut last_trade_poll = std::time::Instant::now();
+        #[cfg(feature = "live-http")]
+        let trade_poll_interval = Duration::from_secs(2);
+        #[cfg(feature = "live-http")]
+        let mut last_trade_watermark: u64 = 0;
+        // COL-28: REST premiumIndex poll cadence. The WS markPrice@1s stream
+        // carries mark+funding every second; REST premiumIndex is weight-1 and
+        // the values move slowly (funding rate updates ~8h, mark tracks index
+        // closely), so 15s is a faithful degraded cadence that the audit's
+        // 120s global max_gap absorbs (trades/depth keep the clock hot).
+        #[cfg(feature = "live-http")]
+        let mut last_mark_poll = std::time::Instant::now();
+        #[cfg(feature = "live-http")]
+        let mark_poll_interval = Duration::from_secs(15);
 
         let heartbeat_path = raw_dir.join(format!("mp-collector-{venue}-{symbol}.heartbeat"));
         let mut last_heartbeat = std::time::Instant::now();
@@ -712,7 +917,7 @@ mod inner {
                 last_oi_poll = std::time::Instant::now();
                 // COL-21: the OI poll shares the stream's REST budget so
                 // snapshot reseeds and OI fetches together respect the venue limit.
-                if !streams[0].rest_budget.try_take(now_ns(), 1.0) {
+                if !streams[0].rest_budget.try_take(binutil::now_ns(), 1.0) {
                     tracing::debug!("OI poll skipped: REST rate budget empty (COL-21)");
                 } else if let Ok(oi_body) =
                     mp_collectors::binance::fetch_open_interest_blocking(&symbol)
@@ -741,6 +946,115 @@ mod inner {
                 }
             }
 
+            // COL-25/26: REST aggTrades as the trade source (fstream silently
+            // drops the aggTrade WS stream from datacenter egress — spec 024
+            // incident 2026-08-04). The fromId watermark resumes loss-free;
+            // a jump in ids is surfaced as Status::GapDetected, never hidden.
+            #[cfg(feature = "live-http")]
+            if venue == "binance"
+                && trade_source == "rest"
+                && (last_trade_poll.elapsed() >= trade_poll_interval || current_date.is_empty())
+            {
+                last_trade_poll = std::time::Instant::now();
+                if !streams[0].rest_budget.try_take(binutil::now_ns(), 2.0) {
+                    tracing::debug!("trade poll skipped: REST rate budget empty (COL-21)");
+                } else if let Ok(batch) = mp_collectors::binance::fetch_agg_trades_blocking(
+                    &symbol,
+                    if last_trade_watermark == 0 {
+                        None
+                    } else {
+                        Some(last_trade_watermark.saturating_add(1))
+                    },
+                ) {
+                    let recv_ns = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as i64;
+                    let (fresh, missing) = mp_collectors::binance::advance_trade_watermark(
+                        &mut last_trade_watermark,
+                        batch,
+                    );
+                    if missing > 0 {
+                        tracing::warn!(symbol = %symbol, missing, "REST aggTrades watermark gap (COL-26)");
+                        let sym_id = streams[0]
+                            .collector
+                            .normalizer()
+                            .symbols()
+                            .lookup(Venue::BinanceFutures, &symbol)
+                            .unwrap_or(mp_core::SymbolId(0));
+                        let status = EventEnvelope::new(
+                            Venue::BinanceFutures,
+                            sym_id,
+                            recv_ns,
+                            recv_ns,
+                            0,
+                            MarketEvent::Status {
+                                kind: StatusKind::GapDetected,
+                                detail: format!("rest aggTrades watermark gap: {missing} trades"),
+                            },
+                        );
+                        let provenance = streams[0].provenance(&status.body, SnapshotSource::None);
+                        event_buffer.push(status.with_provenance(provenance));
+                        any = true;
+                    }
+                    if !fresh.is_empty() {
+                        let before = event_buffer.len();
+                        let norm = streams[0].collector.normalizer_mut();
+                        if let Some(bn) = norm
+                            .as_any_mut()
+                            .and_then(|a| a.downcast_mut::<BinanceNormalizer>())
+                        {
+                            mp_collectors::binance::apply_agg_trades(
+                                bn,
+                                &symbol,
+                                &fresh,
+                                recv_ns,
+                                &mut event_buffer,
+                            );
+                            streams[0].stamp(&mut event_buffer[before..], SnapshotSource::None);
+                            any = true;
+                        }
+                    }
+                }
+            }
+
+            // COL-28: REST premiumIndex as the mark/funding source (fstream
+            // silently drops the markPrice WS stream from this egress — spec
+            // 024 incident 2026-08-04). Emits the same MarkPrice + Funding
+            // bodies the WS branch would, stamped at poll time.
+            #[cfg(feature = "live-http")]
+            if venue == "binance"
+                && mark_source == "rest"
+                && (last_mark_poll.elapsed() >= mark_poll_interval || current_date.is_empty())
+            {
+                last_mark_poll = std::time::Instant::now();
+                if !streams[0].rest_budget.try_take(binutil::now_ns(), 1.0) {
+                    tracing::debug!("mark poll skipped: REST rate budget empty (COL-21)");
+                } else if let Ok(pi) = mp_collectors::binance::fetch_premium_index_blocking(&symbol)
+                {
+                    let recv_ns = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as i64;
+                    let before = event_buffer.len();
+                    let norm = streams[0].collector.normalizer_mut();
+                    if let Some(bn) = norm
+                        .as_any_mut()
+                        .and_then(|a| a.downcast_mut::<BinanceNormalizer>())
+                    {
+                        mp_collectors::binance::apply_premium_index(
+                            bn,
+                            &symbol,
+                            &pi,
+                            recv_ns,
+                            &mut event_buffer,
+                        );
+                        streams[0].stamp(&mut event_buffer[before..], SnapshotSource::None);
+                        any = true;
+                    }
+                }
+            }
+
             // Loop-edge wall clock: recv stamping + watchdog timers only
             // (PD-3: never a decision/feature value).
             let loop_now_ns = SystemTime::now()
@@ -755,7 +1069,7 @@ mod inner {
 
             if !event_buffer.is_empty() {
                 any = true;
-                let date = utc_date_str();
+                let date = binutil::utc_date_str();
                 if date != current_date {
                     if let Some(ref mut w) = log_writer {
                         let _ = w.flush();

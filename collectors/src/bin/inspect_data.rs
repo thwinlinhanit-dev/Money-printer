@@ -82,6 +82,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MarketEvent::Liquidation { .. } => "Liquidation",
                         MarketEvent::IndexPrice { .. } => "IndexPrice",
                         MarketEvent::Status { .. } => "Status",
+                        MarketEvent::WhalePosition { .. } => "WhalePosition",
+                        MarketEvent::MacroPoint { .. } => "MacroPoint",
+                        MarketEvent::OptionTrade { .. } => "OptionTrade",
+                        MarketEvent::OptionBook { .. } => "OptionBook",
+                        MarketEvent::OptionTicker { .. } => "OptionTicker",
                     };
                     *event_types.entry(event_kind).or_insert(0u64) += 1;
                     *global_event_types.entry(event_kind).or_insert(0u64) += 1;

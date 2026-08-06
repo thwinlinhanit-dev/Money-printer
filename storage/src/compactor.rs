@@ -6,17 +6,32 @@
 
 use crate::audit::RawLogAudit;
 use crate::manifest::{self, QualityManifest};
-use crate::{layout, parquet_trades, StorageError};
-use mp_core::{EventEnvelope, MarketEvent, SymbolTable, Venue};
+use crate::{
+    layout, parquet_macro, parquet_options, parquet_positions, parquet_trades, StorageError,
+};
+use mp_core::{EventEnvelope, SymbolTable, Venue};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Outcome of a compaction run.
+/// Outcome of a compaction run. `trades_*` are legacy field names (spec 003
+/// v1); specs 028/030/031 streams carry their own per-stream counters.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompactStats {
     pub trades_files_written: u64,
     pub trades_files_skipped: u64,
     pub trade_rows: u64,
+    /// Spec 028 (WHL-6): `cold/positions/` census files.
+    pub positions_files_written: u64,
+    pub positions_files_skipped: u64,
+    pub position_rows: u64,
+    /// Spec 030 (MAC-6): `cold/macro/` FRED files.
+    pub macro_files_written: u64,
+    pub macro_files_skipped: u64,
+    pub macro_rows: u64,
+    /// Spec 031 (OPT-5): `cold/options/` Deribit files.
+    pub options_files_written: u64,
+    pub options_files_skipped: u64,
+    pub option_rows: u64,
 }
 
 /// Compact one venue/day's events, but only when the raw log's audit is clean
@@ -61,6 +76,9 @@ pub fn compact_day_verified(
 
 /// Compact one venue/day's events. `events` must be the full day for `venue`,
 /// in recv order. `hash` is a content hash of the source logs (STO-1/8).
+/// Every Parquet-backed stream (trades + specs 028/030/031 positions/macro/
+/// options) is written to its own `cold/<stream>/` partition (W-6); the
+/// manifest covers ALL streams including the manifest-only ones.
 #[allow(clippy::too_many_arguments)]
 pub fn compact_day(
     root: &Path,
@@ -76,34 +94,76 @@ pub fn compact_day(
 ) -> Result<CompactStats, StorageError> {
     let mut stats = CompactStats::default();
 
-    // Group trades by symbol.
-    let mut by_symbol: BTreeMap<u32, Vec<EventEnvelope>> = BTreeMap::new();
+    // Group Parquet-backed streams by (stream, symbol). BTreeMap ⇒
+    // deterministic write order (CONV-10).
+    let mut by_stream: BTreeMap<(&'static str, u32), Vec<EventEnvelope>> = BTreeMap::new();
     for e in &events {
-        if matches!(e.body, MarketEvent::Trade { .. }) {
-            by_symbol.entry(e.symbol.0).or_default().push(e.clone());
+        let stream = layout::stream_type_name(&e.body);
+        if layout::has_parquet_partition(stream) {
+            by_stream
+                .entry((stream, e.symbol.0))
+                .or_default()
+                .push(e.clone());
         }
     }
 
-    for (sym_id, mut trades) in by_symbol {
+    for ((stream, sym_id), mut evs) in by_stream {
         let name = symbols
             .get(mp_core::SymbolId(sym_id))
             .map(|m| m.venue_symbol.clone())
             .unwrap_or_else(|| format!("sym{sym_id}"));
-        let path = layout::partition_file(root, "trades", venue, &name, date);
+        let path = layout::partition_file(root, stream, venue, &name, date);
 
         // Idempotency: skip if the existing file was built from the same source.
         if path.exists() {
             if let Ok(Some(existing)) = parquet_trades::read_source_hash(&path) {
                 if existing == source_hash {
-                    stats.trades_files_skipped += 1;
+                    match stream {
+                        "trades" => stats.trades_files_skipped += 1,
+                        "positions" => stats.positions_files_skipped += 1,
+                        "macro" => stats.macro_files_skipped += 1,
+                        "options" => stats.options_files_skipped += 1,
+                        _ => {}
+                    }
                     continue;
                 }
             }
         }
-        trades.sort_by_key(|e| (e.recv_ts_ns, e.stream_seq));
-        let rows = parquet_trades::write_trades(&path, &trades, compactor_version, source_hash)?;
-        stats.trades_files_written += 1;
-        stats.trade_rows += rows;
+        evs.sort_by_key(|e| (e.recv_ts_ns, e.stream_seq));
+        let rows = match stream {
+            "trades" => parquet_trades::write_trades(&path, &evs, compactor_version, source_hash)?,
+            "positions" => {
+                parquet_positions::write_positions(&path, &evs, compactor_version, source_hash)?
+            }
+            "macro" => parquet_macro::write_macro(&path, &evs, compactor_version, source_hash)?,
+            "options" => {
+                parquet_options::write_options(&path, &evs, compactor_version, source_hash)?
+            }
+            other => {
+                return Err(StorageError::Refused(format!(
+                    "stream {other} has no parquet writer"
+                )))
+            }
+        };
+        match stream {
+            "trades" => {
+                stats.trades_files_written += 1;
+                stats.trade_rows += rows;
+            }
+            "positions" => {
+                stats.positions_files_written += 1;
+                stats.position_rows += rows;
+            }
+            "macro" => {
+                stats.macro_files_written += 1;
+                stats.macro_rows += rows;
+            }
+            "options" => {
+                stats.options_files_written += 1;
+                stats.option_rows += rows;
+            }
+            _ => {}
+        }
     }
 
     // Manifest for ALL streams (STO-2).

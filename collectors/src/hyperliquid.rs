@@ -25,6 +25,11 @@ impl HyperliquidNormalizer {
     pub fn symbols(&self) -> &SymbolTable {
         &self.symbols
     }
+    /// Mutable symbol table — the binary edge seeds HIP-3 TradFi-synthetic
+    /// symbols here (spec 030 MAC-1: `asset_class: tradfi_synthetic`).
+    pub fn symbols_mut(&mut self) -> &mut SymbolTable {
+        &mut self.symbols
+    }
     fn seq(&mut self) -> u64 {
         let s = self.next_seq;
         self.next_seq += 1;
@@ -178,6 +183,10 @@ impl Normalizer for HyperliquidNormalizer {
 
     fn symbols(&self) -> &SymbolTable {
         &self.symbols
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 
     fn reset_books(&mut self) {

@@ -442,7 +442,6 @@ mod tests {
         assert_eq!(r.stage, SignalStage::Killed);
     }
 
-
     #[test]
     fn sig_1_catalog_serde_roundtrip_and_duplicate_refusal() {
         let mut c = SignalCatalog::new();

@@ -76,6 +76,18 @@ update (no intra-bar repaint — repainting features are banned).
   whale tape pressure; divergence of whale_flow vs price is screener fodder.
 - `whale_share.{tf}` — whale_print volume / total volume per bar — is the
   move institutional or retail dust?
+- `whale.net.{venue}` / `whale.delta.{venue}` — aggregate whale net
+  positioning + deltas from the spec 028 `WhalePosition` census (WHL-5: gated
+  on the RES-4 event study — see spec 028 Decisions). Per symbol, Σ of signed
+  position notional (size × entry; long +, short −) across all recorded
+  addresses, with a last-poll-wins upsert per address (the collector emits a
+  full per-address/coin snapshot). `whale.delta` is the change vs the previous
+  reading (None until a second reading — `oi.delta` shape). Venue-scoped;
+  default venue hyperliquid (the only census source today). Census freshness:
+  an address not refreshed within `[whale_net] stale_after_ns` (default 10
+  min) is evicted from the aggregate — a flattened position emits no tombstone
+  event and a leaderboard drop-off stops polling, so dead positions must not
+  linger.
 
 **Liquidity / book** (require BookMirror, EVT-9)
 - `depth.{bps}.{side}` — resting qty within ±bps of mid (bps ∈ {10,25,50}),
@@ -140,6 +152,7 @@ update (no intra-bar repaint — repainting features are banned).
 - [x] Screener: rules → edge-triggered hits with exact snapshots (FEA-10). `fea_10_screener_edge_triggers_with_snapshot`.
 - [x] Offline Parquet materialization with footer `{feature ver, engine git sha, params hash}` and `ver=N` on param change, never overwriting (FEA-6). `fea_6_materialize_versions_on_params_change_never_overwrites` (in `storage/tests/storage.rs`), `fea_6_params_hash_is_canonical_and_change_sensitive`.
 - [x] `features.toml` single catalog config with `deny_unknown_fields`, hashed into materialization metadata (FEA-7). `fea_7_features_toml_parses_and_rejects_unknown_keys`.
+- [x] Aggregate whale net positioning + deltas from the spec 028 census (FEA-1): hand-computed net/replace semantics, delta vs previous, venue scoping, NaN fail-closed, address-order independence, stale-refresh eviction. `fea_1_whale_net_*`, `fea_1_whale_delta_changes_since_previous_net`.
 
 ## Decisions
 - 2026-07-10: features output scalar f64 only in v1 (categoricals encoded as
@@ -192,6 +205,18 @@ update (no intra-bar repaint — repainting features are banned).
   startup check a live runner MUST treat as fatal (`fea_9_*`). FEA-2 remains
   structural (features have no API to read ahead), documented rather than
   pseudo-tested.
+- 2026-08-05 (impl): aggregate whale net positioning + deltas added to the
+  catalog (`whale.net.{venue}` / `whale.delta.{venue}`, module `whale.rs`) —
+  the spec 028 census is feature-grade now that the RES-4 event study passes
+  (WHL-5). Semantics: per-address last-poll-wins upsert (full snapshot per
+  address/coin), Σ signed position notional; `whale.delta` mirrors `oi.delta`
+  (None until a second reading). NaN size/entry drops the whole event
+  (CONV-8); address order never matters (BTreeMap, CONV-10). Stale-refresh
+  eviction: `clearinghouseState` omits closed positions (no tombstone event)
+  and leaderboard rotation stops polling addresses, so a position not
+  refreshed within `[whale_net] stale_after_ns` (default 10 min) is evicted
+  on the next event — the aggregate is the CURRENT census, lazily and
+  deterministically maintained. Params live in `[whale_net]` (FEA-7).
 
 ## Open questions
 - None blocking; `wall_min_notional` defaults need per-symbol calibration

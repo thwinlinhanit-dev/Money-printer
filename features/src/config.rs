@@ -58,6 +58,37 @@ impl Default for WhalePrintParams {
     }
 }
 
+/// Params for the `whale.net.{venue}` / `whale.delta.{venue}` feature family
+/// (spec 028 aggregate whale net positioning + deltas, feature engine 004).
+/// Only venues with a recorded `WhalePosition` census make sense.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WhaleNetParams {
+    /// Venues to aggregate the position census for.
+    #[serde(default = "default_whale_venues")]
+    pub venues: Vec<String>,
+    /// A position not refreshed within this window (ns) is evicted from the
+    /// census — a flattened position (no tombstone event) or an address that
+    /// dropped off top-N must not linger in the aggregate. 10 min default.
+    #[serde(default = "default_whale_stale_ns")]
+    pub stale_after_ns: i64,
+}
+
+fn default_whale_stale_ns() -> i64 {
+    // Single source of truth lives with the feature (whale.rs) so a
+    // recalibration can never drift the two apart.
+    crate::whale::DEFAULT_WHALE_STALE_NS
+}
+
+impl Default for WhaleNetParams {
+    fn default() -> Self {
+        WhaleNetParams {
+            venues: default_whale_venues(),
+            stale_after_ns: default_whale_stale_ns(),
+        }
+    }
+}
+
 /// Params for `liq.cluster` (liquidation clustering).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +102,102 @@ impl Default for LiqClusterParams {
         LiqClusterParams {
             window_ns: 60_000_000_000, // 1 minute
             min_cluster_notional: 5_000_000.0,
+        }
+    }
+}
+
+/// Params for `liq.agg` (cross-venue de-sampled liquidation tape, spec 029
+/// LIQ-1 / LIQ-7). Both windows in nanoseconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiqAggParams {
+    /// Near-simultaneous liquidations reported within this window (ns) across
+    /// venues are treated as one event (de-duplicated). 250 ms default.
+    #[serde(default = "default_liq_agg_dedup_ns")]
+    pub dedup_window_ns: i64,
+    /// Rolling window (ns) for the emitted aggregate notional. 1 s default.
+    #[serde(default = "default_liq_agg_window_ns")]
+    pub agg_window_ns: i64,
+}
+
+fn default_liq_agg_dedup_ns() -> i64 {
+    250_000_000
+}
+fn default_liq_agg_window_ns() -> i64 {
+    1_000_000_000
+}
+
+impl Default for LiqAggParams {
+    fn default() -> Self {
+        Self {
+            dedup_window_ns: default_liq_agg_dedup_ns(),
+            agg_window_ns: default_liq_agg_window_ns(),
+        }
+    }
+}
+
+/// One leverage tier and its open-interest weight (spec 029 LIQ-2). Weights are
+/// a documented assumption (Σ ≈ 1.0), calibrated later from spec 028 real
+/// positions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeverageTier {
+    pub leverage: f64,
+    pub weight: f64,
+}
+
+/// Params for `liq.est_bands` (estimated liquidation cascade bands, spec 029
+/// LIQ-2 / LIQ-7). The estimate is a MODEL — validate against spec 028 real
+/// liq prices (RES-4) before any strategy use (LIQ-6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiqEstBandsParams {
+    /// Maintenance-to-initial margin buffer: mmr = 1/(leverage × this). 1.5.
+    #[serde(default = "default_maintenance_buffer")]
+    pub maintenance_buffer: f64,
+    /// Leverage tiers + OI weights; the highest-leverage tier drives the
+    /// nearest estimated cascade level.
+    #[serde(default = "default_leverage_tiers")]
+    pub leverage_tiers: Vec<LeverageTier>,
+}
+
+fn default_maintenance_buffer() -> f64 {
+    1.5
+}
+fn default_leverage_tiers() -> Vec<LeverageTier> {
+    vec![
+        LeverageTier {
+            leverage: 1.0,
+            weight: 0.05,
+        },
+        LeverageTier {
+            leverage: 2.0,
+            weight: 0.10,
+        },
+        LeverageTier {
+            leverage: 5.0,
+            weight: 0.15,
+        },
+        LeverageTier {
+            leverage: 10.0,
+            weight: 0.25,
+        },
+        LeverageTier {
+            leverage: 20.0,
+            weight: 0.25,
+        },
+        LeverageTier {
+            leverage: 50.0,
+            weight: 0.20,
+        },
+    ]
+}
+
+impl Default for LiqEstBandsParams {
+    fn default() -> Self {
+        Self {
+            maintenance_buffer: default_maintenance_buffer(),
+            leverage_tiers: default_leverage_tiers(),
         }
     }
 }
@@ -139,9 +266,15 @@ pub struct FeaturesConfig {
     #[serde(default)]
     pub whale_print: WhalePrintParams,
     #[serde(default)]
+    pub whale_net: WhaleNetParams,
+    #[serde(default)]
     pub liq_cluster: LiqClusterParams,
     #[serde(default)]
     pub footprint: FootprintParams,
+    #[serde(default)]
+    pub liq_agg: LiqAggParams,
+    #[serde(default)]
+    pub liq_est_bands: LiqEstBandsParams,
 }
 
 fn default_bar_tf() -> i64 {
@@ -154,8 +287,11 @@ impl Default for FeaturesConfig {
             bar_tf_ns: default_bar_tf(),
             cvd: CvdParams::default(),
             whale_print: WhalePrintParams::default(),
+            whale_net: WhaleNetParams::default(),
             liq_cluster: LiqClusterParams::default(),
             footprint: FootprintParams::default(),
+            liq_agg: LiqAggParams::default(),
+            liq_est_bands: LiqEstBandsParams::default(),
         }
     }
 }

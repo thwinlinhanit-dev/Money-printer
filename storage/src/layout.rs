@@ -13,10 +13,13 @@ pub fn venue_slug(v: Venue) -> &'static str {
         Venue::Hyperliquid => "hyperliquid",
         Venue::Coinbase => "coinbase",
         Venue::KrakenFutures => "kraken_futures",
+        Venue::Deribit => "deribit",
+        Venue::Fred => "fred",
     }
 }
 
 /// Stable numeric venue code stored in Parquet (self-contained files).
+/// Appended in schema order; old codes are unchanged (CONV-20).
 pub fn venue_code(v: Venue) -> u16 {
     match v {
         Venue::BinanceFutures => 1,
@@ -25,6 +28,8 @@ pub fn venue_code(v: Venue) -> u16 {
         Venue::Hyperliquid => 4,
         Venue::Coinbase => 5,
         Venue::KrakenFutures => 6,
+        Venue::Deribit => 7,
+        Venue::Fred => 8,
     }
 }
 
@@ -37,11 +42,15 @@ pub fn venue_from_code(code: u16) -> Option<Venue> {
         4 => Some(Venue::Hyperliquid),
         5 => Some(Venue::Coinbase),
         6 => Some(Venue::KrakenFutures),
+        7 => Some(Venue::Deribit),
+        8 => Some(Venue::Fred),
         _ => None,
     }
 }
 
-/// The stream directory name for an event body (spec 003 layout).
+/// The stream directory name for an event body (spec 003 layout). Spec
+/// 028/030/031 streams route to their own cold partitions (`positions`,
+/// `macro`, `options`) — never mixed into the live tick streams (W-6).
 pub fn stream_type_name(body: &MarketEvent) -> &'static str {
     match body {
         MarketEvent::Trade { .. } => "trades",
@@ -53,6 +62,11 @@ pub fn stream_type_name(body: &MarketEvent) -> &'static str {
         MarketEvent::Liquidation { .. } => "liquidations",
         MarketEvent::IndexPrice { .. } => "index_price",
         MarketEvent::Status { .. } => "status",
+        MarketEvent::WhalePosition { .. } => "positions",
+        MarketEvent::MacroPoint { .. } => "macro",
+        MarketEvent::OptionTrade { .. }
+        | MarketEvent::OptionBook { .. }
+        | MarketEvent::OptionTicker { .. } => "options",
     }
 }
 
@@ -76,4 +90,14 @@ pub fn manifest_file(root: &Path, venue: Venue, date: &str) -> PathBuf {
     root.join("manifests")
         .join(format!("venue={}", venue_slug(venue)))
         .join(format!("date={date}.json"))
+}
+
+/// Streams that own a cold Parquet partition: spec 003 v1 trades + specs
+/// 028/030/031 (positions, macro, options). SINGLE source of truth — the
+/// compactor (write path) and prune (verify path) both consult this, so a
+/// fifth Parquet-backed stream can never be written but forgotten at prune.
+/// Manifest-only streams (book_deltas, status, …) return false in v1
+/// (spec 003 Decisions).
+pub fn has_parquet_partition(stream: &str) -> bool {
+    matches!(stream, "trades" | "positions" | "macro" | "options")
 }

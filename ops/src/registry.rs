@@ -40,6 +40,7 @@ pub const ALERTS: &[AlertSpec] = &[
     alert!("unknown-order", P1),
     alert!("oms-down", P1),
     alert!("killswitch-tripped", P1),
+    alert!("band-accuracy-decay", P3),
 ];
 
 /// Runbook path for an alert id (spec 009 convention).

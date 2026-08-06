@@ -98,6 +98,18 @@ snapshot channel or REST snapshot), mark/funding, open interest, liquidations.
   collector is Binance-only (`binance-btcusdt.example.toml`); Bybit stays
   supported (multi-venue normalizer) but is no longer the reference venue.
   Supersedes the 2026-07-10 Bybit-first decision.
+- 2026-08-04 (impl, COL-25..27): **REST aggTrades trade ingestion** — new
+  `trade_source = "ws" | "rest"` config (default `ws`). REST mode polls
+  `GET /fapi/v1/aggTrades?symbol=&fromId=&limit=500` on the shared REST budget
+  (weight 2, 2s cadence), resumes loss-free from an id watermark, dedups the
+  inclusive `fromId` overlap, and surfaces any skipped id range as
+  `Status::GapDetected` (COL-26) — a REST poll is never a silent loss. REST
+  mode suppresses WS `aggTrade` frames at the normalizer (COL-27) so the
+  degraded stream cannot churn the collector via COL-2 staleness reconnects.
+  Trade events from REST are byte-identical to WS (`T`, `a`, `m` mapping), so
+  mixed recordings grade the same. Required by the 2026-08-04 spec 024
+  incident (fstream silently drops aggTrade from datacenter egress); the
+  watchdog spawns collectors with `--trade-source rest`.
 - 2026-07-10 (impl): the collector is split into a **transport-agnostic core**
   (this crate) and a live WS transport (deferred). Adding a network dependency
   (tokio/tokio-tungstenite) is must-ask-first (CLAUDE.md); until approved, all

@@ -8,6 +8,7 @@ use mp_core::event::*;
 use mp_core::log::{EventLogWriter, LogReader, MergeReader};
 use mp_core::ring::{Overrun, Ring};
 use mp_core::symbol::{InstrumentKind, SymbolMeta, SymbolTable};
+use mp_core::OptionGreeks;
 use mp_core::{BookMirror, EventEnvelope, SCHEMA_VER};
 
 use proptest::prelude::*;
@@ -62,6 +63,45 @@ fn levels_strategy() -> impl Strategy<Value = Levels> {
 
 fn side_strategy() -> impl Strategy<Value = Side> {
     prop_oneof![Just(Side::Buy), Just(Side::Sell)]
+}
+
+fn option_kind_strategy() -> impl Strategy<Value = OptionKind> {
+    prop_oneof![Just(OptionKind::Call), Just(OptionKind::Put)]
+}
+
+fn option_leg_strategy() -> impl Strategy<Value = OptionLeg> {
+    (
+        "[A-Z]{2,4}",
+        0.0f64..1.0e6,
+        any::<i64>(),
+        option_kind_strategy(),
+    )
+        .prop_map(|(underlying, strike, expiry_ts_ns, kind)| OptionLeg {
+            underlying,
+            strike,
+            expiry_ts_ns,
+            kind,
+        })
+}
+
+fn option_greeks_strategy() -> impl Strategy<Value = Option<OptionGreeks>> {
+    prop_oneof![
+        Just(None),
+        (
+            -10.0f64..10.0,
+            -10.0f64..10.0,
+            -10.0f64..10.0,
+            -10.0f64..10.0
+        )
+            .prop_map(|(delta, gamma, theta, vega)| {
+                Some(OptionGreeks {
+                    delta,
+                    gamma,
+                    theta,
+                    vega,
+                })
+            },),
+    ]
 }
 
 fn body_strategy() -> impl Strategy<Value = MarketEvent> {
@@ -125,6 +165,82 @@ fn body_strategy() -> impl Strategy<Value = MarketEvent> {
             kind: StatusKind::GapDetected,
             detail,
         }),
+        // ---- spec 028/030/031 variants (CONV-22 round-trip coverage) ----
+        (
+            ".*",
+            -1.0e9f64..1.0e9,
+            -1.0e9f64..1.0e9,
+            0.0f64..1.0e6,
+            -1.0e9f64..1.0e9
+        )
+            .prop_map(|(address, size, entry, leverage, liq_price)| {
+                MarketEvent::WhalePosition {
+                    address,
+                    size,
+                    entry,
+                    leverage,
+                    liq_price,
+                }
+            }),
+        (".*", -1.0e6f64..1.0e6, any::<i64>()).prop_map(|(series_id, value, date)| {
+            MarketEvent::MacroPoint {
+                series_id,
+                value,
+                date,
+            }
+        }),
+        (
+            option_leg_strategy(),
+            -1.0e9f64..1.0e9,
+            0.0f64..1.0e9,
+            side_strategy(),
+            any::<u64>(),
+        )
+            .prop_map(
+                |(leg, price, qty, side, trade_id)| MarketEvent::OptionTrade {
+                    leg,
+                    price,
+                    qty,
+                    side,
+                    trade_id,
+                }
+            ),
+        (
+            option_leg_strategy(),
+            levels_strategy(),
+            levels_strategy(),
+            any::<u64>(),
+            any::<bool>(),
+        )
+            .prop_map(|(leg, bids, asks, change_id, is_snapshot)| {
+                MarketEvent::OptionBook {
+                    leg,
+                    bids,
+                    asks,
+                    change_id,
+                    is_snapshot,
+                }
+            }),
+        (
+            option_leg_strategy(),
+            -1.0f64..1.0e3,
+            -1.0e9f64..1.0e9,
+            -1.0e9f64..1.0e9,
+            0.0f64..1.0e9,
+            option_greeks_strategy(),
+        )
+            .prop_map(
+                |(leg, mark_iv, mark_price, underlying_price, open_interest, greeks)| {
+                    MarketEvent::OptionTicker {
+                        leg,
+                        mark_iv,
+                        mark_price,
+                        underlying_price,
+                        open_interest,
+                        greeks,
+                    }
+                },
+            ),
     ]
 }
 

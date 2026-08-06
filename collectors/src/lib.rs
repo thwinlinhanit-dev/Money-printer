@@ -13,11 +13,15 @@
 pub mod backoff;
 pub mod backpressure;
 pub mod binance;
+pub mod binutil;
 pub mod book_sync;
 pub mod bybit;
 pub mod coinbase;
 pub mod collector;
+pub mod deribit;
+pub mod fred;
 pub mod hyperliquid;
+pub mod hyperliquid_positions;
 pub mod json;
 pub mod kraken;
 pub mod normalize;
@@ -36,13 +40,16 @@ pub use binance::BinanceNormalizer;
 pub use bybit::BybitNormalizer;
 pub use coinbase::CoinbaseNormalizer;
 pub use collector::{Collector, CollectorConfig, DriveOutcome};
+pub use deribit::DeribitNormalizer;
+pub use fred::FredNormalizer;
 pub use hyperliquid::HyperliquidNormalizer;
+pub use hyperliquid_positions::HyperliquidPositionsNormalizer;
 pub use kraken::KrakenNormalizer;
 pub use normalize::{HealthCounters, NormError, Normalizer};
 pub use okx::OkxNormalizer;
 pub use rate::RateBudget;
 pub use staleness::Staleness;
-pub use transport::{MockTransport, Transport, TransportEvent};
+pub use transport::{MockTransport, TeeTransport, Transport, TransportEvent};
 
 /// Construct the right normalizer for a venue.
 pub fn normalizer_for(venue: mp_core::Venue) -> Box<dyn Normalizer> {
@@ -54,6 +61,10 @@ pub fn normalizer_for(venue: mp_core::Venue) -> Box<dyn Normalizer> {
         Hyperliquid => Box::new(HyperliquidNormalizer::new()),
         Coinbase => Box::new(CoinbaseNormalizer::new()),
         KrakenFutures => Box::new(KrakenNormalizer::new()),
+        Deribit => Box::new(DeribitNormalizer::new()),
+        // FRED is a REST poller (mp-macro), not a WS normalizer; the entry
+        // exists so `normalizer_for` stays total over `Venue`.
+        Fred => Box::new(FredNormalizer::new()),
     }
 }
 
@@ -69,9 +80,13 @@ pub fn normalizer_for(venue: mp_core::Venue) -> Box<dyn Normalizer> {
 ///
 /// This sorts the batch into `(recv_ts_ns, stream_seq)` order (the EVT-5/STO-4
 /// convention) and clamps stragglers up to the running clock so appended
-/// frames never regress. WS frames are already monotonic (single FIFO reader
-/// stamps at socket read), so the clamp only ever touches REST-injected
-/// stragglers. Returns the new running `recv_ts_ns` for the next batch.
+/// frames never regress. WS frames are monotonic because a single FIFO reader
+/// stamps at socket read and `drive` drains until `DriveOutcome::Exhausted`
+/// each iteration, so in practice the clamp only touches REST-injected
+/// stragglers; if a burst ever leaves a WS frame past a batch boundary, its
+/// recv would be smeared up to the running clock (accepted — bounded by one
+/// iteration, never reorders, never loses data). Returns the new running
+/// `recv_ts_ns` for the next batch.
 pub fn monotonicize(events: &mut [mp_core::EventEnvelope], last_recv_ns: i64) -> i64 {
     events.sort_by_key(|e| (e.recv_ts_ns, e.stream_seq));
     let mut running = last_recv_ns;

@@ -22,6 +22,25 @@ pub const KV_SCHEMA_VER: &str = "schema_ver";
 pub const KV_COMPACTOR_VERSION: &str = "compactor_version";
 pub const KV_SOURCE_LOG_HASH: &str = "source_log_hash";
 
+/// Shared footer KV metadata + zstd-3 props for every Parquet writer
+/// (STO-8; specs 028/030/031 writers reuse this so all cold files carry the
+/// same {schema_ver, compactor_version, source_log_hash} contract).
+pub fn writer_properties(
+    compactor_version: &str,
+    source_log_hash: &str,
+) -> parquet::file::properties::WriterProperties {
+    WriterProperties::builder()
+        // SAFETY: zstd level 3 is within the crate's valid range, so
+        // `ZstdLevel::try_new(3)` cannot fail (CONV-13).
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+        .set_key_value_metadata(Some(vec![
+            KeyValue::new(KV_SCHEMA_VER.into(), mp_core::SCHEMA_VER.to_string()),
+            KeyValue::new(KV_COMPACTOR_VERSION.into(), compactor_version.to_string()),
+            KeyValue::new(KV_SOURCE_LOG_HASH.into(), source_log_hash.to_string()),
+        ]))
+        .build()
+}
+
 fn trades_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("symbol_id", DataType::UInt32, false),
@@ -98,16 +117,7 @@ pub fn write_trades(
     )
     .map_err(|e| StorageError::Arrow(e.to_string()))?;
 
-    let props = WriterProperties::builder()
-        // SAFETY: zstd level 3 is within the crate's valid range, so
-        // `ZstdLevel::try_new(3)` cannot fail (CONV-13).
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
-        .set_key_value_metadata(Some(vec![
-            KeyValue::new(KV_SCHEMA_VER.into(), mp_core::SCHEMA_VER.to_string()),
-            KeyValue::new(KV_COMPACTOR_VERSION.into(), compactor_version.to_string()),
-            KeyValue::new(KV_SOURCE_LOG_HASH.into(), source_log_hash.to_string()),
-        ]))
-        .build();
+    let props = writer_properties(compactor_version, source_log_hash);
 
     let file = File::create(path)?;
     let mut writer = ArrowWriter::try_new(file, trades_schema(), Some(props))

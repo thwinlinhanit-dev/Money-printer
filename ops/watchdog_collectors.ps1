@@ -122,12 +122,10 @@ function Spawn-Collector {
     # $Sym is validated above (^[A-Z0-9]{2,20}$) and double-quoted here.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName         = $exe
-    $psi.Arguments        = "--symbol `"$Sym`" --no-whale"
+    $psi.Arguments        = "--symbol `"$Sym`" --no-whale --trade-source rest --mark-source rest"
     $psi.WorkingDirectory = [string]$root
     $psi.UseShellExecute  = $true
     $psi.WindowStyle      = [System.Diagnostics.ProcessWindowStyle]::Hidden
-    # Pipe tracing to nul via the shell (UseShellExecute allows this)
-    $psi.Arguments = "--symbol `"$Sym`" --no-whale"
 
     $p = New-Object System.Diagnostics.Process
     $p.StartInfo = $psi

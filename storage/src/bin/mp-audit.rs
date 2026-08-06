@@ -70,27 +70,31 @@ fn main() {
         };
         let config = AuditConfig::single(venue, &log.symbol);
         let audit = audit_raw_log(&log.path, &config);
-
         if json_output {
-            let entry = serde_json::json!({
-                "file": log.path.display().to_string(),
-                "date": log.date,
-                "venue": log.venue_str,
-                "symbol": log.symbol,
-                "clean": audit.is_clean(),
-                "audit": audit,
-            });
+            // Lightweight entry: a per-code histogram, NOT the full findings
+            // Vec. Legacy files can hold millions of findings — serializing
+            // them made --json balloon to multi-GB output (08-04). Use text
+            // mode for full per-finding detail.
+            let mut entry = light_entry(&venue, &log.symbol, &audit);
+            entry["file"] = serde_json::json!(log.path.display().to_string());
+            entry["date"] = serde_json::json!(log.date);
             println!("{}", serde_json::to_string(&entry).unwrap_or_default());
         } else {
             let status = if audit.is_clean() { "CLEAN" } else { "DIRTY" };
+            let blocking = audit
+                .findings
+                .iter()
+                .filter(|f| is_blocking_finding(&f.code))
+                .count();
             println!(
-                "{status:5}  {date}  {venue:>12}/{symbol:<12}  events={events:<8}  coverage={coverage:.4}  findings={findings}  {path}",
+                "{status:5}  {date}  {venue:>12}/{symbol:<12}  events={events:<8}  coverage={coverage:.4}  findings={findings}  blocking={blocking}  {path}",
                 date = log.date,
                 venue = log.venue_str,
                 symbol = log.symbol,
                 events = audit.event_count,
                 coverage = audit.coverage,
                 findings = audit.findings.len(),
+                blocking = blocking,
                 path = log.path.display(),
             );
             for f in &audit.findings {
@@ -164,18 +168,54 @@ fn main() {
 
     if json_output {
         let verdict = check_promotion(&scorecards);
-        let summary = serde_json::json!({
-            "scorecards": scorecards,
-            "promotion": verdict,
-            "all_clean": all_clean,
-        });
+        // Lightweight scorecards (no full findings — see light_entry).
+        let light_cards: Vec<serde_json::Value> = by_date
+            .iter()
+            .map(|(date, entries)| {
+                let recs: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|(venue, symbol, audit)| light_entry(venue, symbol, audit))
+                    .collect();
+                let promotable = !recs.is_empty() && entries.iter().all(|(_, _, a)| a.is_clean());
+                serde_json::json!({ "date": date, "promotable": promotable, "recordings": recs })
+            })
+            .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&summary).unwrap_or_default()
+            serde_json::to_string_pretty(&serde_json::json!({
+                "scorecards": light_cards,
+                "promotion": verdict,
+                "all_clean": all_clean,
+            }))
+            .unwrap_or_default()
         );
     }
 
     std::process::exit(if all_clean { 0 } else { 1 });
+}
+
+/// Lightweight JSON view of one audit: clean flag, counts, and a per-code
+/// findings histogram. Omits per-finding detail so `--json` stays small even
+/// on legacy corpora with millions of findings (spec 024 2026-08-04).
+fn light_entry(venue: &Venue, symbol: &str, audit: &RawLogAudit) -> serde_json::Value {
+    let mut by_code: BTreeMap<String, usize> = BTreeMap::new();
+    let mut blocking = 0usize;
+    for f in &audit.findings {
+        *by_code.entry(f.code.clone()).or_default() += 1;
+        if is_blocking_finding(&f.code) {
+            blocking += 1;
+        }
+    }
+    serde_json::json!({
+        "venue": venue.slug(),
+        "symbol": symbol,
+        "clean": audit.is_clean(),
+        "event_count": audit.event_count,
+        "coverage": audit.coverage,
+        "blocking_findings": blocking,
+        "findings_by_code": by_code,
+        "streams": audit.streams,
+    })
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {

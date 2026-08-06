@@ -20,13 +20,19 @@ pub mod time;
 pub mod wall_clock;
 
 /// Serialized-schema version stamped on every envelope (CONV-20).
-pub const SCHEMA_VER: u16 = 2;
+///
+/// 3 (2026-08-05, specs 028/030/031): appended `WhalePosition`, `MacroPoint`,
+/// `OptionTrade`, `OptionBook`, `OptionTicker` variants to `MarketEvent`,
+/// appended `Venue::Deribit`/`Venue::Fred`, appended
+/// `InstrumentKind::TradFiSynthetic`. Append-only, so schema-2 frames decode
+/// with the current types (see `log.rs` schema-ver dispatch).
+pub const SCHEMA_VER: u16 = 3;
 
 pub use arena::{Arena, EventRef};
 pub use book::BookMirror;
 pub use event::{
-    EventEnvelope, EventProvenance, Level, Levels, MarketEvent, Side, SmallString, SnapshotReason,
-    SnapshotSource, StatusKind, SymbolId, Venue,
+    EventEnvelope, EventProvenance, Level, Levels, MarketEvent, OptionGreeks, OptionKind,
+    OptionLeg, Side, SmallString, SnapshotReason, SnapshotSource, StatusKind, SymbolId, Venue,
 };
 pub use exec::{
     Fill, IntentError, IntentId, Liquidity, OrderIntent, OrderKind, SizeUnit, StrategyId,

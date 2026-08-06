@@ -23,7 +23,7 @@ cross-host anything in v1.
 |---|---|---|---|
 | P1 | money at risk NOW | Telegram + phone-call webhook | kill switch tripped, recon DIVERGED, UNKNOWN order unresolved, oms down in live |
 | P2 | data/edge degrading | Telegram | stream gap > 5min, collector down, disk > 85%, determinism diff (SIM-11) |
-| P3 | FYI | Telegram (quiet hours batched) | funnel transitions, daily digest, screener hits (if enabled) |
+| P3 | FYI | Telegram (quiet hours batched) | funnel transitions, daily digest, screener hits (if enabled), band-accuracy decay (RES-4 trend, OPS-13) |
 
 Alert rules: every alert has an id, dedupe window, and runbook link (below).
 Alert on ABSENCE (dead-man), not only on presence of errors.
@@ -66,8 +66,10 @@ Generated (ops job) from journals + tracker on the 1st, per
 SYSTEM_BLUEPRINT §13: equity & DD curves (blended + per strategy),
 expectancy table after costs, live-vs-paper-vs-backtest tracking error,
 cost breakdown (fees, slippage vs model, funding, infra), funnel
-transitions + kills, benchmark row (vs BTC hold, vs T-bill). Rendered to
-markdown + HTML in `journal/reports/{YYYY-MM}/`. An LLM MAY draft the prose
+transitions + kills, the RES-4 whale band-accuracy trend (weekly
+`liq.est_bands` validation grades, spec 029 LIQ-6) as a grounded section read
+from `research/band_accuracy/band_accuracy.jsonl`, benchmark row (vs BTC hold,
+vs T-bill). Rendered to markdown + HTML in `journal/reports/{YYYY-MM}/`. An LLM MAY draft the prose
 commentary; every number MUST come from the generated tables (grounded), and
 the human reads it — the report is for the owner, not for the machine.
 
@@ -84,7 +86,11 @@ the human reads it — the report is for the owner, not for the machine.
 - **OPS-5** Nightly backup job + documented, quarterly-calendared restore
   drill script (`ops/restore-drill.sh`) that verifies via golden fixture.
 - **OPS-6** Monthly report generator producing the §13 scoreboard from
-  journals/tracker only (no hand-entered numbers); benchmark row REQUIRED.
+  journals/tracker only (no hand-entered numbers); benchmark row REQUIRED. The
+  RES-4 band-accuracy trend (spec 029 LIQ-6) MUST render as a grounded section
+  from `research/band_accuracy/band_accuracy.jsonl`: a missing journal is an
+  explicit "no data" row, a corrupt line fails closed (CONV-8) — never a
+  fabricated number.
 - **OPS-7** `opsd` MUST watch disk (STO-7), clock skew (NTP; warn > 100ms —
   lead-lag research and venue timestamps depend on it), and cert/key file
   permissions (0600) — each with alerts + runbooks.
@@ -94,6 +100,19 @@ the human reads it — the report is for the owner, not for the machine.
 - **OPS-9** Quiet hours (config) batch P3s; P1/P2 always break through.
 - **OPS-10** Log retention: journals forever (they are the business record,
   W-6); process logs 30 days rotated.
+- **OPS-13** The RES-4 band-accuracy trend MUST be watched for drift/decay
+  (OPS-11/OPS-12 are spec 021's bot-journal requirements; numbering continues
+  here): with ≥ 12 graded weeks, when the trailing 4-week mean coverage drops
+  below half the 12-week mean (baseline ≥ 0.5) or the trailing 4-week mean
+  relative error more than doubles the 12-week mean (baseline > 0), a
+  `band-accuracy-decay` P3 alert MUST be raised — RES-3 decay semantics
+  (spec 010) applied to the RES-4 quality metrics. The check MUST run weekly
+  after the band-accuracy study appends the trend (`mp-ops
+  band-accuracy-decay --trend <journal>`, invoked by
+  `run_whale_study_weekly.sh`) and MAY run from any other consumer of the
+  journal (e.g. monthly report generation). A missing binary or corrupt
+  journal is a warning, never a study failure; the check itself refuses to
+  fabricate a verdict (CONV-8). Alert-only (W-6): never mutates the journal.
 
 ## Acceptance criteria
 - [x] Dead-man fires only after the missed-beat deadline and escalates P2→P1 for a critical proc in live mode (OPS-2). `ops_2_deadman_fires_after_three_missed_beats_and_escalates_in_live`. (The literal `kill -9`→restart supervision is systemd's `Restart=always` in `ops/systemd/*.service`, exercised at deploy time per OPS-8, not in-crate.)
@@ -101,6 +120,8 @@ the human reads it — the report is for the owner, not for the machine.
 - [x] Alert-without-runbook fails CI (OPS-4). `ops_4_every_catalog_alert_has_a_runbook_file` + the guardrails lint (verified to exit non-zero on a removed runbook).
 - [x] Alert dedupe + quiet-hours P3 batching with P1/P2 breakthrough (OPS-4/9). `ops_4_alert_dedupes_within_window_then_fires_again`, `ops_9_quiet_hours_batch_p3_but_p1_breaks_through`.
 - [x] Monthly report generates from fixture inputs with all §13 sections + the required benchmark row, numbers grounded (OPS-6). `ops_6_report_has_all_sections_and_benchmark_row`, `ops_6_report_numbers_are_grounded_not_invented`.
+- [x] The RES-4 band-accuracy section is grounded on `band_accuracy.jsonl`: rows sorted by ISO week and rendered exactly as loaded; a corrupt line fails the whole load naming the line; a missing journal is a "no data" month (OPS-6). `ops_6_band_accuracy_trend_loads_from_jsonl_sorted_and_grounded`, `ops_6_band_accuracy_trend_fails_closed_on_corruption_and_missing_is_no_data`.
+- [x] Band-accuracy drift/decay raises the `band-accuracy-decay` P3 alert on a sustained trailing-window quality loss and stays silent on healthy/young/never-good trends (OPS-13). `ops_13_band_accuracy_decay_alerts_on_sustained_quality_loss`, `ops_13_band_accuracy_decay_ignores_healthy_and_young_trends`.
 - [x] Restore drill restores a real tarball into a scratch dir, refuses a backup missing the business records, and verifies via an injectable command (default: the sim golden fixture) (OPS-5). `ops_5_restore_drill_restores_a_backup_and_verifies`, `ops_5_restore_drill_script_exists_and_refuses_without_backup`.
 - [x] Bot command surface: exact commands parsed, single-owner allowlist, every command journaled, `/kill` one confirm and `/flatten` double confirm, latch reaches the real gate as RG-10 (OPS-3). `ops_3_bot_allowlists_owner_and_journals_every_command`, `ops_3_kill_needs_confirm_and_flatten_needs_double_confirm`.
 - [ ] The `opsd` binary (live heartbeat endpoint feeding `DeadMan`, host sampling feeding `watch.rs`, Telegram transport feeding `Bot`) and the once-per-host OPS-8 verbatim bring-up — the deterministic cores are all implemented and tested above; the long-running process wiring is the remaining work.
@@ -149,6 +170,32 @@ the human reads it — the report is for the owner, not for the machine.
   restore path runs in CI without nesting cargo. Status stays `implementing`
   for exactly one reason: the long-running `opsd` process (heartbeat HTTP +
   host sampling + bot transport) is not built — its decision cores are.
+- 2026-08-06: the RES-4 band-accuracy trend (spec 029 LIQ-6) is wired into the
+  monthly report as a grounded section (OPS-6). `ops::report` owns the shape:
+  `parse_band_accuracy_trend` is the pure, fail-closed parser (CONV-8 — every
+  non-empty line must be the job's exact journal shape, well-typed; a corrupt
+  line fails the load naming the line, never a silently dropped week);
+  `load_band_accuracy_trend` is the thin read boundary — a missing journal is
+  a "no data" month (RES-5), not an error, so an early deployment's report
+  renders the honest empty row. The renderer stays I/O-free; the caller
+  grounds the section by passing the loaded rows.
+- 2026-08-06: OPS-13 — the trend is also watched for drift/decay.
+  `band_accuracy_decay_alert` mirrors the RES-3 edge-decay flag (spec 010):
+  ≥ 12 graded weeks, trailing 4-week mean vs the 12-week mean, coverage below
+  half (baseline ≥ 0.5) or MRE more than doubled (baseline > 0) raises the
+  `band-accuracy-decay` P3 alert. The baseline guards mirror RES-3's "a
+  never-good edge is a kill decision, not decay" (a grade that was never
+  ≥ 50% covered is a different problem). The trailing rows are the most recent
+  *graded* weeks — the study skips weeks without census data (LIQ-10), so ISO
+  gaps are not decay. `mean12` is the full 12-row window mean (RES-3-faithful:
+  the recent 4 weeks are included in it), not a disjoint prior window.
+  Invocation: `run_whale_study_weekly.sh` calls `mp-ops band-accuracy-decay
+  --trend $OUT_DIR/band_accuracy.jsonl` after each study (best-effort — a
+  missing mp-ops binary or unreadable journal warns in journald and never
+  fails the study; the monthly report surfaces the same journal). The
+  Telegram send stays a deployment artifact, same posture as the OPS-7 watch
+  functions. Alert-only (W-6). Requirement numbering continues at OPS-13
+  because OPS-11/OPS-12 belong to spec 021's bot journal.
 
 ## Open questions
 - Phone-call escalation provider for P1 (Twilio vs a healthchecks add-on) —

@@ -1,0 +1,26 @@
+# Deribit options market-data recorder (spec 031, OPT-7). Public WS, no auth
+# for market data (OPT-1). Recording only — no analytics (OPT-6).
+# Start with:
+#   cargo run -p mp-collectors --features live-ws,live-http --bin mp-collector -- \
+#     --config collectors/deribit.example.toml
+venue = "deribit"
+# The "symbol" here is the record's label; the currency drives the universe.
+symbol = "BTC-OPTIONS"
+currency = "BTC"
+
+data_dir = "data"
+channel_capacity = 10000
+backpressure = "drop_oldest"
+
+# Instrument subscription filter (spec 031 Decisions: near-expiry subset to
+# bound volume).
+[instrument_filter]
+max_instruments = 200
+expiry_window_days = 45
+
+# Also subscribe ticker channels (mark IV + greeks at record). Default off.
+record_ticker = false
+
+# Capture raw frames verbatim pre-parse to {data_dir}/raw/deribit/{date}/
+# (spec 031 OPT-3/COL-9). Uncompressed .ndjson in v1 (see Decisions).
+raw_capture = true

@@ -18,8 +18,56 @@ min_notional = 250000.0
 # Default: Hyperliquid only (large-print edge on HL public tape).
 venues = ["hyperliquid"]
 
+[whale_net]
+# Aggregate whale net positioning + deltas (spec 028 census → feature engine
+# 004, after the RES-4 event study): per-symbol sum of signed position
+# notional across recorded addresses (`whale.net.{venue}`) and its change vs
+# the previous reading (`whale.delta.{venue}`). Only venues with a recorded
+# WhalePosition census make sense (default: hyperliquid).
+venues = ["hyperliquid"]
+# A position not refreshed within this window (ns) is evicted from the
+# census — a flattened position or a leaderboard drop-off must not linger
+# in the aggregate. Default 10 min (~10 top-N polls at the 60s cadence).
+stale_after_ns = 600000000000
+
 [liq_cluster]
 # Liquidations within this window (ns) summing to >= min_cluster_notional
 # form a cluster.
 window_ns = 60000000000
 min_cluster_notional = 5000000.0
+
+[liq_agg]
+# Cross-venue de-sampled liquidation tape (spec 029). Dedup near-simultaneous
+# reports of the same liquidation across venues within dedup_window_ns, then
+# emit the rolling signed notional over agg_window_ns. Sampled: venues
+# throttle, this is a best-effort merged tape, not a census.
+dedup_window_ns = 250000000
+agg_window_ns = 1000000000
+
+[liq_est_bands]
+# Estimated liquidation cascade bands (spec 029), from OI + mark + leverage
+# tiers. ESTIMATED (model), not ground truth — validate against spec 028 real
+# liq prices (RES-4) before any strategy use.
+maintenance_buffer = 1.5
+# leverage tiers + OI weights — DOCUMENTED ASSUMPTIONS until calibrated from
+# the recorded spec 028 real leverage distribution:
+#   cargo run -p mp-features --bin whale_study -- --log <positions.log> --leverage-calibration --json
+#   python3 research/run_calibrate_leverage.py --log <positions.log> --print-toml   (spec 029 LIQ-11)
+[[liq_est_bands.leverage_tiers]]
+leverage = 1.0
+weight = 0.05
+[[liq_est_bands.leverage_tiers]]
+leverage = 2.0
+weight = 0.10
+[[liq_est_bands.leverage_tiers]]
+leverage = 5.0
+weight = 0.15
+[[liq_est_bands.leverage_tiers]]
+leverage = 10.0
+weight = 0.25
+[[liq_est_bands.leverage_tiers]]
+leverage = 20.0
+weight = 0.25
+[[liq_est_bands.leverage_tiers]]
+leverage = 50.0
+weight = 0.20

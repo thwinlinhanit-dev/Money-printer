@@ -51,3 +51,16 @@ Almost nobody *records* it, and recorded tick/L2 history is what everyone else
 pays thousands per month for. Phase 0 of this project is simply: **run a recorder
 and start compounding a private dataset**. Every later layer (features, signals,
 backtests, ML, LLM-generated market briefs) is built on top of that asset.
+
+## Data storage & backup (W-6)
+
+Recorded market data lives under `/data` (raw) and `/data-migrated`, and is
+gitignored per **W-6** (never commit or delete recorded data). Treat it as a
+private, compounding asset, not as disposable workspace:
+
+- Keep it **off `~/Downloads`** and other OS-disposable paths. Route collector
+  output to a dedicated drive/folder that is backed up.
+- Back up `/data` and `/data-migrated` on a schedule — a simple copy/zip is fine
+  until a formal cold-store pipeline exists.
+- Keep OS-level sync/cleanup tools (OneDrive, disk cleanup, `cargo clean`) away
+  from the data directories.

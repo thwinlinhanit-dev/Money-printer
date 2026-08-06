@@ -1,0 +1,29 @@
+# Hyperliquid whale-position collector (spec 028, WHL-8). Public REST, no auth.
+# Start with:
+#   cargo run -p mp-collectors --features live-http --bin mp-whale -- \
+#     --config collectors/whale_positions.toml.example
+# Addresses are opaque 0x identifiers only — no external labels (WHL-3).
+data_dir = "data"
+
+# How many top addresses to pull from the leaderboard each top-N poll (WHL-1).
+top_n = 50
+
+# Leaderboard poll cadence (WHL-7; a missed poll emits Status::GapDetected).
+top_poll_interval_s = 60
+
+# Watchlist addresses polled on the faster cadence (WHL-1).
+watchlist = [
+    "0x0000000000000000000000000000000000000000",
+]
+
+# Watchlist poll cadence (WHL-7).
+watch_poll_interval_s = 30
+
+# Leaderboard time window ("1d", "7d", "30d").
+leaderboard_window = "7d"
+
+# Optional coin filter: record only these coins' positions (empty = all).
+symbols = []
+
+# Pacing between per-address REST fetches (Hyperliquid rate limits, WHL-1).
+min_poll_gap_ms = 150

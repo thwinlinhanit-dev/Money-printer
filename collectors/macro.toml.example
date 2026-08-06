@@ -1,0 +1,24 @@
+# Macro data collector (spec 030, MAC-7). FRED series + cadence.
+# Correlation-grade, not execution-grade (MAC-5): never used as execution
+# data for TradFi futures (no CME license).
+# NO API KEY HERE — the key comes from the FRED_API_KEY env var only (MAC-2,
+# PD-2). Get a free key: https://fred.stlouisfed.org/docs/api/api_key.html
+# Start with:
+#   FRED_API_KEY=... cargo run -p mp-collectors --features live-http --bin mp-macro -- \
+#     --config collectors/macro.toml.example
+data_dir = "data"
+
+# FRED series ids (owner pick, spec 030 Decisions): DXY, 10Y, 2Y, SOFR, EFFR.
+series = ["DTWEXBGS", "DGS10", "DGS2", "SOFR", "DFF"]
+
+# Daily poll cadence in seconds (MAC-4; default 1/day).
+poll_cadence_s = 86400
+
+# Initial backfill window in days (observations from today - N).
+backfill_days = 30
+
+# ---- HIP-3 TradFi symbols (spec 030 MAC-1) -----------------------------------
+# HIP-3 pairs run through the EXISTING hyperliquid collector — no new code
+# path (zero new network infra). Record them with asset_class metadata:
+#   cargo run -p mp-collectors --features live-ws,live-http --bin mp-collector -- \
+#     --venue hyperliquid --symbol BTC --hip3-symbols "xyz:XYZ100,xyz:SP500,xyz:CRUDE"

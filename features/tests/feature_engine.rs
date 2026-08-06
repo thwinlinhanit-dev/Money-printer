@@ -2,7 +2,9 @@
 
 use mp_core::{EventEnvelope, MarketEvent, Side, SnapshotReason, SymbolId, Venue};
 use mp_features::catalog::*;
-use mp_features::{Cond, FeatureEngine, FeatureUpdate, Op, Rule, Screener};
+use mp_features::{
+    Cond, FeatureEngine, FeatureUpdate, Op, Rule, Screener, WhaleNet, WhaleNetDelta,
+};
 use smallvec::smallvec;
 
 const SEC: i64 = 1_000_000_000;
@@ -66,6 +68,23 @@ fn trade_hl(recv: i64, price: f64, qty: f64, side: Side) -> EventEnvelope {
     )
 }
 
+fn whale_pos(recv: i64, addr: &str, size: f64, entry: f64, venue: Venue) -> EventEnvelope {
+    EventEnvelope::new(
+        venue,
+        SymbolId(0),
+        recv,
+        recv,
+        0,
+        MarketEvent::WhalePosition {
+            address: addr.into(),
+            size,
+            entry,
+            leverage: 10.0,
+            liq_price: f64::NAN,
+        },
+    )
+}
+
 #[test]
 fn fea_1_whale_print_thresholds_notional() {
     let mut e = FeatureEngine::new(SEC);
@@ -78,6 +97,145 @@ fn fea_1_whale_print_thresholds_notional() {
     // 100 * 2000 = 200k ≥ 100k, sell → negative signed notional.
     let u = e.on_event(&trade_hl(2, 100.0, 2000.0, Side::Sell));
     assert_eq!(value(&e, &u, "whale_print.hyperliquid"), Some(-200_000.0));
+}
+
+#[test]
+fn fea_1_whale_net_aggregates_across_addresses_and_replaces() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(WhaleNet::new(Venue::Hyperliquid)));
+    // A: long 10 BTC @ 30k → +300k.
+    let u = e.on_event(&whale_pos(1, "0xa", 10.0, 30_000.0, Venue::Hyperliquid));
+    assert_eq!(value(&e, &u, "whale.net.hyperliquid"), Some(300_000.0));
+    // B: short 5 BTC @ 30k → +300k − 150k = +150k net.
+    let u = e.on_event(&whale_pos(2, "0xb", -5.0, 30_000.0, Venue::Hyperliquid));
+    assert_eq!(value(&e, &u, "whale.net.hyperliquid"), Some(150_000.0));
+    // A's position REPLACES (last poll wins, snapshot semantics): +2 BTC
+    // → +60k − 150k = −90k net: whales flipped net short.
+    let u = e.on_event(&whale_pos(3, "0xa", 2.0, 30_000.0, Venue::Hyperliquid));
+    assert_eq!(value(&e, &u, "whale.net.hyperliquid"), Some(-90_000.0));
+}
+
+#[test]
+fn fea_1_whale_delta_changes_since_previous_net() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(WhaleNetDelta::new(Venue::Hyperliquid)));
+    // First reading: baseline, no delta yet (oi.delta shape).
+    assert!(e
+        .on_event(&whale_pos(1, "0xa", 10.0, 30_000.0, Venue::Hyperliquid))
+        .is_empty());
+    // Second: +300k → +60k = −240k.
+    let u = e.on_event(&whale_pos(2, "0xa", 2.0, 30_000.0, Venue::Hyperliquid));
+    assert_eq!(value(&e, &u, "whale.delta.hyperliquid"), Some(-240_000.0));
+    // Unchanged reading → 0.0 (momentum flat, oi.delta semantics).
+    let u = e.on_event(&whale_pos(3, "0xa", 2.0, 30_000.0, Venue::Hyperliquid));
+    assert_eq!(value(&e, &u, "whale.delta.hyperliquid"), Some(0.0));
+}
+
+#[test]
+fn fea_1_whale_net_venue_scoped_and_nan_fail_closed() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(WhaleNet::new(Venue::Hyperliquid)));
+    // A Bybit position must not touch the HL-scoped feature.
+    assert!(e
+        .on_event(&whale_pos(1, "0xa", 10.0, 30_000.0, Venue::Bybit))
+        .is_empty());
+    // NaN entry → position skipped ENTIRELY (fail-closed, CONV-8); a corrupt
+    // frame must not move the aggregate.
+    assert!(e
+        .on_event(&whale_pos(2, "0xbad", 10.0, f64::NAN, Venue::Hyperliquid))
+        .is_empty());
+    // NaN size likewise.
+    assert!(e
+        .on_event(&whale_pos(
+            3,
+            "0xbad",
+            f64::NAN,
+            30_000.0,
+            Venue::Hyperliquid
+        ))
+        .is_empty());
+    // A valid reading still emits the honest aggregate (only 0xa counted).
+    let u = e.on_event(&whale_pos(4, "0xa", 1.0, 30_000.0, Venue::Hyperliquid));
+    assert_eq!(value(&e, &u, "whale.net.hyperliquid"), Some(30_000.0));
+}
+
+#[test]
+fn fea_1_whale_net_evicts_positions_not_refreshed() {
+    // The census is top-N + watchlist: a flattened position (no tombstone
+    // event from clearinghouseState) or a dropped-off leaderboard address
+    // stops refreshing. A 10s stale window must evict it — whale.net is the
+    // CURRENT census, never a graveyard of dead positions.
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(WhaleNet::with_stale_after(Venue::Hyperliquid, 10 * SEC)));
+    // A at t=1s: +10 BTC @ 30k = +300k.
+    let u = e.on_event(&whale_pos(1, "0xa", 10.0, 30_000.0, Venue::Hyperliquid));
+    assert_eq!(value(&e, &u, "whale.net.hyperliquid"), Some(300_000.0));
+    // B at t=12s: A is stale (last seen 1s < 12s − 10s cutoff) → evicted,
+    // only B counted: −5 BTC @ 30k = −150k.
+    let u = e.on_event(&whale_pos(
+        12 * SEC,
+        "0xb",
+        -5.0,
+        30_000.0,
+        Venue::Hyperliquid,
+    ));
+    assert_eq!(value(&e, &u, "whale.net.hyperliquid"), Some(-150_000.0));
+    // A refreshed at t=20s (within B's window too): +2 BTC → +60k − 150k.
+    let u = e.on_event(&whale_pos(
+        20 * SEC,
+        "0xa",
+        2.0,
+        30_000.0,
+        Venue::Hyperliquid,
+    ));
+    assert_eq!(value(&e, &u, "whale.net.hyperliquid"), Some(-90_000.0));
+}
+
+#[test]
+fn fea_1_whale_delta_evicts_stale_positions() {
+    // The delta feature shares the same census (same eviction helper): a
+    // stale position dropped between readings must move the delta.
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| {
+        Box::new(WhaleNetDelta::with_stale_after(
+            Venue::Hyperliquid,
+            10 * SEC,
+        ))
+    });
+    // Baseline: A long 10 BTC @ 30k → +300k, no delta yet.
+    assert!(e
+        .on_event(&whale_pos(1, "0xa", 10.0, 30_000.0, Venue::Hyperliquid))
+        .is_empty());
+    // t=12s: A evicted (stale), B short 5 BTC → net −150k; delta −450k.
+    let u = e.on_event(&whale_pos(
+        12 * SEC,
+        "0xb",
+        -5.0,
+        30_000.0,
+        Venue::Hyperliquid,
+    ));
+    assert_eq!(value(&e, &u, "whale.delta.hyperliquid"), Some(-450_000.0));
+}
+
+#[test]
+fn fea_1_whale_net_is_order_independent() {
+    // Address arrival order must not change the aggregate (BTreeMap keying,
+    // CONV-10): 3×10k − 1×20k = +10k either way.
+    let mut a = FeatureEngine::new(SEC);
+    a.register_tick(|| Box::new(WhaleNet::new(Venue::Hyperliquid)));
+    let mut b = FeatureEngine::new(SEC);
+    b.register_tick(|| Box::new(WhaleNet::new(Venue::Hyperliquid)));
+    let mut ups_a = Vec::new();
+    ups_a.extend(a.on_event(&whale_pos(1, "0x1", 3.0, 10_000.0, Venue::Hyperliquid)));
+    ups_a.extend(a.on_event(&whale_pos(2, "0x2", -1.0, 20_000.0, Venue::Hyperliquid)));
+    let mut ups_b = Vec::new();
+    ups_b.extend(b.on_event(&whale_pos(1, "0x2", -1.0, 20_000.0, Venue::Hyperliquid)));
+    ups_b.extend(b.on_event(&whale_pos(2, "0x1", 3.0, 10_000.0, Venue::Hyperliquid)));
+    assert_eq!(
+        value(&a, &ups_a, "whale.net.hyperliquid"),
+        value(&b, &ups_b, "whale.net.hyperliquid"),
+        "address order must not matter"
+    );
 }
 
 #[test]
@@ -349,6 +507,9 @@ fn fea_7_features_toml_parses_and_rejects_unknown_keys() {
         venues = ["bybit", "okx"]
         [whale_print]
         min_notional = 300000.0
+        [whale_net]
+        venues = ["hyperliquid", "bybit"]
+        stale_after_ns = 300000000000
         [liq_cluster]
         window_ns = 30000000000
         min_cluster_notional = 4000000.0
@@ -356,6 +517,13 @@ fn fea_7_features_toml_parses_and_rejects_unknown_keys() {
     let cfg = FeaturesConfig::from_toml(toml).unwrap();
     assert_eq!(cfg.cvd.venues, vec!["bybit", "okx"]);
     assert_eq!(cfg.whale_print.min_notional, 300000.0);
+    assert_eq!(cfg.whale_net.venues, vec!["hyperliquid", "bybit"]);
+    assert_eq!(cfg.whale_net.stale_after_ns, 300_000_000_000);
+
+    // Defaults when the section is absent (hyperliquid only, 10 min stale).
+    let bare = FeaturesConfig::from_toml("[whale_print]\nmin_notional = 1.0").unwrap();
+    assert_eq!(bare.whale_net.venues, vec!["hyperliquid"]);
+    assert_eq!(bare.whale_net.stale_after_ns, 600_000_000_000);
 
     // A typo'd key is a hard error (deny_unknown_fields), never a silent default.
     let bad = r#"
