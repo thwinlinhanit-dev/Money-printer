@@ -259,7 +259,25 @@ async fn run(
         write.send(Message::Text(sub.clone())).await?;
     }
 
-    while let Some(msg) = read.next().await {
+    // Read timeout (COL-2 defense): a half-open TCP socket can hold
+    // `read.next()` forever (no FIN, no data, no keepalive). depth@100ms +
+    // markPrice@1s mean any real subscription delivers within seconds, so a
+    // 20s silence is a dead connection — end the task so the collector sees
+    // `Disconnected` and reconnects instead of freezing silently.
+    const READ_TIMEOUT: Duration = Duration::from_secs(20);
+    loop {
+        let next = tokio::time::timeout(READ_TIMEOUT, read.next()).await;
+        let msg = match next {
+            Err(_) => {
+                tracing::warn!(
+                    "ws read timed out after {}s of silence; reconnecting",
+                    READ_TIMEOUT.as_secs()
+                );
+                break;
+            }
+            Ok(None) => break, // stream closed by the peer
+            Ok(Some(msg)) => msg,
+        };
         let payload = match msg? {
             Message::Text(t) => t.into_bytes(),
             Message::Binary(b) => b,
@@ -348,7 +366,7 @@ async fn connect_through_proxy(
     // `install_default()` having been called by the caller.
     let stream: BoxedStream = if target.scheme() == "wss" {
         let roots = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
         let config = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),

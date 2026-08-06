@@ -109,6 +109,30 @@ pub fn wall_now_ns() -> i64 {
         .as_nanos() as i64
 }
 
+/// REST timeouts (COL-29). `reqwest::blocking::get` installs NO total/read
+/// timeout, so a stalled connection or dead DNS can hang the collector's
+/// single-threaded loop indefinitely — heartbeats and data-log appends freeze
+/// together, and the watchdog respawns in a loop (observed on 08-05/08-06:
+/// per-day sequence-gap storms + 22-45 spawns). Every Binance REST fetch goes
+/// through this client so a sick network bounds stalls to ~10s and the loop
+/// resumes (heartbeat keeps ticking, data resumes, gaps stay small).
+const REST_TOTAL_TIMEOUT_SECS: u64 = 10;
+const REST_CONNECT_TIMEOUT_SECS: u64 = 5;
+
+#[cfg(feature = "live-http")]
+fn rest_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(REST_TOTAL_TIMEOUT_SECS))
+            .connect_timeout(std::time::Duration::from_secs(REST_CONNECT_TIMEOUT_SECS))
+            // Provably infallible on this binary: rustls is compiled in and the
+            // default builds a rustls-backed client.
+            .build()
+            .expect("reqwest blocking Client::builder().build() with rustls")
+    })
+}
+
 /// REST depth snapshot for Binance (spec 020). Fetched once on WebSocket
 /// connect to seed book state, avoiding synthetic-seeding from the first delta.
 #[cfg(feature = "live-http")]
@@ -229,7 +253,7 @@ pub fn fetch_depth_snapshot_blocking_budgeted(
         "https://api.binance.com"
     };
     let url = format!("{base}{path}?symbol={symbol}&limit={limit}");
-    let resp = reqwest::blocking::get(&url)?;
+    let resp = rest_client().get(&url).send()?;
     let status = resp.status();
     if status.as_u16() == 429 {
         let wait = resp
@@ -274,7 +298,7 @@ pub fn fetch_open_interest_blocking(
     symbol: &str,
 ) -> Result<MarketEvent, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol}");
-    let resp = reqwest::blocking::get(&url)?;
+    let resp = rest_client().get(&url).send()?;
     let status = resp.status();
     if status.as_u16() == 429 {
         // 429 ⇒ RetryAfter semantics, never a generic error (COL-21).
@@ -378,7 +402,7 @@ pub fn fetch_premium_index_blocking(
     symbol: &str,
 ) -> Result<PremiumIndex, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}");
-    let resp = reqwest::blocking::get(&url)?;
+    let resp = rest_client().get(&url).send()?;
     let status = resp.status();
     if status.as_u16() == 429 {
         let wait = resp
@@ -432,7 +456,7 @@ pub fn fetch_agg_trades_blocking(
     if let Some(id) = from_id {
         url.push_str(&format!("&fromId={id}"));
     }
-    let resp = reqwest::blocking::get(&url)?;
+    let resp = rest_client().get(&url).send()?;
     let status = resp.status();
     if status.as_u16() == 429 {
         let wait = resp

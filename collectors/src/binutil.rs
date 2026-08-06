@@ -194,3 +194,48 @@ pub fn touch_heartbeat(raw_dir: &Path, name: &str) {
         format!("ts={ts_sec} pid={} name={name}\n", std::process::id()),
     );
 }
+
+/// Append-only tracing sink shared by the collector binaries (`--trace-file`).
+/// Append (never truncate) so a watchdog respawn never erases the freeze
+/// evidence of the previous process — rotate by naming the path per day at
+/// the caller (watchdog passes `trace_<date>_<venue>_<symbol>.log`).
+#[derive(Clone)]
+pub struct SharedLogFile {
+    file: std::sync::Arc<std::sync::Mutex<std::io::BufWriter<File>>>,
+}
+
+impl SharedLogFile {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            file: std::sync::Arc::new(std::sync::Mutex::new(std::io::BufWriter::new(file))),
+        })
+    }
+}
+
+impl Write for SharedLogFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut f = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("shared trace file mutex poisoned"))?;
+        f.write_all(buf)?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        let mut f = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("shared trace file mutex poisoned"))?;
+        f.flush()
+    }
+}
+
+/// tracing-subscriber sink: each `make_writer()` hands the subscriber a cheap
+/// clone; the fmt layer never calls `Write` on the same handle twice.
+impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for SharedLogFile {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}

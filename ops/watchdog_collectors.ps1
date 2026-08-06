@@ -118,11 +118,14 @@ function Spawn-Collector {
 
     # KEY FIX: UseShellExecute=true fully detaches from this process's stdio.
     # No pipe is created, so the collector never blocks on stdout.
-    # Tracing output goes to nul; the binary writes its own data + heartbeat files.
     # $Sym is validated above (^[A-Z0-9]{2,20}$) and double-quoted here.
+    # --trace-file: the collector writes its tracing logs itself (append-only,
+    # per-day file) because stderr is discarded by the detachment — keeps the
+    # freeze diagnostics from a respawn cycle instead of losing them.
+    $tracePath = Join-Path $rawDir ("trace_{0}_binance_{1}.log" -f (Get-Date).ToUniversalTime().ToString("yyyyMMdd"), $Sym)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName         = $exe
-    $psi.Arguments        = "--symbol `"$Sym`" --no-whale --trade-source rest --mark-source rest"
+    $psi.Arguments        = "--symbol `"$Sym`" --no-whale --trade-source rest --mark-source rest --trace-file `"$tracePath`""
     $psi.WorkingDirectory = [string]$root
     $psi.UseShellExecute  = $true
     $psi.WindowStyle      = [System.Diagnostics.ProcessWindowStyle]::Hidden

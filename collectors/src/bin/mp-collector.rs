@@ -49,7 +49,7 @@ mod inner {
         #[serde(default)]
         trade_source: Option<String>,
         /// COL-28: `"ws"` (default) or `"rest"`. REST mode ingests mark price
-        /// + funding from `GET /fapi/v1/premiumIndex` and drops WS
+        /// and funding from `GET /fapi/v1/premiumIndex` and drops WS
         /// markPriceUpdate frames at the normalizer — the recovery path when
         /// fstream silently drops the markPrice stream (spec 024 incident
         /// 2026-08-04). Independent of `trade_source` so either stream can be
@@ -1132,7 +1132,28 @@ fn main() {
 
     #[cfg(feature = "live-ws")]
     {
-        tracing_subscriber::fmt::init();
+        // --trace-file <path>: durable append-only tracing log (COL-29). The
+        // watchdog spawns detached (UseShellExecute) so stderr is lost; a
+        // file sink keeps the freeze/diagnosis evidence after a respawn.
+        // Append-only + per-day path (watchdog names it with the date), so a
+        // respawn never erases the previous process's last lines.
+        let args: Vec<String> = std::env::args().collect();
+        match mp_collectors::binutil::flag(&args, "--trace-file") {
+            Some(path) => {
+                match mp_collectors::binutil::SharedLogFile::open(std::path::Path::new(&path)) {
+                    Ok(sink) => {
+                        tracing_subscriber::fmt().with_writer(sink).init();
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: cannot open --trace-file {path}: {e}; tracing to stderr"
+                        );
+                        tracing_subscriber::fmt::init();
+                    }
+                }
+            }
+            None => tracing_subscriber::fmt::init(),
+        }
         if let Err(e) = inner::run() {
             tracing::error!(error = %e, "collector failed");
             std::process::exit(1);
