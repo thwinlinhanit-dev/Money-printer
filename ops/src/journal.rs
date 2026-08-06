@@ -30,7 +30,6 @@ pub struct CommandJournal {
     current_date: String,
     bytes_written: u64,
     max_bytes: u64,
-    last_flushed: i64,
 }
 
 impl CommandJournal {
@@ -45,7 +44,6 @@ impl CommandJournal {
             current_date: String::new(),
             bytes_written: 0,
             max_bytes: 10 * 1024 * 1024, // 10MB default rotation threshold
-            last_flushed: 0,
         };
         j.rotate()?;
         Ok(j)
@@ -124,7 +122,7 @@ impl CommandJournal {
             return Ok(None);
         }
         let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&content).map_err(|e| std::io::Error::other(e))
+        serde_json::from_str(&content).map_err(std::io::Error::other)
     }
 
     /// Flush and fsync.

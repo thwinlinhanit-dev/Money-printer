@@ -14,15 +14,28 @@
 # collector is the dead-man's job to flag (OPS-2), not this job's.
 #
 # After the study appends the new week to the trend journal, the OPS-13
-# drift/decay watch runs `mp-ops band-accuracy-decay` over it — a P3 FYI when
-# coverage halved / MRE doubled vs the 12-week baseline. Best-effort: a
-# missing mp-ops binary or an unreadable journal warns (visible in journald),
-# never fails the study that just succeeded; the check itself never
-# fabricates a verdict (fail-closed, CONV-8).
+# drift/decay watch runs `mp-ops band-accuracy-decay --runs-dir $RUNS_DIR
+# --telegram` over it — a P3 FYI when coverage halved / MRE doubled vs the
+# 12-week baseline. Each weekly verdict (clean or decayed) is journaled to
+# $RUNS_DIR/index.jsonl as its own `band_accuracy_decay` record line,
+# correlated to the study's SIM-10 run record by run_id + week (RES-4
+# tracker, append-only W-6). The alert is routed through the framework's
+# quiet-hours batching (OPS-9): sent immediately outside quiet hours, held
+# in journal/telegram/batch.jsonl during them and flushed via `mp-ops
+# telegram-flush --wait` when the window ends — the wait lives inside the
+# subcommand (it sleeps only while quiet hours are active, then drains); the
+# weekly run lands at 06:30 UTC, inside the 22:00–07:00 window, so a decay
+# alert is delivered as a quiet push just after 07:00. Best-effort: a
+# missing mp-ops binary, missing Telegram credentials ("unconfigured" —
+# logged, never a fake send), or an unreadable journal warns (visible in
+# journald) and never fails the study that just succeeded; the check itself
+# never fabricates a verdict (fail-closed, CONV-8).
 #
 # All paths are env-overridable (MP_DATA_DIR, MP_OUT_DIR, MP_RUNS_DIR,
 # MP_WHALE_STUDY_BIN, MP_PYTHON, MP_CONFIG, MP_GIT_SHA, MP_REPO_DIR,
-# MP_WEEK_DAYS, MP_OPS_CMD) so the script is testable without a live host.
+# MP_WEEK_DAYS, MP_OPS_CMD, MP_OPS_TELEGRAM_FLUSH) so the script is testable
+# without a live host; quiet-hours timing is the subcommands' own env
+# (MP_OPS_QUIET_START_MIN/END_MIN, MP_OPS_SLEEP for tests).
 set -euo pipefail
 
 DATA_DIR="${MP_DATA_DIR:-/opt/money-printer/data/raw}"
@@ -34,6 +47,7 @@ CONFIG="${MP_CONFIG:-}"
 REPO_DIR="${MP_REPO_DIR:-/opt/money-printer}"
 WEEK_DAYS="${MP_WEEK_DAYS:-7}"
 OPS_CMD="${MP_OPS_CMD:-/opt/money-printer/bin/mp-ops}"
+FLUSH_CMD="${MP_OPS_TELEGRAM_FLUSH:-$OPS_CMD}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JOB="${SCRIPT_DIR}/../research/run_band_accuracy.py"
@@ -87,8 +101,26 @@ echo "whale-study-weekly: grading $((${#logs[@]})) hyperliquid log(s) into $RUNS
 # report surfaces the same journal; the alert send is a deployment artifact).
 TREND="${OUT_DIR}/band_accuracy.jsonl"
 if command -v "$OPS_CMD" >/dev/null 2>&1; then
-  "$OPS_CMD" band-accuracy-decay --trend "$TREND" \
-    || echo "whale-study-weekly: band-accuracy-decay check failed (exit $?) — see journald" >&2
+  # A failed check (corrupt journal, unreadable trend) must surface loudly in
+  # journald and must NEVER gate a flush — only a clean verdict does.
+  set +e
+  DECAY_OUT="$("$OPS_CMD" band-accuracy-decay --trend "$TREND" --runs-dir "$RUNS_DIR" --telegram 2>&1)"
+  DECAY_RC=$?
+  set -e
+  if [ "$DECAY_RC" -ne 0 ]; then
+    echo "whale-study-weekly: band-accuracy decay check failed (exit $DECAY_RC) — see journald" >&2
+    printf '%s\n' "$DECAY_OUT" >&2
+  else
+    echo "$DECAY_OUT"
+    # P3 quiet-hours batching (OPS-9): a batched verdict is held until quiet
+    # hours end, then the ledger is flushed to Telegram. The wait is inside
+    # the subcommand (`telegram-flush --wait` sleeps only while the window is
+    # active) — the wrapper just invokes it.
+    if printf '%s' "$DECAY_OUT" | grep -q '"batched"'; then
+      "$FLUSH_CMD" telegram-flush --wait \
+        || echo "whale-study-weekly: telegram batch flush failed (exit $?) — see journald" >&2
+    fi
+  fi
 else
   echo "whale-study-weekly: mp-ops ($OPS_CMD) not found — skipping the band-accuracy decay check (OPS-13)"
 fi

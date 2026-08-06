@@ -9,9 +9,15 @@
 //! `research/band_accuracy/band_accuracy.jsonl`, the journal
 //! `run_band_accuracy.py` appends — spec 029 LIQ-6) and hands the rows to
 //! [`MonthlyReport`]. Parsing is fail-closed (CONV-8): a corrupt journal line
-//! fails the load rather than silently dropping a graded week.
+//! fails the load rather than silently dropping a graded week. The delivery-
+//! accountability section grounds the same way on the quiet-hours Telegram
+//! ledger pair via [`load_telegram_batch`] / [`load_telegram_delivered`]
+//! (reads `journal/telegram/batch.jsonl` — pending, un-flushed P3 dispatches
+//! — and `journal/telegram/delivered.jsonl` — the flushed records of what
+//! WAS delivered; empty ledgers are the healthy states).
 
 use crate::alert::{Alert, Severity};
+use crate::telegram::{TelegramDeliveredRow, TelegramPendingRow};
 use std::path::{Path, PathBuf};
 
 /// One strategy's row in the expectancy / equity tables.
@@ -73,6 +79,11 @@ pub struct BandAccuracyRow {
     /// Coverage: fraction of observations where the estimate was NOT on the
     /// dangerous side of the realized liq price (fraction in [0, 1]).
     pub coverage: f64,
+    /// The run_id echo the job writes on each trend line (`run_id` of the
+    /// `whale_study` run that graded this week — the join key to that run's
+    /// SIM-10 record in `runs/index.jsonl`). Optional: the parser accepts
+    /// trend lines that predate the echo (and test fixtures that omit it).
+    pub run_id: Option<String>,
 }
 
 /// The benchmark row (REQUIRED, OPS-6): the book vs passive alternatives.
@@ -99,12 +110,53 @@ pub struct MonthlyReport {
     /// ISO week, grounded on `band_accuracy.jsonl`. Empty = the study has not
     /// produced evidence yet ⇒ the section renders "no data" (RES-5).
     pub band_accuracy: Vec<BandAccuracyRow>,
+    /// Pending (un-flushed) quiet-hours Telegram dispatches, grounded on
+    /// `journal/telegram/batch.jsonl` via [`load_telegram_batch`]. Delivery
+    /// accountability (OPS-6/OPS-9): a queued line is an alert that was
+    /// batched but NOT yet delivered — anything still queued at month-end is
+    /// a delivery gap the report surfaces. Empty = every batch was flushed
+    /// (the healthy state).
+    pub telegram_pending: Vec<TelegramPendingRow>,
+    /// Delivered quiet-hours Telegram dispatches, grounded on
+    /// `journal/telegram/delivered.jsonl` via [`load_telegram_delivered`] —
+    /// the flushed records `telegram-flush` appends per successful send.
+    /// Delivery accountability (OPS-6): what WAS delivered this month, the
+    /// evidence the ledger worked, alongside the pending queue above. Empty
+    /// = no flush has recorded a delivery (the healthy "nothing delivered
+    /// yet" state).
+    pub telegram_delivered: Vec<TelegramDeliveredRow>,
     pub benchmark: Benchmark,
 }
 
 fn pct(x: f64) -> String {
     format!("{:+.2}%", x * 100.0)
 }
+
+/// Relative delivery age for the delivery log: `today` for the current day,
+/// `{n}d ago` otherwise — grounded on the loader's injected clock (PD-3).
+fn delivered_age(days: u64) -> String {
+    if days == 0 {
+        "today".to_string()
+    } else {
+        format!("{days}d ago")
+    }
+}
+
+/// Inline stylesheet for the self-contained HTML report (no external assets).
+const REPORT_CSS: &str = r#"
+body{font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;margin:2rem auto;max-width:60rem;padding:0 1rem;color:#1c1e21;line-height:1.5}
+h1{font-size:1.6rem;border-bottom:2px solid #d0d7de;padding-bottom:.4rem}
+h2{font-size:1.15rem;margin-top:1.8rem;color:#24292f}
+h3{font-size:1rem;margin-top:1.4rem;color:#24292f}
+table{border-collapse:collapse;width:100%;margin:.5rem 0 1rem}
+th,td{border:1px solid #d0d7de;padding:.4rem .6rem;text-align:left;font-size:.92rem}
+th{background:#f6f8fa}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.nodata td{color:#6e7781;font-style:italic}
+.blended{font-size:1.05rem}
+li{margin:.2rem 0}
+footer{margin-top:2rem;font-size:.8rem;color:#6e7781;border-top:1px solid #d0d7de;padding-top:.5rem}
+"#;
 
 /// Escape a dynamic string for HTML text content. The five entities that
 /// matter in text and quoted attributes — `&`, `<`, `>`, `"`, `'` — so a
@@ -232,7 +284,50 @@ impl MonthlyReport {
             ));
         }
 
-        // 7. Benchmark row (REQUIRED).
+        // 7. Delivery accountability (OPS-6/OPS-9): the quiet-hours Telegram
+        // batch ledger. A queued line is a P3 alert that was batched but NOT
+        // yet delivered — anything still queued at month-end is a delivery
+        // gap, surfaced here instead of silently lost (W-6). An empty ledger
+        // is rendered strictly grounded: nothing is pending NOW (the ledger
+        // records only what is queued, not delivery history).
+        s.push_str("\n## Delivery Accountability (Telegram queue)\n\n");
+        if self.telegram_pending.is_empty() {
+            s.push_str("_No pending alerts in the quiet-hours Telegram queue._\n");
+        } else {
+            s.push_str("| Alert | Severity | Queued | Detail | Runbook |\n|---|---|---|---|---|\n");
+            for p in &self.telegram_pending {
+                s.push_str(&format!(
+                    "| {} | {} | {}d | {} | {} |\n",
+                    p.id,
+                    p.severity.as_str(),
+                    p.queued_days,
+                    p.detail,
+                    p.runbook
+                ));
+            }
+        }
+
+        // 7b. Delivery log — what WAS delivered this month (OPS-6): the
+        // flushed records from `journal/telegram/delivered.jsonl`, written by
+        // `telegram-flush` on each successful send. The accountability
+        // counterpart to the pending queue above: evidence the ledger
+        // actually worked. Rows are grounded on the loader (injected clock,
+        // PD-3), never invented.
+        s.push_str("\n### Delivered this month (Telegram delivery log)\n\n");
+        if self.telegram_delivered.is_empty() {
+            s.push_str("_No deliveries recorded in the Telegram delivery log._\n");
+        } else {
+            s.push_str("| Alert | Delivered |\n|---|---|\n");
+            for d in &self.telegram_delivered {
+                s.push_str(&format!(
+                    "| {} | {} |\n",
+                    d.id,
+                    delivered_age(d.delivered_days_ago)
+                ));
+            }
+        }
+
+        // 8. Benchmark row (REQUIRED).
         s.push_str("\n## Benchmark\n\n");
         s.push_str("| Book | BTC hold | T-bill |\n|---|---|---|\n");
         s.push_str(&format!(
@@ -257,23 +352,9 @@ impl MonthlyReport {
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Monthly Report — {}</title>\n",
             html_escape(&self.month)
         ));
-        s.push_str(
-            "<style>\n\
-             body{font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\
-             margin:2rem auto;max-width:60rem;padding:0 1rem;color:#1c1e21;line-height:1.5}\n\
-             h1{font-size:1.6rem;border-bottom:2px solid #d0d7de;padding-bottom:.4rem}\n\
-             h2{font-size:1.15rem;margin-top:1.8rem;color:#24292f}\n\
-             table{border-collapse:collapse;width:100%;margin:.5rem 0 1rem}\n\
-             th,td{border:1px solid #d0d7de;padding:.4rem .6rem;text-align:left;font-size:.92rem}\n\
-             th{background:#f6f8fa}\n\
-             td.num{text-align:right;font-variant-numeric:tabular-nums}\n\
-             tr.nodata td{color:#6e7781;font-style:italic}\n\
-             .blended{font-size:1.05rem}\n\
-             li{margin:.2rem 0}\n\
-             footer{margin-top:2rem;font-size:.8rem;color:#6e7781;border-top:1px solid #d0d7de;\
-             padding-top:.5rem}\n\
-             </style>\n</head>\n<body>\n",
-        );
+        s.push_str("<style>");
+        s.push_str(REPORT_CSS);
+        s.push_str("</style>\n</head>\n<body>\n");
 
         s.push_str(&format!(
             "<h1>Monthly Report — {}</h1>\n",
@@ -361,7 +442,11 @@ impl MonthlyReport {
         } else {
             s.push_str("<ul>\n");
             for f in &self.funnel {
-                let arrow = if f.demotion { "⏬ kill/demote" } else { "⏫ promote" };
+                let arrow = if f.demotion {
+                    "⏬ kill/demote"
+                } else {
+                    "⏫ promote"
+                };
                 s.push_str(&format!(
                     "<li>{} {}: {} → {}</li>\n",
                     arrow,
@@ -393,7 +478,52 @@ impl MonthlyReport {
         }
         s.push_str("</tbody></table>\n");
 
-        // 7. Benchmark row (REQUIRED, OPS-6).
+        // 7. Delivery accountability (OPS-6/OPS-9) — grounded on the loaded
+        // `journal/telegram/batch.jsonl` rows, never invented. An empty
+        // ledger renders strictly grounded: nothing pending NOW.
+        s.push_str("<h2>Delivery Accountability (Telegram queue)</h2>\n");
+        if self.telegram_pending.is_empty() {
+            s.push_str(
+                "<p class=\"nodata\">No pending alerts in the quiet-hours Telegram queue.</p>\n",
+            );
+        } else {
+            s.push_str(
+                "<table><thead><tr><th>Alert</th><th>Severity</th><th>Queued</th><th>Detail</th><th>Runbook</th></tr></thead><tbody>\n",
+            );
+            for p in &self.telegram_pending {
+                s.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td class=\"num\">{}d</td><td>{}</td><td>{}</td></tr>\n",
+                    html_escape(&p.id),
+                    p.severity.as_str(),
+                    p.queued_days,
+                    html_escape(&p.detail),
+                    html_escape(&p.runbook)
+                ));
+            }
+            s.push_str("</tbody></table>\n");
+        }
+
+        // 7b. Delivery log — what WAS delivered this month (OPS-6), grounded
+        // on the loaded `delivered.jsonl` rows, never invented. An empty log
+        // renders strictly grounded: no flush has recorded a delivery.
+        s.push_str("<h3>Delivered this month (Telegram delivery log)</h3>\n");
+        if self.telegram_delivered.is_empty() {
+            s.push_str(
+                "<p class=\"nodata\">No deliveries recorded in the Telegram delivery log.</p>\n",
+            );
+        } else {
+            s.push_str("<table><thead><tr><th>Alert</th><th>Delivered</th></tr></thead><tbody>\n");
+            for d in &self.telegram_delivered {
+                s.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td></tr>\n",
+                    html_escape(&d.id),
+                    delivered_age(d.delivered_days_ago)
+                ));
+            }
+            s.push_str("</tbody></table>\n");
+        }
+
+        // 8. Benchmark row (REQUIRED, OPS-6).
         s.push_str("<h2>Benchmark</h2>\n");
         s.push_str(&format!(
             "<table><thead><tr><th>Book</th><th>BTC hold</th><th>T-bill</th></tr></thead><tbody>\n<tr>\
@@ -457,11 +587,16 @@ pub fn parse_band_accuracy_trend(text: &str) -> Result<Vec<BandAccuracyRow>, Str
             .and_then(|v| v.as_f64())
             .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
             .ok_or_else(|| format!("band_accuracy.jsonl line {lineno}: invalid 'coverage'"))?;
+        let run_id = obj
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
         rows.push(BandAccuracyRow {
             week,
             observations,
             mean_relative_error,
             coverage,
+            run_id,
         });
     }
     // Deterministic report order: ISO weeks sort lexically ("2026-W30" <
@@ -483,6 +618,27 @@ pub fn load_band_accuracy_trend(path: &Path) -> Result<Vec<BandAccuracyRow>, Str
         Err(e) => return Err(format!("read {}: {e}", path.display())),
     };
     parse_band_accuracy_trend(&text)
+}
+
+/// Append one record line to `<runs-dir>/index.jsonl` — the shared RES-4/SIM-10
+/// run tracker (append-only, W-6; fsynced so a crash cannot lose the line,
+/// OPS-12 spirit — the same contract as the whale_study binary's own record
+/// append and `append_batch`). Used by `band-accuracy-decay` to journal each
+/// weekly verdict as its own line, correlated to the study's run record by
+/// `run_id`/`week`.
+pub fn append_run_record(runs_dir: &Path, record: &serde_json::Value) -> Result<(), String> {
+    std::fs::create_dir_all(runs_dir).map_err(|e| format!("create {}: {e}", runs_dir.display()))?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(runs_dir.join("index.jsonl"))
+        .map_err(|e| format!("open runs index: {e}"))?; // JSONL: exactly one record per physical line (append-only W-6).
+    let mut line = serde_json::to_string(record).map_err(|e| e.to_string())?;
+    line.push('\n');
+    std::io::Write::write_all(&mut f, line.as_bytes())
+        .map_err(|e| format!("write runs index: {e}"))?;
+    f.sync_all().map_err(|e| format!("sync runs index: {e}"))?;
+    Ok(())
 }
 
 /// Write the monthly report to disk as markdown + HTML (spec 009: rendered to

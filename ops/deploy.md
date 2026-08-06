@@ -18,7 +18,7 @@ the first time you do (OPS-8).**
 
 ```sh
 install -m 0600 /dev/null /etc/money-printer/venues.env   # public data: usually empty
-install -m 0600 /dev/null /etc/money-printer/ops.env      # TELEGRAM_BOT_TOKEN, OWNER_ID
+install -m 0600 /dev/null /etc/money-printer/ops.env      # TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, OWNER_ID
 install -m 0600 /dev/null /etc/money-printer/llm.env      # ANTHROPIC_API_KEY, ... (see llm/providers.example.toml)
 ```
 
@@ -52,17 +52,29 @@ Copy the unit templates from `ops/systemd/` (below), fill the venue list, then:
 systemctl enable --now collector@bybit collector@okx collector@binance
 systemctl enable --now opsd
 systemctl enable --now whale-study.timer
-systemctl status 'collector@*' opsd whale-study.timer
+systemctl enable --now telegram-stale.timer
+systemctl status 'collector@*' opsd whale-study.timer telegram-stale.timer
 ```
 
 `whale-study.timer` runs the RES-4 band-accuracy study weekly (Tue 06:30 UTC)
 and is `ConditionPathExists`-gated: it skips (never fails) until the spec 028
 `mp-whale` collector has written `data/raw/*_hyperliquid_positions.log`, then
 journals each run's SIM-10 record to `runs/index.jsonl`. After each study the
-wrapper also runs `mp-ops band-accuracy-decay` over the trend journal (OPS-13
-P3 drift/decay watch) — `mp-ops` installs to `/opt/money-printer/bin/` above.
-Make sure the `mp-whale` census collector (spec 028) is running, or the
-study stays a skip.
+wrapper also runs `mp-ops band-accuracy-decay --runs-dir
+/opt/money-printer/runs --telegram` over the trend journal (OPS-13 P3
+drift/decay watch) — the weekly verdict is journaled to the same
+`runs/index.jsonl` as a `band_accuracy_decay` record line correlated to the
+study's run by `run_id`/`week`, and `mp-ops` installs to
+`/opt/money-printer/bin/` above. When the decay P3 fires it is delivered to
+Telegram (quiet-hours batched, drained just after 07:00 UTC via
+`mp-ops telegram-flush --wait`): the host needs
+`curl`, and ops.env must carry `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
+(the bot token spec 021 uses). `telegram-stale.timer` runs
+`mp-ops telegram-stale --telegram` hourly (OPS-14): a dispatch queued
+longer than one quiet window (24h — a missed flush) raises the
+`telegram-stale` P2 immediately — P2 breaks through quiet hours, so it is
+sent right away, never re-queued into the stuck batch. Make sure the
+`mp-whale` census collector (spec 028) is running, or the study stays a skip.
 
 Confirm `/status` in Telegram shows every collector heartbeating.
 

@@ -4,19 +4,56 @@
 //!   compact --date YYYY-MM-DD --venue bybit --symbol BTCUSDT
 //!           Compacts a raw event log into partitioned Parquet files.
 //!           Date also accepts YYYYMMDD (backward compatible).
-//!   band-accuracy-decay --trend PATH [--dedupe-ns N]
+//!   band-accuracy-decay --trend PATH [--runs-dir DIR] [--dedupe-ns N] [--telegram]
 //!           OPS-13 drift/decay watch over the RES-4 band-accuracy trend
 //!           journal (research/band_accuracy/band_accuracy.jsonl): prints a
 //!           JSON verdict {decayed: bool, alert: {...}}; exit 2 on a corrupt
-//!           journal (fail-closed), never a fabricated verdict.
+//!           journal (fail-closed), never a fabricated verdict. With
+//!           --runs-dir, the weekly verdict is journaled to
+//!           <runs-dir>/index.jsonl as its own `band_accuracy_decay` record
+//!           line (RES-4 tracker, append-only W-6), correlated to the study's
+//!           run record by run_id + week from the latest trend line. With
+//!           --telegram, a fired alert is routed through the framework's
+//!           dedupe + quiet-hours batching (OPS-9) and delivered to Telegram
+//!           (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID, MP_OPS_TELEGRAM_URL,
+//!           MP_OPS_TELEGRAM_DIR, MP_OPS_QUIET_START_MIN/END_MIN): sent now,
+//!           batched to journal/telegram/batch.jsonl during quiet hours, or
+//!           gated as "unconfigured" without credentials.
+//!   telegram-flush [--dir DIR] [--wait]
+//!           Drain the P3 quiet-hours batch ledger to Telegram (fail-closed:
+//!           any send failure keeps the batch and exits 2). With --wait, the
+//!           drain is held until quiet hours end — sleeping only while the
+//!           window is active (MP_OPS_QUIET_START_MIN/END_MIN; MP_OPS_SLEEP
+//!           overrides the sleeper, a command receiving the seconds, so tests
+//!           never block) — the weekly wrapper's quiet-hours wait, moved
+//!           inside the binary. Every successful send is appended to
+//!           journal/telegram/delivered.jsonl ({id, delivered_ts_ns}) — the
+//!           delivery log the monthly report renders (OPS-6): what WAS
+//!           delivered, as opposed to what is still pending.
+//!   telegram-stale [--dir DIR] [--threshold-hours N] [--dedupe-ns N] [--telegram]
+//!           OPS-14 near-real-time watch on the quiet-hours batch ledger:
+//!           raises telegram-stale (P2) when a dispatch sits queued longer
+//!           than one quiet window (default 24h — a missed telegram-flush),
+//!           printing a JSON verdict {stale, pending, alert} (pending = the
+//!           number of dispatches in the batch); exit 2 on a corrupt batch
+//!           (fail-closed), never a fabricated verdict. With --telegram, a
+//!           fired P2 is sent immediately (P2 always breaks through quiet
+//!           hours, OPS-9).
 //!
 //! Usage:
 //!   cargo run --package mp-ops --bin mp-ops -- compact --date 2026-07-15 --venue bybit --symbol BTCUSDT
 //!   cargo run --package mp-ops --bin mp-ops -- band-accuracy-decay --trend research/band_accuracy/band_accuracy.jsonl
+//!   cargo run --package mp-ops --bin mp-ops -- band-accuracy-decay --trend research/band_accuracy/band_accuracy.jsonl --runs-dir runs --telegram
+//!   cargo run --package mp-ops --bin mp-ops -- telegram-flush --wait
+//!   cargo run --package mp-ops --bin mp-ops -- telegram-stale --telegram
 
 use mp_core::log::LogReader;
 use mp_core::{EventEnvelope, SymbolTable, Venue};
-use mp_ops::{band_accuracy_decay_alert, load_band_accuracy_trend};
+use mp_ops::{
+    append_batch, append_run_record, band_accuracy_decay_alert, flush_batch,
+    load_band_accuracy_trend, load_telegram_batch, post_telegram, stale_batch_alert, AlertRouter,
+    Dispatch, QuietHours, RouteOutcome, TelegramConfig,
+};
 use mp_storage::promotion::check_promotion;
 use mp_storage::{audit_raw_log, compactor, AuditConfig, DailyScorecard, RawLogAudit};
 use serde::{Deserialize, Serialize};
@@ -39,7 +76,8 @@ fn need(args: &[String], name: &str) -> Result<String, String> {
 
 fn flags(args: &[String], name: &str) -> Vec<String> {
     args.windows(2)
-        .filter_map(|pair| (pair[0] == name).then(|| pair[1].clone()))
+        .filter(|pair| pair[0] == name)
+        .map(|pair| pair[1].clone())
         .collect()
 }
 
@@ -94,8 +132,8 @@ fn days_from_epoch(y: i64, m: u32, d: u32) -> u64 {
         30,
         31,
     ];
-    for month in 0..(m as usize - 1) {
-        total += months[month] as u64;
+    for &days in &months[..m as usize - 1] {
+        total += days as u64;
     }
     total += (d - 1) as u64;
     total
@@ -319,11 +357,11 @@ fn cmd_promote(args: &[String]) -> Result<String, String> {
     {
         let name = entry.file_name().to_string_lossy().to_string();
         // Accept YYYY-MM-DD.json and YYYYMMDD.json (normalize on load).
-        let (stem, ext) = match name.rsplit_once('.') {
-            Some((s, e)) if e == "json" => (s.to_string(), true),
+        let stem = match name.rsplit_once('.') {
+            Some((s, "json")) => s.to_string(),
             _ => continue,
         };
-        if !ext || !(stem.len() == 10 && stem.contains('-') || stem.len() == 8) {
+        if !(stem.len() == 10 && stem.contains('-') || stem.len() == 8) {
             continue;
         }
         let text = std::fs::read_to_string(entry.path())
@@ -396,7 +434,7 @@ fn cmd_promote(args: &[String]) -> Result<String, String> {
     };
     // Return the JSON verdict as the command's message: `main` prints it
     // exactly once (the tracing line is silenced by RUST_LOG=off in callers).
-    Ok(serde_json::to_string(&serde_json::json!({
+    serde_json::to_string(&serde_json::json!({
         "promoted": verdict.promoted,
         "consecutive_clean": verdict.consecutive_clean,
         "required": verdict.required,
@@ -406,7 +444,7 @@ fn cmd_promote(args: &[String]) -> Result<String, String> {
         "scorecards": scorecards.len(),
         "summary": summary,
     }))
-    .map_err(|e| e.to_string())?)
+    .map_err(|e| e.to_string())
 }
 
 fn cmd_scorecard(args: &[String]) -> Result<String, String> {
@@ -456,8 +494,20 @@ fn cmd_scorecard(args: &[String]) -> Result<String, String> {
 /// journal is a "no data" month (RES-5, `decayed: false`). `--dedupe-ns` sets
 /// the alert's dedupe window for a future stateful consumer (e.g. a Telegram
 /// bot transport that routes through `AlertRouter`); a one-shot process has no
-/// dedupe state of its own. The weekly wrapper (`run_whale_study_weekly.sh`)
-/// runs this after each study; the Telegram send remains a deployment artifact.
+/// dedupe state of its own.
+///
+/// `--runs-dir` journals the weekly run's verdict to `<runs-dir>/index.jsonl`
+/// (the shared RES-4/SIM-10 tracker) as a `band_accuracy_decay` record line,
+/// correlated to the study's `whale_study` run record by the `run_id`/`week`
+/// of the latest trend line (the week the study just graded) — the tracker
+/// records the study AND its drift verdict per week. A clean verdict is
+/// journaled too (the evidence the check ran); an empty trend has no run to
+/// attach and writes nothing (RES-5). Fail-closed: an unwritable tracker is a
+/// real failure (exit 2), never a silent gap in the record.
+///
+/// The weekly wrapper (`run_whale_study_weekly.sh`) runs this after each
+/// study with `--runs-dir $RUNS_DIR --telegram`; the Telegram send remains a
+/// deployment artifact.
 fn cmd_band_accuracy_decay(args: &[String]) -> Result<String, String> {
     let trend = flag(args, "--trend")
         .unwrap_or_else(|| "research/band_accuracy/band_accuracy.jsonl".to_string());
@@ -473,7 +523,7 @@ fn cmd_band_accuracy_decay(args: &[String]) -> Result<String, String> {
     let rows = load_band_accuracy_trend(Path::new(&trend))
         .map_err(|e| format!("band-accuracy-decay: {e}"))?;
     let alert = band_accuracy_decay_alert(&rows, dedupe_ns);
-    let verdict = serde_json::json!({
+    let mut verdict = serde_json::json!({
         "decayed": alert.is_some(),
         "alert": alert.as_ref().map(|a| serde_json::json!({
             "id": a.id,
@@ -483,7 +533,287 @@ fn cmd_band_accuracy_decay(args: &[String]) -> Result<String, String> {
             "dedupe_key": a.dedupe_key,
         })),
     });
+
+    // Telegram edge (OPS-13/OPS-9): route a fired alert through the
+    // framework's dedupe + quiet-hours batching, then deliver. Without a
+    // fired alert there is nothing to send; without credentials the edge is
+    // functionality-gated — logged as "unconfigured", exit 0 (never a silent
+    // failure and never a fake send, same posture as the P1 webhook). An
+    // edge failure (bad quiet-hours config, failed send/batch) is captured
+    // and propagated AFTER the verdict is journaled below: the week's
+    // verdict is evidence and must not be blanked by a delivery outage — the
+    // record says "send_failed" honestly and the command still exits 2.
+    let mut telegram_err: Option<String> = None;
+    if args.iter().any(|a| a == "--telegram") {
+        if let Some(alert) = alert {
+            if let (Some(token), Some(chat_id)) = (
+                std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+                std::env::var("TELEGRAM_CHAT_ID").ok(),
+            ) {
+                let cfg = TelegramConfig {
+                    url: std::env::var("MP_OPS_TELEGRAM_URL")
+                        .unwrap_or_else(|_| "https://api.telegram.org".to_string()),
+                    token,
+                    chat_id,
+                };
+                let now = now_ns();
+                match quiet_hours_from_env() {
+                    Ok(qh) => {
+                        let mut router = AlertRouter::new(Some(qh));
+                        match router.route(&alert, now) {
+                            RouteOutcome::Sent(d) => match post_telegram(&d, &cfg) {
+                                Ok(()) => verdict["telegram"] = serde_json::json!("sent"),
+                                Err(e) => {
+                                    telegram_err = Some(format!("telegram send failed: {e}"));
+                                    verdict["telegram"] = serde_json::json!("send_failed");
+                                }
+                            },
+                            RouteOutcome::Batched => {
+                                let dir = PathBuf::from(
+                                    std::env::var("MP_OPS_TELEGRAM_DIR")
+                                        .unwrap_or_else(|_| "journal/telegram".to_string()),
+                                );
+                                match append_batch(&dir, &Dispatch::from_alert(&alert, now)) {
+                                    Ok(()) => verdict["telegram"] = serde_json::json!("batched"),
+                                    Err(e) => {
+                                        telegram_err = Some(format!("telegram batch failed: {e}"));
+                                        verdict["telegram"] = serde_json::json!("send_failed");
+                                    }
+                                }
+                            }
+                            RouteOutcome::Deduped => {
+                                verdict["telegram"] = serde_json::json!("deduped");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        telegram_err = Some(e);
+                        verdict["telegram"] = serde_json::json!("send_failed");
+                    }
+                }
+            } else {
+                verdict["telegram"] = serde_json::json!("unconfigured");
+            }
+        } else {
+            verdict["telegram"] = serde_json::json!("none");
+        }
+    }
+
+    // RES-4 tracker (SIM-10 contract): journal the weekly verdict as its own
+    // line in runs/index.jsonl, correlated to the study's run record by the
+    // run_id + week of the latest trend line. The record mirrors the printed
+    // verdict (decayed/alert/telegram) plus the correlation fields. An
+    // unwritable tracker is a hard failure (exit 2) — evidence is never
+    // silently dropped — but it does not suppress a telegram edge error.
+    if let Some(runs_dir) = flag(args, "--runs-dir") {
+        if let Some(last) = rows.last() {
+            let mut record = verdict.clone();
+            record["study"] = serde_json::json!("band_accuracy_decay");
+            record["week"] = serde_json::json!(&last.week);
+            record["run_id"] = match &last.run_id {
+                Some(id) => serde_json::json!(id),
+                None => serde_json::Value::Null,
+            };
+            append_run_record(Path::new(&runs_dir), &record)
+                .map_err(|e| format!("band-accuracy-decay: {e}"))?;
+        }
+    }
+    if let Some(e) = telegram_err {
+        return Err(e);
+    }
     serde_json::to_string(&verdict).map_err(|e| e.to_string())
+}
+
+/// Drain the P3 quiet-hours batch ledger (`journal/telegram/batch.jsonl`) to
+/// Telegram. Fail-closed (CONV-8): any send failure or corrupt line exits
+/// non-zero with the batch intact — alerts are never silently dropped. Every
+/// successful send is recorded in the delivery log
+/// (`journal/telegram/delivered.jsonl`) — the flushed records the monthly
+/// report's delivery log renders (OPS-6): what WAS delivered, as opposed to
+/// what is still pending.
+///
+/// `--wait` first holds until quiet hours end (OPS-9), then drains — the
+/// weekly wrapper's wait, moved inside the binary. It sleeps only while quiet
+/// hours are actually active: a flush that starts outside the window (or
+/// after it, e.g. a wrapper that began late) drains immediately instead of
+/// sleeping ~24h for a wrap-around window.
+fn cmd_telegram_flush(args: &[String]) -> Result<String, String> {
+    let (Some(token), Some(chat_id)) = (
+        std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+        std::env::var("TELEGRAM_CHAT_ID").ok(),
+    ) else {
+        return Err("telegram-flush: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set".into());
+    };
+    let cfg = TelegramConfig {
+        url: std::env::var("MP_OPS_TELEGRAM_URL")
+            .unwrap_or_else(|_| "https://api.telegram.org".to_string()),
+        token,
+        chat_id,
+    };
+    let dir = match flag(args, "--dir") {
+        Some(d) => PathBuf::from(d),
+        None => PathBuf::from(
+            std::env::var("MP_OPS_TELEGRAM_DIR").unwrap_or_else(|_| "journal/telegram".to_string()),
+        ),
+    };
+    if args.iter().any(|a| a == "--wait") {
+        let qh = quiet_hours_from_env()?;
+        let now = now_ns();
+        if qh.contains(now) {
+            let secs = u64::from(qh.minutes_until_end(now)) * 60;
+            println!("telegram-flush: in quiet hours — flushing in {secs}s");
+            sleep_secs(secs);
+        }
+    }
+    // now_ns() stamps the delivered records — the delivery log is evidence
+    // (PD-3: the CLI is an ops edge; the timestamp is the injected clock).
+    let flushed = flush_batch(&dir, &cfg, now_ns())?;
+    serde_json::to_string(&serde_json::json!({ "flushed": flushed })).map_err(|e| e.to_string())
+}
+
+/// OPS-14 near-real-time staleness watch over the quiet-hours Telegram batch
+/// ledger: raises `telegram-stale` (P2) when a dispatch has been queued
+/// longer than one full quiet window (default 24h) — a missed
+/// `telegram-flush` must alert in near-real-time (the hourly
+/// `telegram-stale.timer`), not just at month-end in the report.
+///
+/// Prints a JSON verdict — `{"stale": bool, "pending": n, "alert": {...}|null}`
+/// (`pending` = dispatches currently in the batch; the stale count lives in
+/// the alert detail) — and exits 0 either way. A corrupt batch is a failed
+/// command (exit 2,
+/// CONV-8): the check never fabricates a verdict; a missing batch is the
+/// healthy "nothing queued" state (`stale: false`). `--threshold-hours` sets
+/// the quiet-window size (default 24); `--dedupe-ns` sets the alert's dedupe
+/// window for a future stateful consumer (default = threshold). With
+/// `--telegram`, a fired P2 is routed through the Bot API edge and sent
+/// immediately — P2 always breaks through quiet hours (OPS-9), so the alert
+/// escapes the very batch that is stuck and is never re-queued into it.
+fn cmd_telegram_stale(args: &[String]) -> Result<String, String> {
+    let dir = match flag(args, "--dir") {
+        Some(d) => PathBuf::from(d),
+        None => PathBuf::from(
+            std::env::var("MP_OPS_TELEGRAM_DIR").unwrap_or_else(|_| "journal/telegram".to_string()),
+        ),
+    };
+    let threshold_ns = match flag(args, "--threshold-hours") {
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|_| "--threshold-hours must be an integer")?
+            .checked_mul(3_600_000_000_000)
+            .ok_or("--threshold-hours out of range")?,
+        None => 24 * 3_600_000_000_000i64,
+    };
+    if threshold_ns <= 0 {
+        return Err("--threshold-hours must be positive".into());
+    }
+    let dedupe_ns = match flag(args, "--dedupe-ns") {
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|_| "--dedupe-ns must be an integer")?,
+        None => threshold_ns,
+    };
+    if dedupe_ns <= 0 {
+        return Err("--dedupe-ns must be positive".into());
+    }
+    let now = now_ns();
+    let rows = load_telegram_batch(&dir, now).map_err(|e| format!("telegram-stale: {e}"))?;
+    let alert = stale_batch_alert(&rows, now, threshold_ns, dedupe_ns);
+    let mut verdict = serde_json::json!({
+        "stale": alert.is_some(),
+        "pending": rows.len(),
+        "alert": alert.as_ref().map(|a| serde_json::json!({
+            "id": a.id,
+            "severity": a.severity.as_str(),
+            "detail": a.detail,
+            "runbook": a.runbook,
+            "dedupe_key": a.dedupe_key,
+        })),
+    });
+
+    if args.iter().any(|a| a == "--telegram") {
+        if let Some(alert) = alert {
+            if let (Some(token), Some(chat_id)) = (
+                std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+                std::env::var("TELEGRAM_CHAT_ID").ok(),
+            ) {
+                let cfg = TelegramConfig {
+                    url: std::env::var("MP_OPS_TELEGRAM_URL")
+                        .unwrap_or_else(|_| "https://api.telegram.org".to_string()),
+                    token,
+                    chat_id,
+                };
+                // P2 always breaks through quiet hours (OPS-9); a one-shot
+                // router has no dedupe history, so the fired alert is Sent.
+                let mut router = AlertRouter::new(None);
+                match router.route(&alert, now) {
+                    RouteOutcome::Sent(d) => match post_telegram(&d, &cfg) {
+                        Ok(()) => verdict["telegram"] = serde_json::json!("sent"),
+                        Err(e) => return Err(format!("telegram send failed: {e}")),
+                    },
+                    RouteOutcome::Batched | RouteOutcome::Deduped => {
+                        unreachable!("a fresh no-quiet-hours router never batches or dedupes a P2")
+                    }
+                }
+            } else {
+                verdict["telegram"] = serde_json::json!("unconfigured");
+            }
+        } else {
+            verdict["telegram"] = serde_json::json!("none");
+        }
+    }
+    serde_json::to_string(&verdict).map_err(|e| e.to_string())
+}
+/// Sleep `secs` — the quiet-hours wait (`telegram-flush --wait`).
+/// `MP_OPS_SLEEP` overrides the sleeper (a command receiving the seconds),
+/// the same seam the weekly wrapper used, so e2e tests never block on a real
+/// multi-hour sleep. The override is best-effort — an unspawnable override
+/// falls through to flushing rather than failing the drain.
+fn sleep_secs(secs: u64) {
+    if secs == 0 {
+        return;
+    }
+    match std::env::var("MP_OPS_SLEEP") {
+        Ok(cmd) => {
+            let _ = std::process::Command::new(cmd)
+                .arg(secs.to_string())
+                .status();
+        }
+        Err(_) => std::thread::sleep(std::time::Duration::from_secs(secs)),
+    }
+}
+
+/// Wall-clock now — the CLI is an ops edge (alerting/telemetry), the same
+/// sanctioned read opsd and the command journal use (PD-3: edges, not
+/// decision paths).
+fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64
+}
+
+/// Quiet-hours window from env (MP_OPS_QUIET_START_MIN / MP_OPS_QUIET_END_MIN,
+/// minutes-of-day), defaulting to the spec 009 policy window 22:00–07:00 UTC.
+fn quiet_hours_from_env() -> Result<QuietHours, String> {
+    let start = match std::env::var("MP_OPS_QUIET_START_MIN") {
+        Ok(s) => s
+            .parse::<u32>()
+            .map_err(|_| "MP_OPS_QUIET_START_MIN must be an integer (minutes of day)")?,
+        Err(_) => 22 * 60,
+    };
+    let end = match std::env::var("MP_OPS_QUIET_END_MIN") {
+        Ok(s) => s
+            .parse::<u32>()
+            .map_err(|_| "MP_OPS_QUIET_END_MIN must be an integer (minutes of day)")?,
+        Err(_) => 7 * 60,
+    };
+    if start >= 1440 || end > 1440 {
+        return Err("quiet-hours minutes must be in 0..1440".into());
+    }
+    Ok(QuietHours {
+        start_min: start,
+        end_min: end,
+    })
 }
 
 fn main() -> ExitCode {
@@ -492,7 +822,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: mp-ops <subcommand> [options]");
-        eprintln!("Subcommands: compact, audit, scorecard, promote, band-accuracy-decay");
+        eprintln!(
+            "Subcommands: compact, audit, scorecard, promote, band-accuracy-decay, telegram-flush, telegram-stale"
+        );
         return ExitCode::FAILURE;
     }
 
@@ -502,6 +834,8 @@ fn main() -> ExitCode {
         "scorecard" => cmd_scorecard(&args[2..]),
         "promote" => cmd_promote(&args[2..]),
         "band-accuracy-decay" => cmd_band_accuracy_decay(&args[2..]),
+        "telegram-flush" => cmd_telegram_flush(&args[2..]),
+        "telegram-stale" => cmd_telegram_stale(&args[2..]),
         other => Err(format!("unknown subcommand: {other}")),
     };
 
@@ -514,7 +848,19 @@ fn main() -> ExitCode {
         Err(e) => {
             tracing::error!("{e}");
             eprintln!("Error: {e}");
-            ExitCode::FAILURE
+            // Job subcommands exit 2 on failure — the same convention as the
+            // Python research siblings (`run_band_accuracy.py`: "a failed job
+            // (exit 2)"): a failed check is a distinct, grep-able status, not
+            // a generic usage error. The weekly wrapper treats non-zero as
+            // "check failed, see journald" and never fabricates a verdict.
+            if matches!(
+                args[1].as_str(),
+                "band-accuracy-decay" | "telegram-flush" | "telegram-stale"
+            ) {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
@@ -639,6 +985,15 @@ mod tests {
         )
     }
 
+    /// The same line carrying the job's `run_id` echo — the run record of the
+    /// `whale_study` run that graded that week (the join key to the SIM-10
+    /// record in runs/index.jsonl).
+    fn trend_line_with_run_id(week: u32, coverage: f64, mre: f64, run_id: &str) -> String {
+        format!(
+            "{{\"week\":\"2026-W{week:02}\",\"run_id\":\"{run_id}\",\"n\":100,\"mean_relative_error\":{mre},\"coverage\":{coverage}}}"
+        )
+    }
+
     #[test]
     fn ops_13_mp_ops_decay_subcommand_reports_verdict() {
         let dir = std::env::temp_dir().join(format!("mpops13-{}", std::process::id()));
@@ -700,6 +1055,80 @@ mod tests {
         ])
         .expect_err("non-positive dedupe must fail");
         assert!(zero.contains("must be positive"), "{zero}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ops_13_mp_ops_decay_journals_verdict_to_runs_index() {
+        let dir = std::env::temp_dir().join(format!("mpops13r-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let trend = dir.join("band_accuracy.jsonl");
+        let runs_dir = dir.join("runs");
+        let runs = runs_dir.to_string_lossy().into_owned();
+
+        // Decayed trend (8 healthy + 4 collapsed weeks) with run_id echoes:
+        // the latest graded week is 2026-W12, run 01JBA...0001.
+        let mut lines = (1..=8)
+            .map(|w| trend_line_with_run_id(w, 0.94, 0.02, "01JBA0TEST0000000000000001"))
+            .collect::<Vec<_>>();
+        lines.extend(
+            (9..=12).map(|w| trend_line_with_run_id(w, 0.25, 0.12, "01JBA0TEST0000000000000001")),
+        );
+        std::fs::write(&trend, lines.join("\n") + "\n").unwrap();
+
+        let out = cmd_band_accuracy_decay(&[
+            "--trend".into(),
+            trend.to_string_lossy().into(),
+            "--runs-dir".into(),
+            runs.clone(),
+        ])
+        .expect("decayed verdict with journaling");
+        assert!(out.contains("\"decayed\":true"), "{out}");
+
+        // The verdict line landed in runs/index.jsonl, correlated by run_id +
+        // week to the weekly run's whale_study record (RES-4 tracker).
+        let idx = std::fs::read_to_string(runs_dir.join("index.jsonl")).unwrap();
+        let rec: serde_json::Value =
+            serde_json::from_str(idx.lines().next().expect("one verdict line")).unwrap();
+        assert_eq!(rec["study"], "band_accuracy_decay");
+        assert_eq!(rec["week"], "2026-W12");
+        assert_eq!(rec["run_id"], "01JBA0TEST0000000000000001");
+        assert_eq!(rec["decayed"], true);
+        assert_eq!(rec["alert"]["id"], "band-accuracy-decay");
+
+        // A healthy trend still journals its verdict (decayed=false, alert
+        // null) — the clean verdict is the evidence the check ran.
+        let healthy = (1..=12)
+            .map(|w| trend_line_with_run_id(w, 0.94, 0.02, "01JBA0TEST0000000000000002"))
+            .collect::<Vec<_>>();
+        std::fs::write(&trend, healthy.join("\n") + "\n").unwrap();
+        cmd_band_accuracy_decay(&[
+            "--trend".into(),
+            trend.to_string_lossy().into(),
+            "--runs-dir".into(),
+            runs.clone(),
+        ])
+        .expect("healthy verdict with journaling");
+        let idx = std::fs::read_to_string(runs_dir.join("index.jsonl")).unwrap();
+        let rec: serde_json::Value =
+            serde_json::from_str(idx.lines().nth(1).expect("second verdict line")).unwrap();
+        assert_eq!(rec["decayed"], false);
+        assert_eq!(rec["alert"], serde_json::Value::Null);
+        assert_eq!(rec["run_id"], "01JBA0TEST0000000000000002");
+
+        // Missing journal (no graded week yet ⇒ no run to attach, RES-5):
+        // the verdict is printed but NOT journaled.
+        let before = std::fs::read_to_string(runs_dir.join("index.jsonl")).unwrap();
+        cmd_band_accuracy_decay(&[
+            "--trend".into(),
+            dir.join("nope.jsonl").to_string_lossy().into(),
+            "--runs-dir".into(),
+            runs.clone(),
+        ])
+        .expect("no-data verdict");
+        let after = std::fs::read_to_string(runs_dir.join("index.jsonl")).unwrap();
+        assert_eq!(before, after, "no run to correlate ⇒ no verdict line");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

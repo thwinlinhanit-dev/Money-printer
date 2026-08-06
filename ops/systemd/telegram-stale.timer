@@ -1,0 +1,14 @@
+# OPS-14: the stale-batch check runs hourly (at :15, clear of the 07:00
+# telegram-flush drain) — a missed flush is caught within an hour of the 24h
+# mark, near-real-time. Persistent: a missed fire (host down) runs on the
+# next boot; the check is idempotent (read-only, alert-only, W-6), so a
+# re-fire never double-journals anything.
+[Unit]
+Description=Hourly stale Telegram batch check timer
+
+[Timer]
+OnCalendar=*-*-* *:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

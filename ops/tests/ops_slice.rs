@@ -5,7 +5,7 @@ use mp_core::Venue;
 use mp_ops::{
     Alert, AlertRouter, BandAccuracyRow, Benchmark, Channel, CostBreakdown, DeadMan, FunnelEvent,
     KillLatch, LatchScope, MonthlyReport, QuietHours, RouteOutcome, Severity, StrategyRow,
-    TrackingRow,
+    TelegramDeliveredRow, TelegramPendingRow, TrackingRow,
 };
 
 const S: i64 = 1_000_000_000; // 1s in ns
@@ -81,6 +81,29 @@ fn ops_9_quiet_hours_batch_p3_but_p1_breaks_through() {
     let digest = r.drain_batch();
     assert_eq!(digest.len(), 1);
     assert_eq!(r.batch_len(), 0);
+}
+
+#[test]
+fn ops_9_quiet_hours_minutes_until_end() {
+    // The `telegram-flush --wait` sleep: minutes until the wrap-around window
+    // (22:00–07:00) ends, 0 when now is OUTSIDE it (a late flush drains
+    // immediately, never sleeping ~24h).
+    let quiet = QuietHours {
+        start_min: 22 * 60,
+        end_min: 7 * 60,
+    };
+    assert_eq!(quiet.minutes_until_end(23 * 60 * MIN), 8 * 60); // 23:00 → 08:00
+    assert_eq!(quiet.minutes_until_end(60 * MIN), 6 * 60); // 01:00 → 06:00
+    assert_eq!(quiet.minutes_until_end(12 * 60 * MIN), 0); // 12:00 outside
+    assert_eq!(quiet.minutes_until_end(7 * 60 * MIN), 0); // exactly at end ⇒ no longer quiet
+
+    // A non-wrapping window counts down to its own end_min.
+    let day = QuietHours {
+        start_min: 2 * 60,
+        end_min: 6 * 60,
+    };
+    assert_eq!(day.minutes_until_end(3 * 60 * MIN), 3 * 60);
+    assert_eq!(day.minutes_until_end(60 * MIN), 0); // before start
 }
 
 // ---- Dead-man switch (OPS-2) --------------------------------------------
@@ -183,14 +206,24 @@ fn fixture_report() -> MonthlyReport {
                 observations: 142,
                 mean_relative_error: 0.0214,
                 coverage: 0.936,
+                run_id: None,
             },
             BandAccuracyRow {
                 week: "2026-W26".to_string(),
                 observations: 98,
                 mean_relative_error: 0.0198,
                 coverage: 0.948,
+                run_id: None,
             },
         ],
+        telegram_pending: vec![],
+        // One flushed delivery in the delivery log — the fixture shows both
+        // sides of delivery accountability: pending (empty) AND delivered.
+        telegram_delivered: vec![TelegramDeliveredRow {
+            id: "band-accuracy-decay".to_string(),
+            delivered_ts_ns: 102 * 86_400 * S,
+            delivered_days_ago: 3,
+        }],
         benchmark: Benchmark {
             book_return: 0.031,
             btc_hold_return: 0.088,
@@ -209,6 +242,8 @@ fn ops_6_report_has_all_sections_and_benchmark_row() {
         "## Cost Breakdown",
         "## Funnel Transitions & Kills",
         "## Whale Band Accuracy (RES-4)",
+        "## Delivery Accountability (Telegram queue)",
+        "### Delivered this month (Telegram delivery log)",
         "## Benchmark",
     ] {
         assert!(md.contains(header), "missing section: {header}");
@@ -268,6 +303,16 @@ fn ops_6_band_accuracy_trend_loads_from_jsonl_sorted_and_grounded() {
     assert_eq!(rows[1].week, "2026-W31");
     assert_eq!(rows[1].observations, 98);
     assert!((rows[1].mean_relative_error - 0.0198).abs() < 1e-12);
+    // The run_id echo survives the parse — the join key to the whale_study
+    // run's SIM-10 record in runs/index.jsonl (RES-4 tracker).
+    assert_eq!(
+        rows[0].run_id.as_deref(),
+        Some("01JBA5TEST0000000000000000")
+    );
+    assert_eq!(
+        rows[1].run_id.as_deref(),
+        Some("01JBA6TEST0000000000000000")
+    );
 
     // Rendered into the report, the numbers appear exactly as loaded.
     let mut r = fixture_report();
@@ -321,6 +366,176 @@ fn ops_6_band_accuracy_trend_fails_closed_on_corruption_and_missing_is_no_data()
         .render_markdown()
         .contains("| _no data_ | — | — | — |"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_6_telegram_batch_loads_pending_rows_fail_closed() {
+    // The delivery-accountability loader reads the quiet-hours batch ledger
+    // (`journal/telegram/batch.jsonl`) — the exact shape `append_batch`
+    // writes — as pending (un-flushed) dispatches with injected clock age.
+    let dir = std::env::temp_dir().join(format!("mptg6-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ledger = dir.join("journal").join("telegram");
+    std::fs::create_dir_all(&ledger).unwrap();
+    let day = 86_400 * S;
+    // Appended OUT of queue order — the loader must sort oldest-first.
+    let newer = Alert::new("stream-gap", Severity::P2, MIN, "BTCUSDT gap 6m");
+    mp_ops::append_batch(&ledger, &mp_ops::Dispatch::from_alert(&newer, 102 * day)).unwrap();
+    let older = Alert::new("band-accuracy-decay", Severity::P3, 0, "RES-4 decay");
+    mp_ops::append_batch(&ledger, &mp_ops::Dispatch::from_alert(&older, 100 * day)).unwrap();
+
+    let rows = mp_ops::load_telegram_batch(&ledger, 105 * day).expect("load batch");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, "band-accuracy-decay", "sorted oldest-first");
+    assert_eq!(rows[0].severity, Severity::P3);
+    assert_eq!(rows[0].queued_days, 5); // 105d − 100d
+    assert_eq!(rows[1].id, "stream-gap");
+    assert_eq!(rows[1].severity, Severity::P2);
+    assert_eq!(rows[1].queued_days, 3); // 105d − 102d
+
+    // A corrupt line is evidence corruption: fail closed naming the line
+    // (CONV-8) — a queued alert is never silently dropped from the report.
+    std::fs::write(ledger.join("batch.jsonl"), "not a dispatch\n").unwrap();
+    let err = mp_ops::load_telegram_batch(&ledger, 105 * day).expect_err("corrupt line fails");
+    assert!(err.contains("line 1"), "error names the line: {err}");
+
+    // A missing ledger is the healthy "nothing pending" state, not an error.
+    let missing = dir.join("nope");
+    assert!(mp_ops::load_telegram_batch(&missing, 105 * day)
+        .expect("missing ledger is empty")
+        .is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_6_telegram_delivered_loads_rows_fail_closed() {
+    // The delivery-log loader reads `journal/telegram/delivered.jsonl` — the
+    // exact shape `telegram-flush` appends per successful send — as flushed
+    // records with injected-clock age (PD-3).
+    let dir = std::env::temp_dir().join(format!("mptgd6-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ledger = dir.join("journal").join("telegram");
+    std::fs::create_dir_all(&ledger).unwrap();
+    let day = 86_400 * S;
+    // Appended OUT of delivery order — the loader must sort oldest-first.
+    mp_ops::append_delivered(&ledger, "stream-gap", 102 * day).unwrap();
+    mp_ops::append_delivered(&ledger, "band-accuracy-decay", 100 * day).unwrap();
+
+    let rows = mp_ops::load_telegram_delivered(&ledger, 105 * day).expect("load delivered");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, "band-accuracy-decay", "sorted oldest-first");
+    assert_eq!(rows[0].delivered_ts_ns, 100 * day);
+    assert_eq!(rows[0].delivered_days_ago, 5); // 105d − 100d
+    assert_eq!(rows[1].id, "stream-gap");
+    assert_eq!(rows[1].delivered_ts_ns, 102 * day);
+    assert_eq!(rows[1].delivered_days_ago, 3); // 105d − 102d
+
+    // A corrupt line is evidence corruption: fail closed naming the line
+    // (CONV-8) — a delivery is never silently dropped from the report.
+    std::fs::write(ledger.join("delivered.jsonl"), "not a record\n").unwrap();
+    let err = mp_ops::load_telegram_delivered(&ledger, 105 * day).expect_err("corrupt line fails");
+    assert!(err.contains("line 1"), "error names the line: {err}");
+
+    // A missing log is the healthy "no deliveries recorded" state (the flush
+    // has not run, or had nothing to send), not an error.
+    let missing = dir.join("nope");
+    assert!(mp_ops::load_telegram_delivered(&missing, 105 * day)
+        .expect("missing log is empty")
+        .is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_6_report_delivery_accountability_section_renders() {
+    // A pending queue item AND a flushed delivery render grounded in both
+    // formats, markdown cells match the HTML (the OPS-6 parity contract), and
+    // the empty ledgers are the explicitly-rendered healthy states.
+    let mut r = fixture_report();
+    r.telegram_pending = vec![TelegramPendingRow {
+        id: "band-accuracy-decay".to_string(),
+        severity: Severity::P3,
+        detail: "RES-4 band accuracy decaying: coverage trailing 4-wk mean 0.350".to_string(),
+        runbook: "ops/runbooks/band-accuracy-decay.md".to_string(),
+        ts_ns: 3 * 86_400 * S,
+        queued_days: 3,
+    }];
+    // A same-day delivery exercises the `today` branch of the age renderer.
+    r.telegram_delivered.push(TelegramDeliveredRow {
+        id: "funnel-move".to_string(),
+        delivered_ts_ns: 105 * 86_400 * S,
+        delivered_days_ago: 0,
+    });
+    let md = r.render_markdown();
+    assert!(md.contains("## Delivery Accountability (Telegram queue)"));
+    assert!(md.contains(
+        "| band-accuracy-decay | P3 | 3d | RES-4 band accuracy decaying: coverage trailing 4-wk mean 0.350 | ops/runbooks/band-accuracy-decay.md |"
+    ));
+    let html = r.render_html();
+    assert!(html.contains("<h2>Delivery Accountability (Telegram queue)</h2>"));
+    assert!(html.contains("<td>band-accuracy-decay</td>"));
+    assert!(html.contains("<td class=\"num\">3d</td>"));
+    assert!(html.contains("<td>P3</td>"));
+    // Parity: every markdown cell from this section appears in the HTML
+    // (including the runbook link — the remediation path for an undelivered
+    // alert).
+    assert!(html.contains("RES-4 band accuracy decaying: coverage trailing 4-wk mean 0.350"));
+    assert!(html.contains("<td>ops/runbooks/band-accuracy-decay.md</td>"));
+
+    // Delivery log — what WAS delivered (OPS-6): the fixture's flushed
+    // record renders grounded in both formats, the age from the loader's
+    // injected clock (3d ago: delivered_ts_ns 102d, now 105d).
+    assert!(md.contains("### Delivered this month (Telegram delivery log)"));
+    assert!(md.contains("| band-accuracy-decay | 3d ago |"));
+    assert!(md.contains("| funnel-move | today |"));
+    assert!(html.contains("<h3>Delivered this month (Telegram delivery log)</h3>"));
+    assert!(html.contains("<td>3d ago</td>"));
+    assert!(html.contains("<td>today</td>"));
+
+    // Empty ledgers, rendered strictly grounded: nothing pending NOW and no
+    // deliveries recorded (RES-5) — never an inference about the past.
+    let mut e = fixture_report();
+    e.telegram_pending.clear();
+    e.telegram_delivered.clear();
+    assert!(e
+        .render_markdown()
+        .contains("_No pending alerts in the quiet-hours Telegram queue._"));
+    assert!(e
+        .render_html()
+        .contains("No pending alerts in the quiet-hours Telegram queue."));
+    assert!(e
+        .render_markdown()
+        .contains("_No deliveries recorded in the Telegram delivery log._"));
+    assert!(e
+        .render_html()
+        .contains("No deliveries recorded in the Telegram delivery log."));
+
+    // A hostile detail/runbook/id cannot break the HTML (5-entity escaping,
+    // same as the other dynamic strings).
+    let mut hostile = fixture_report();
+    hostile.telegram_pending = vec![TelegramPendingRow {
+        id: "x".to_string(),
+        severity: Severity::P3,
+        detail: "<script>alert(1)</script>".to_string(),
+        runbook: "<b>r</b>".to_string(),
+        ts_ns: 0,
+        queued_days: 1,
+    }];
+    hostile.telegram_delivered = vec![TelegramDeliveredRow {
+        id: "<script>alert(2)</script>".to_string(),
+        delivered_ts_ns: 0,
+        delivered_days_ago: 1,
+    }];
+    let html = hostile.render_html();
+    assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(html.contains("&lt;script&gt;alert(2)&lt;/script&gt;"));
+    assert!(
+        html.contains("&lt;b&gt;r&lt;/b&gt;"),
+        "runbook is escaped too"
+    );
+    assert!(
+        !html.contains("<script>"),
+        "raw markup must never reach the HTML"
+    );
 }
 
 /// Audit bug 3: all dead-man alerts share the id "process-deadman", and the
@@ -644,6 +859,7 @@ fn ops_6_report_html_has_all_sections_and_grounded_numbers() {
         "Cost Breakdown",
         "Funnel Transitions &amp; Kills",
         "Whale Band Accuracy (RES-4)",
+        "Delivery Accountability (Telegram queue)",
         "Benchmark",
     ] {
         assert!(
@@ -658,8 +874,12 @@ fn ops_6_report_html_has_all_sections_and_grounded_numbers() {
     assert!(html.contains("BTC hold")); // benchmark row (REQUIRED)
     assert!(html.contains("<table>"));
     assert!(html.contains("</html>"));
-    // A full fixture has no explicit no-data rows.
-    assert!(!html.contains("class=\"nodata\""));
+    // The delivery log renders what WAS delivered (OPS-6) — an h3 sub-block
+    // inside the delivery-accountability section.
+    assert!(html.contains("<h3>Delivered this month (Telegram delivery log)</h3>"));
+    // A full fixture has no explicit no-data table rows (the delivery
+    // section's empty state is a healthy-state paragraph, not a row).
+    assert!(!html.contains("<tr class=\"nodata\""));
 }
 
 #[test]
@@ -670,15 +890,47 @@ fn ops_6_report_html_renders_no_data_and_escapes_dynamic_strings() {
     empty.funnel.clear();
     empty.band_accuracy.clear();
     let html = empty.render_html();
-    assert!(html.contains("class=\"nodata\""), "explicit no-data rows (RES-5)");
-    assert!(html.contains("No transitions this month."));
-
-    // A hostile strategy name cannot break out of the document.
+    assert!(
+        html.contains("class=\"nodata\""),
+        "explicit no-data rows (RES-5)"
+    );
+    assert!(html.contains("No transitions this month.")); // A hostile strategy name cannot break out of the document — all five
+                                                          // entities (`& < > " '`) are escaped, and raw markup never reaches the HTML.
     let mut r = fixture_report();
-    r.strategies[0].strategy = "<script>alert(1)</script>".to_string();
+    r.strategies[0].strategy = "<script>alert(1)</script>&\"'".to_string();
     let html = r.render_html();
-    assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
-    assert!(!html.contains("<script>"), "raw markup must never reach the HTML");
+    assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;&amp;&quot;&#39;"));
+    assert!(
+        !html.contains("<script>"),
+        "raw markup must never reach the HTML"
+    );
+    assert!(
+        !html.contains("&\"'"),
+        "raw ampersand/quote entities must never reach the HTML"
+    );
+}
+
+#[test]
+fn ops_6_report_html_matches_markdown_cells() {
+    // Drift guard between the two renderers (OPS-6: HTML shows the SAME
+    // grounded numbers as the markdown): every non-placeholder cell in the
+    // markdown's tables must also appear in the HTML — a one-sided edit to a
+    // section (new column, renamed header, changed format) fails here.
+    let r = fixture_report();
+    let md = r.render_markdown();
+    let html = r.render_html();
+    for line in md.lines().filter(|l| l.starts_with('|')) {
+        for cell in line.split('|').skip(1) {
+            let cell = cell.trim();
+            if cell.is_empty() || cell == "—" || cell.starts_with("---") {
+                continue;
+            }
+            assert!(
+                html.contains(cell),
+                "markdown cell {cell:?} missing from the HTML render"
+            );
+        }
+    }
 }
 
 #[test]
@@ -712,6 +964,7 @@ fn trend_rows(weeks: usize, coverage: f64, mre: f64) -> Vec<BandAccuracyRow> {
             observations: 100,
             mean_relative_error: mre,
             coverage,
+            run_id: None,
         })
         .collect()
 }
@@ -732,6 +985,7 @@ fn ops_13_band_accuracy_decay_alerts_on_sustained_quality_loss() {
             observations: 100,
             mean_relative_error: mre,
             coverage: cov,
+            run_id: None,
         });
     }
     let alert =
@@ -765,6 +1019,7 @@ fn ops_13_band_accuracy_decay_ignores_healthy_and_young_trends() {
             observations: 100,
             mean_relative_error: 0.02,
             coverage: 0.10,
+            run_id: None,
         });
     }
     assert!(mp_ops::band_accuracy_decay_alert(&never_good, MIN).is_none());
@@ -812,6 +1067,10 @@ fn ops_13_weekly_wrapper_invokes_decay_check_after_study() {
         stdout.contains("band_accuracy.jsonl"),
         "trend journal wired: {stdout}"
     );
+    assert!(
+        stdout.contains("--runs-dir"),
+        "the decay check journals its verdict to runs/index.jsonl: {stdout}"
+    );
 
     // Hook absent: best-effort skip, the study's exit 0 still stands.
     let skip = std::process::Command::new("bash")
@@ -832,6 +1091,824 @@ fn ops_13_weekly_wrapper_invokes_decay_check_after_study() {
     );
     let _ = std::fs::remove_dir_all(&data);
     let _ = std::fs::remove_dir_all(&out);
+}
+
+// ---- OPS-9: band-accuracy-decay Telegram edge (Bot API + quiet hours) -----
+
+/// A 12-row decayed `band_accuracy.jsonl` (8 healthy weeks, then 4 collapsed)
+/// — enough to fire `band-accuracy-decay` (OPS-13) for the edge tests.
+fn decayed_trend(dir: &std::path::Path) -> std::path::PathBuf {
+    let mut lines = Vec::new();
+    for w in 1..=8 {
+        lines.push(format!(
+            "{{\"week\":\"2026-W{w:02}\",\"n\":100,\"mean_relative_error\":0.02,\"coverage\":0.94}}"
+        ));
+    }
+    for w in 9..=12 {
+        lines.push(format!(
+            "{{\"week\":\"2026-W{w:02}\",\"n\":100,\"mean_relative_error\":0.12,\"coverage\":0.25}}"
+        ));
+    }
+    let path = dir.join("band_accuracy.jsonl");
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    path
+}
+
+/// The Telegram edge shells out to `curl` (the host's TLS stack). On a host
+/// without curl the spawned binary would fail with a confusing "curl spawn
+/// failed" — skip the e2e send tests instead, so CI without curl still sees
+/// the batching/ledger logic covered by the in-process tests above.
+fn curl_available() -> bool {
+    std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// A local TCP stub standing in for the Telegram Bot API. Returns the base
+/// URL and a handle to the captured HTTP request (exactly one is served).
+fn stub_telegram_server() -> (String, std::thread::JoinHandle<String>) {
+    stub_telegram_server_with_body(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}")
+}
+
+/// A stub serving `n` Telegram API requests, one ok response each. Returns
+/// the base URL and the concatenated captured requests — used when a flush
+/// sends more than one dispatch (each is its own curl POST).
+fn stub_telegram_server_n(n: usize) -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let mut seen = String::new();
+        for _ in 0..n {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 16 * 1024];
+            let got = stream.read(&mut buf).unwrap_or(0);
+            seen.push_str(&String::from_utf8_lossy(&buf[..got]));
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}");
+            let _ = stream.flush();
+        }
+        seen
+    });
+    (format!("http://{addr}"), handle)
+}
+
+/// A stub that answers non-ok (a failed delivery) — same shape, "ok" absent.
+fn stub_telegram_server_with_body(
+    response: &'static [u8],
+) -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 16 * 1024];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let req = String::from_utf8_lossy(&buf[..n]).to_string();
+        let _ = stream.write_all(response);
+        let _ = stream.flush();
+        req
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[test]
+fn ops_9_mp_ops_decay_telegram_sends_via_bot_api_edge() {
+    if !curl_available() {
+        eprintln!("SKIPPED: curl not available on this host");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("mptg9-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let trend = decayed_trend(&dir);
+    let (url, handle) = stub_telegram_server();
+
+    // Outside quiet hours (start == end ⇒ never quiet) the P3 is sent now.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args([
+            "band-accuracy-decay",
+            "--trend",
+            trend.to_str().unwrap(),
+            "--telegram",
+        ])
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "12345")
+        .env("MP_OPS_TELEGRAM_URL", &url)
+        .env("MP_OPS_QUIET_START_MIN", "0")
+        .env("MP_OPS_QUIET_END_MIN", "0")
+        .output()
+        .expect("run mp-ops");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("\"telegram\":\"sent\""), "{stdout}");
+
+    let req = handle.join().unwrap();
+    assert!(req.contains("/botTESTTOKEN/sendMessage"), "{req}");
+    assert!(req.contains("chat_id=12345"), "{req}");
+    assert!(req.contains("disable_notification=true"), "{req}");
+    assert!(req.contains("band-accuracy-decay"), "{req}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_9_mp_ops_decay_telegram_batches_during_quiet_hours_then_flushes() {
+    if !curl_available() {
+        eprintln!("SKIPPED: curl not available on this host");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("mptg9b-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let trend = decayed_trend(&dir);
+    let tg_dir = dir.join("journal").join("telegram");
+
+    // All-day quiet (0..1440) ⇒ the P3 is batched, not sent.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args([
+            "band-accuracy-decay",
+            "--trend",
+            trend.to_str().unwrap(),
+            "--telegram",
+        ])
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "12345")
+        .env("MP_OPS_QUIET_START_MIN", "0")
+        .env("MP_OPS_QUIET_END_MIN", "1440")
+        .env("MP_OPS_TELEGRAM_DIR", tg_dir.to_str().unwrap())
+        .output()
+        .expect("run mp-ops (batched)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("\"telegram\":\"batched\""), "{stdout}");
+    let batch = tg_dir.join("batch.jsonl");
+    let ledger = std::fs::read_to_string(&batch).expect("batch ledger written");
+    assert!(ledger.contains("band-accuracy-decay"), "{ledger}");
+
+    // telegram-flush drains the ledger to the Bot API and removes it.
+    let (url, handle) = stub_telegram_server();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args(["telegram-flush"])
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "12345")
+        .env("MP_OPS_TELEGRAM_URL", &url)
+        .env("MP_OPS_TELEGRAM_DIR", tg_dir.to_str().unwrap())
+        .output()
+        .expect("run mp-ops (flush)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("\"flushed\":1"), "{stdout}");
+    assert!(!batch.exists(), "batch ledger removed after flush");
+    let req = handle.join().unwrap();
+    assert!(req.contains("disable_notification=true"), "{req}");
+    // The delivery log records what WAS delivered (id + when) — the flush's
+    // proof of delivery, the report's delivery log (OPS-6).
+    let delivered = tg_dir.join("delivered.jsonl");
+    let log = std::fs::read_to_string(&delivered).expect("delivery log written");
+    let rec: serde_json::Value =
+        serde_json::from_str(log.lines().next().expect("one delivered line")).unwrap();
+    assert_eq!(rec["id"], "band-accuracy-decay");
+    assert!(rec["delivered_ts_ns"].as_i64().is_some(), "{rec}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_9_telegram_flush_wait_holds_until_quiet_end_then_drains() {
+    // The weekly wrapper's quiet-hours wait, moved into the binary: with
+    // --wait inside the window, telegram-flush sleeps until quiet end, then
+    // drains. MP_OPS_SLEEP=/bin/echo stubs the sleeper so the test never
+    // blocks on a real multi-hour wait.
+    if !curl_available() {
+        eprintln!("SKIPPED: curl not available on this host");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("mptg9w2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let tg_dir = dir.join("journal").join("telegram");
+    std::fs::create_dir_all(&tg_dir).unwrap();
+    // Two batched P3 dispatches in the ledger, written through `append_batch`
+    // (the exact shape `band-accuracy-decay --telegram` persists) — two
+    // physical lines proves the JSONL newline contract: one concatenated blob
+    // would corrupt every later reader.
+    let batch = tg_dir.join("batch.jsonl");
+    for detail in ["RES-4 band accuracy decaying", "funnel: carry-v1 promoted"] {
+        let alert = Alert::new("band-accuracy-decay", Severity::P3, 0, detail);
+        mp_ops::append_batch(&tg_dir, &mp_ops::Dispatch::from_alert(&alert, 0)).unwrap();
+    }
+
+    // All-day quiet (0..1440) ⇒ now is inside ⇒ --wait computes a wait; the
+    // MP_OPS_SLEEP seam swallows it; then the ledger drains to the stub (two
+    // dispatches ⇒ two POSTs, so the stub serves two connections).
+    let (url, handle) = stub_telegram_server_n(2);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args(["telegram-flush", "--wait"])
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "12345")
+        .env("MP_OPS_TELEGRAM_URL", &url)
+        .env("MP_OPS_TELEGRAM_DIR", tg_dir.to_str().unwrap())
+        .env("MP_OPS_QUIET_START_MIN", "0")
+        .env("MP_OPS_QUIET_END_MIN", "1440")
+        .env("MP_OPS_SLEEP", "/bin/echo")
+        .output()
+        .expect("run mp-ops (flush --wait)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("flushing in"),
+        "the wait is announced before sleeping: {stdout}"
+    );
+    assert!(stdout.contains("\"flushed\":2"), "{stdout}");
+    assert!(!batch.exists(), "batch ledger removed after flush");
+    let req = handle.join().unwrap();
+    assert_eq!(
+        req.matches("/sendMessage").count(),
+        2,
+        "both dispatches delivered: {req}"
+    );
+    assert!(req.contains("chat_id=12345"), "{req}");
+    // Both deliveries are in the delivery log — one flushed record each.
+    let delivered = tg_dir.join("delivered.jsonl");
+    let log = std::fs::read_to_string(&delivered).expect("delivery log written");
+    assert_eq!(log.lines().count(), 2, "each delivery logged: {log}");
+    assert!(log.contains("band-accuracy-decay"), "{log}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_9_telegram_flush_failure_keeps_batch_and_never_logs_delivered() {
+    // A failed delivery is NEVER recorded in the delivery log: the dispatch
+    // stays in the batch ledger (pending — visible in the report's queue)
+    // and the command exits 2 (CONV-8). At-most-once per attempt, evidence
+    // never lost, and the log never lies about what was delivered.
+    if !curl_available() {
+        eprintln!("SKIPPED: curl not available on this host");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("mptg9e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let tg_dir = dir.join("journal").join("telegram");
+    std::fs::create_dir_all(&tg_dir).unwrap();
+    let batch = tg_dir.join("batch.jsonl");
+    let alert = Alert::new(
+        "band-accuracy-decay",
+        Severity::P3,
+        0,
+        "RES-4 band accuracy decaying",
+    );
+    mp_ops::append_batch(&tg_dir, &mp_ops::Dispatch::from_alert(&alert, 0)).unwrap();
+
+    // The API answers non-ok (`{"ok":false}` is 12 bytes — correct
+    // Content-Length, so the failure is the API's verdict, not a transfer
+    // truncation).
+    let (url, handle) = stub_telegram_server_with_body(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\":false}",
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args(["telegram-flush"])
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "12345")
+        .env("MP_OPS_TELEGRAM_URL", &url)
+        .env("MP_OPS_TELEGRAM_DIR", tg_dir.to_str().unwrap())
+        .output()
+        .expect("run mp-ops (flush failure)");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a failed send is a failed job: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("telegram api non-ok"),
+        "failure surfaces in stderr"
+    );
+    let _ = handle.join().unwrap();
+
+    // The dispatch stays pending in the batch ledger and is NOT in the
+    // delivery log — the report shows it as a gap, never as delivered.
+    assert!(batch.exists(), "failed dispatch stays in the batch ledger");
+    assert!(std::fs::read_to_string(&batch)
+        .unwrap()
+        .contains("band-accuracy-decay"));
+    assert!(
+        !tg_dir.join("delivered.jsonl").exists(),
+        "a failed delivery is never logged as delivered"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- OPS-14: near-real-time stale Telegram batch watch ---------------------
+
+#[test]
+fn ops_14_telegram_stale_alert_fires_on_missed_flush() {
+    // A dispatch queued ≥ one quiet window (24h) is a missed flush: P2, the
+    // OLDEST stale dispatch wins, dedupe is per dispatch id (one stuck alert
+    // never suppresses another, regression_audit3 pattern), and the detail
+    // names the queued hours + the remediation.
+    let h = 3600 * S;
+    let rows = vec![
+        TelegramPendingRow {
+            id: "stream-gap".to_string(),
+            severity: Severity::P2,
+            detail: "BTCUSDT gap 6m".to_string(),
+            runbook: "ops/runbooks/stream-gap.md".to_string(),
+            ts_ns: 26 * h,
+            queued_days: 1,
+        },
+        TelegramPendingRow {
+            id: "band-accuracy-decay".to_string(),
+            severity: Severity::P3,
+            detail: "RES-4 decay".to_string(),
+            runbook: "ops/runbooks/band-accuracy-decay.md".to_string(),
+            ts_ns: 20 * h,
+            queued_days: 0,
+        },
+    ];
+    let alert =
+        mp_ops::stale_batch_alert(&rows, 50 * h, 24 * h, 24 * h).expect("missed flush fires");
+    assert_eq!(alert.id, "telegram-stale");
+    assert_eq!(alert.severity, Severity::P2);
+    assert_eq!(alert.runbook, "ops/runbooks/telegram-stale.md");
+    // 20h-queued is OLDER than 26h-queued ⇒ it is the worst offender.
+    assert_eq!(alert.dedupe_key, "band-accuracy-decay");
+    assert!(
+        alert.detail.contains("2 dispatch"),
+        "count: {}",
+        alert.detail
+    );
+    assert!(
+        alert.detail.contains("30h"),
+        "queued hours: {}",
+        alert.detail
+    );
+    assert!(
+        alert.detail.contains("telegram-flush --wait"),
+        "remediation: {}",
+        alert.detail
+    );
+
+    // Below the threshold (freshly batched) ⇒ nothing to alert.
+    let fresh = vec![TelegramPendingRow {
+        id: "stream-gap".to_string(),
+        severity: Severity::P2,
+        detail: "x".to_string(),
+        runbook: "ops/runbooks/stream-gap.md".to_string(),
+        ts_ns: 40 * h,
+        queued_days: 0,
+    }];
+    assert!(mp_ops::stale_batch_alert(&fresh, 50 * h, 24 * h, 24 * h).is_none());
+
+    // Exactly at the threshold (24h queued) ⇒ stale.
+    let boundary = vec![TelegramPendingRow {
+        id: "stream-gap".to_string(),
+        severity: Severity::P2,
+        detail: "x".to_string(),
+        runbook: "ops/runbooks/stream-gap.md".to_string(),
+        ts_ns: 26 * h,
+        queued_days: 1,
+    }];
+    assert!(mp_ops::stale_batch_alert(&boundary, 50 * h, 24 * h, 24 * h).is_some());
+
+    // Empty ledger ⇒ healthy (nothing queued is not a missed flush).
+    assert!(mp_ops::stale_batch_alert(&[], 50 * h, 24 * h, 24 * h).is_none());
+}
+
+#[test]
+fn ops_14_telegram_stale_subcommand_reports_verdict() {
+    // telegram-stale: JSON verdict over the batch ledger — a stuck dispatch
+    // is flagged (exit 0, stale:true), a fresh one and a missing batch are
+    // healthy (stale:false), and a corrupt batch fails closed (exit 2).
+    let dir = std::env::temp_dir().join(format!("mpts14-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let bin = env!("CARGO_BIN_EXE_mp-ops");
+    let h = 3600 * S;
+
+    // Stale: a dispatch whose ts_ns is 30h after the epoch (decades before
+    // the real clock) ⇒ queued far beyond any threshold.
+    let stale_dir = dir.join("stale");
+    std::fs::create_dir_all(&stale_dir).unwrap();
+    let a = Alert::new("band-accuracy-decay", Severity::P3, 0, "RES-4 decay");
+    mp_ops::append_batch(&stale_dir, &mp_ops::Dispatch::from_alert(&a, 30 * h)).unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["telegram-stale"])
+        .env("MP_OPS_TELEGRAM_DIR", stale_dir.to_str().unwrap())
+        .output()
+        .expect("run mp-ops (stale)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("\"stale\":true"), "{stdout}");
+    assert!(stdout.contains("\"pending\":1"), "{stdout}");
+    assert!(stdout.contains("\"id\":\"telegram-stale\""), "{stdout}");
+    assert!(stdout.contains("\"severity\":\"P2\""), "{stdout}");
+
+    // Fresh: a dispatch queued 1h ago (ts = real now − 1h) with the default
+    // 24h threshold ⇒ healthy; --threshold-hours 1 makes it stale.
+    let fresh_dir = dir.join("fresh");
+    std::fs::create_dir_all(&fresh_dir).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    let b = Alert::new("stream-gap", Severity::P2, 0, "gap");
+    mp_ops::append_batch(&fresh_dir, &mp_ops::Dispatch::from_alert(&b, now - h)).unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["telegram-stale"])
+        .env("MP_OPS_TELEGRAM_DIR", fresh_dir.to_str().unwrap())
+        .output()
+        .expect("run mp-ops (fresh)");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("\"stale\":false"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = std::process::Command::new(bin)
+        .args(["telegram-stale", "--threshold-hours", "1"])
+        .env("MP_OPS_TELEGRAM_DIR", fresh_dir.to_str().unwrap())
+        .output()
+        .expect("run mp-ops (1h threshold)");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("\"stale\":true"),
+        "a 1h-old dispatch exceeds a 1h threshold: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // Missing batch ⇒ healthy "nothing queued", not an error.
+    let empty_dir = dir.join("empty");
+    let out = std::process::Command::new(bin)
+        .args(["telegram-stale"])
+        .env("MP_OPS_TELEGRAM_DIR", empty_dir.to_str().unwrap())
+        .output()
+        .expect("run mp-ops (empty)");
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"stale\":false"));
+
+    // Corrupt batch ⇒ fail closed (exit 2), never a fabricated verdict.
+    let corrupt_dir = dir.join("corrupt");
+    std::fs::create_dir_all(&corrupt_dir).unwrap();
+    std::fs::write(corrupt_dir.join("batch.jsonl"), "not a dispatch\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["telegram-stale"])
+        .env("MP_OPS_TELEGRAM_DIR", corrupt_dir.to_str().unwrap())
+        .output()
+        .expect("run mp-ops (corrupt)");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "corrupt batch must fail closed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Bad --threshold-hours / --dedupe-ns values are rejected, not silently
+    // absorbed.
+    let bad = std::process::Command::new(bin)
+        .args(["telegram-stale", "--threshold-hours", "abc"])
+        .env("MP_OPS_TELEGRAM_DIR", stale_dir.to_str().unwrap())
+        .output()
+        .expect("run mp-ops (bad threshold)");
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("must be an integer"),
+        "{}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+    let bad_dedupe = std::process::Command::new(bin)
+        .args(["telegram-stale", "--dedupe-ns", "0"])
+        .env("MP_OPS_TELEGRAM_DIR", stale_dir.to_str().unwrap())
+        .output()
+        .expect("run mp-ops (bad dedupe)");
+    assert!(
+        String::from_utf8_lossy(&bad_dedupe.stderr).contains("must be positive"),
+        "{}",
+        String::from_utf8_lossy(&bad_dedupe.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_14_telegram_stale_p2_breaks_through_quiet_hours() {
+    // The stale alert is P2: even inside quiet hours it is sent immediately
+    // (OPS-9) — it escapes the very batch that is stuck instead of being
+    // re-queued into it. All-day quiet (0..1440) would batch a P3; the P2
+    // still POSTs to the Bot API right away.
+    if !curl_available() {
+        eprintln!("SKIPPED: curl not available on this host");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("mpts14t-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let h = 3600 * S;
+    let a = Alert::new("band-accuracy-decay", Severity::P3, 0, "RES-4 decay");
+    mp_ops::append_batch(&dir, &mp_ops::Dispatch::from_alert(&a, 30 * h)).unwrap();
+    let (url, handle) = stub_telegram_server();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args(["telegram-stale", "--telegram"])
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "12345")
+        .env("MP_OPS_TELEGRAM_URL", &url)
+        .env("MP_OPS_TELEGRAM_DIR", dir.to_str().unwrap())
+        .env("MP_OPS_QUIET_START_MIN", "0")
+        .env("MP_OPS_QUIET_END_MIN", "1440")
+        .output()
+        .expect("run mp-ops (stale --telegram)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("\"stale\":true"), "{stdout}");
+    assert!(stdout.contains("\"telegram\":\"sent\""), "{stdout}");
+    let req = handle.join().unwrap();
+    assert!(req.contains("/botTESTTOKEN/sendMessage"), "{req}");
+    assert!(req.contains("telegram-stale"), "{req}");
+    assert!(req.contains("chat_id=12345"), "{req}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_14_telegram_stale_timer_runs_hourly_and_reads_only_the_ledger() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let service = std::fs::read_to_string(root.join("systemd/telegram-stale.service"))
+        .expect("telegram-stale.service");
+    assert!(
+        service.contains("mp-ops telegram-stale --telegram"),
+        "OPS-14: the service runs the near-real-time check"
+    );
+    assert!(
+        service.contains("EnvironmentFile=/etc/money-printer/ops.env"),
+        "OPS-14: Bot API credentials come from ops.env"
+    );
+    assert!(
+        service.contains("WorkingDirectory=/opt/money-printer"),
+        "OPS-14: the default journal/telegram resolves under the money-printer tree, not systemd's /"
+    );
+    assert!(service.contains("ProtectSystem=strict"));
+    assert!(
+        service.contains("ReadOnlyPaths=/opt/money-printer/journal/telegram"),
+        "OPS-14: the check is read-only on the ledger (W-6)"
+    );
+    assert!(service.contains("User=printer"));
+    assert!(service.contains("NoNewPrivileges=true"));
+
+    let timer = std::fs::read_to_string(root.join("systemd/telegram-stale.timer"))
+        .expect("telegram-stale.timer");
+    assert!(
+        timer.contains("OnCalendar=*-*-* *:15:00"),
+        "OPS-14: hourly — a missed flush alerts within an hour of the 24h mark"
+    );
+    assert!(
+        timer.contains("Persistent=true"),
+        "OPS-14: missed fires are caught up"
+    );
+}
+
+#[test]
+fn ops_13_mp_ops_decay_send_failure_still_journals_verdict() {
+    // A failed Telegram delivery must NOT blank the week's verdict in
+    // runs/index.jsonl: the record is journaled with "send_failed" and the
+    // command still exits 2 (the wrapper warns, never fails the study).
+    if !curl_available() {
+        eprintln!("SKIPPED: curl not available on this host");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("mptg9d-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let trend = decayed_trend(&dir);
+    let runs = dir.join("runs");
+    // `{"ok":false}` is 12 bytes — a correct Content-Length means the
+    // failure is the API's non-ok verdict, not a curl transfer truncation.
+    let (url, handle) = stub_telegram_server_with_body(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\":false}",
+    );
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args([
+            "band-accuracy-decay",
+            "--trend",
+            trend.to_str().unwrap(),
+            "--runs-dir",
+            runs.to_str().unwrap(),
+            "--telegram",
+        ])
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "12345")
+        .env("MP_OPS_TELEGRAM_URL", &url)
+        .env("MP_OPS_QUIET_START_MIN", "0")
+        .env("MP_OPS_QUIET_END_MIN", "0")
+        .output()
+        .expect("run mp-ops (send failure)");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a failed send is a failed job: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("telegram send failed"),
+        "failure surfaces in stderr"
+    );
+    let _ = handle.join().unwrap();
+
+    // The verdict line exists despite the delivery failure — honest
+    // "send_failed", not a blanked week.
+    let idx = std::fs::read_to_string(runs.join("index.jsonl")).expect("verdict journaled");
+    let rec: serde_json::Value =
+        serde_json::from_str(idx.lines().next().expect("one verdict line")).unwrap();
+    assert_eq!(rec["study"], "band_accuracy_decay");
+    assert_eq!(rec["decayed"], true);
+    assert_eq!(rec["telegram"], "send_failed");
+    assert_eq!(rec["week"], "2026-W12");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_9_mp_ops_decay_telegram_unconfigured_is_gated() {
+    let dir = std::env::temp_dir().join(format!("mptg9c-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let trend = decayed_trend(&dir);
+    // No credentials ⇒ exit 0 with "unconfigured": functionality-gated, never
+    // a silent failure and never a fake send.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args([
+            "band-accuracy-decay",
+            "--trend",
+            trend.to_str().unwrap(),
+            "--telegram",
+        ])
+        .env_remove("TELEGRAM_BOT_TOKEN")
+        .env_remove("TELEGRAM_CHAT_ID")
+        .output()
+        .expect("run mp-ops (unconfigured)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("\"telegram\":\"unconfigured\""), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_9_weekly_wrapper_batches_and_flushes_decay_telegram() {
+    let dir = std::env::temp_dir().join(format!("mptg9w-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // A stub mp-ops: reports a batched decay verdict; for the flush it echoes
+    // the args it received so the test can see `--wait` reached it.
+    let stub = dir.join("stub-mp-ops.sh");
+    std::fs::write(
+        &stub,
+        "#!/usr/bin/env bash\nif [ \"${1:-}\" = \"telegram-flush\" ]; then echo '{\"flushed\":1} args:' \"$*\"; else echo '{\"decayed\":true,\"telegram\":\"batched\"}'; fi\n",
+    )
+    .unwrap();
+    let chmod = std::process::Command::new("bash")
+        .args(["-c", &format!("chmod +x '{}'", wsl(&stub))])
+        .status()
+        .expect("chmod stub");
+    assert!(chmod.success());
+
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("20260803_hyperliquid_positions.log"), "").unwrap();
+    std::fs::write(data.join("20260803_hyperliquid_BTC.log"), "").unwrap();
+    let out = dir.join("out");
+    let runs = dir.join("runs");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("scripts/run_whale_study_weekly.sh");
+
+    // The wait lives inside the subcommand now — the wrapper just invokes
+    // `telegram-flush --wait` (the stub flush ignores it and reports success).
+    let res = std::process::Command::new("bash")
+        .args(["-c", &format!(
+            "MP_DATA_DIR='{}' MP_OUT_DIR='{}' MP_RUNS_DIR='{}' MP_PYTHON=/bin/echo MP_OPS_CMD='{}' MP_REPO_DIR='{}' '{}'",
+            wsl(&data), wsl(&out), wsl(&runs), wsl(&stub), wsl(&data), wsl(&script)
+        )])
+        .output()
+        .expect("run wrapper (batched decay)");
+    assert_eq!(
+        res.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&res.stdout);
+    assert!(
+        stdout.contains("\"batched\""),
+        "batched verdict surfaced: {stdout}"
+    );
+    assert!(
+        stdout.contains("telegram-flush --wait"),
+        "the wait is the subcommand's, not the wrapper's: {stdout}"
+    );
+    assert!(
+        stdout.contains("{\"flushed\":1}"),
+        "flush invoked: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_9_weekly_wrapper_warns_on_failed_check_and_never_flushes() {
+    // A FAILED decay check (corrupt journal, exit 2) must surface loudly in
+    // stderr and must NEVER gate a batch flush — only a clean verdict does.
+    let dir = std::env::temp_dir().join(format!("mptg9f-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let stub = dir.join("stub-fail.sh");
+    std::fs::write(
+        &stub,
+        "#!/usr/bin/env bash\necho 'corrupt trend line 3' >&2; exit 2\n",
+    )
+    .unwrap();
+    let chmod = std::process::Command::new("bash")
+        .args(["-c", &format!("chmod +x '{}'", wsl(&stub))])
+        .status()
+        .expect("chmod stub");
+    assert!(chmod.success());
+    let flush = dir.join("flush-marker");
+    std::fs::write(&flush, "").unwrap();
+    let flush_stub = dir.join("stub-flush.sh");
+    std::fs::write(
+        &flush_stub,
+        format!("#!/usr/bin/env bash\nrm '{}'\n", wsl(&flush)),
+    )
+    .unwrap();
+    let chmod = std::process::Command::new("bash")
+        .args(["-c", &format!("chmod +x '{}'", wsl(&flush_stub))])
+        .status()
+        .expect("chmod flush stub");
+    assert!(chmod.success());
+
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("20260803_hyperliquid_positions.log"), "").unwrap();
+    std::fs::write(data.join("20260803_hyperliquid_BTC.log"), "").unwrap();
+    let out = dir.join("out");
+    let runs = dir.join("runs");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("scripts/run_whale_study_weekly.sh");
+
+    // A stub MP_OPS_CMD that fails (exit 2) AND a stub telegram-flush that
+    // would delete the marker if invoked — the flush stub must never run.
+    let script_path = wsl(&script);
+    let stub_path = wsl(&stub);
+    let flush_stub_path = wsl(&flush_stub);
+    let fail = std::process::Command::new("bash")
+        .args(["-c", &format!(
+            "MP_DATA_DIR='{}' MP_OUT_DIR='{}' MP_RUNS_DIR='{}' MP_PYTHON=/bin/echo MP_OPS_CMD='{stub_path}' MP_OPS_TELEGRAM_FLUSH='{flush_stub_path}' MP_REPO_DIR='{}' '{}'",
+            wsl(&data), wsl(&out), wsl(&runs), wsl(&data), script_path
+        )])
+        .output()
+        .expect("run wrapper (failed check)");
+    assert_eq!(
+        fail.status.code(),
+        Some(0),
+        "a failed advisory check never fails the study: {}",
+        String::from_utf8_lossy(&fail.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&fail.stderr);
+    assert!(
+        stderr.contains("decay check failed (exit 2)"),
+        "failure surfaces in journald: {stderr}"
+    );
+    assert!(
+        stderr.contains("corrupt trend line 3"),
+        "the check's own stderr is echoed: {stderr}"
+    );
+    assert!(
+        flush.exists(),
+        "a failed check must NEVER trigger telegram-flush"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- LIQ-10 (spec 029): weekly RES-4 whale-study timer ---------------------

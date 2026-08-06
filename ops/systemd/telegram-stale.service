@@ -1,0 +1,19 @@
+# Near-real-time staleness watch on the quiet-hours Telegram batch ledger
+# (spec 009 OPS-14): a dispatch queued longer than one quiet window (> 24h)
+# means a missed telegram-flush — a P2 must alert near-real-time (the monthly
+# report only flags a stuck queue at month-end). Runs hourly via
+# telegram-stale.timer. Reads ONLY the batch ledger (ProtectSystem=strict,
+# no ReadWritePaths) — the check never mutates anything (W-6).
+[Unit]
+Description=Money Printer stale Telegram batch check (P2)
+
+[Service]
+Type=oneshot
+User=printer
+WorkingDirectory=/opt/money-printer
+EnvironmentFile=/etc/money-printer/ops.env
+ExecStart=/opt/money-printer/bin/mp-ops telegram-stale --telegram
+ProtectSystem=strict
+# Inputs are read-only to the job (W-6: it can never alter the ledger).
+ReadOnlyPaths=/opt/money-printer/journal/telegram
+NoNewPrivileges=true

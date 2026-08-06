@@ -6,7 +6,12 @@
 use std::collections::BTreeMap;
 
 /// Severity drives the channel and the on-call expectation (spec 009 table).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Serializes as a stable snake_case string so a persisted dispatch (the P3
+/// quiet-hours batch ledger) round-trips.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Severity {
     /// Money at risk now.
     P1,
@@ -17,7 +22,8 @@ pub enum Severity {
 }
 
 /// Where an alert is delivered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Channel {
     /// Telegram + phone-call webhook (P1).
     TelegramPhone,
@@ -85,8 +91,10 @@ impl Alert {
     }
 }
 
-/// A delivered alert: what actually goes out on a channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A delivered alert: what actually goes out on a channel. Serializes so
+/// edges can persist a batched dispatch (e.g. the P3 quiet-hours batch file)
+/// and flush it later.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Dispatch {
     pub id: String,
     pub severity: Severity,
@@ -94,6 +102,23 @@ pub struct Dispatch {
     pub detail: String,
     pub runbook: String,
     pub ts_ns: i64,
+}
+
+impl Dispatch {
+    /// Build the deliverable for a raised alert at `now_ns` — the exact shape
+    /// routing would send. The router uses this internally; edges that must
+    /// persist a Batched P3 (the Telegram batch file) build the same dispatch
+    /// from the same inputs, so what gets batched is what would have been sent.
+    pub fn from_alert(alert: &Alert, now_ns: i64) -> Dispatch {
+        Dispatch {
+            id: alert.id.clone(),
+            severity: alert.severity,
+            channel: alert.severity.channel(),
+            detail: alert.detail.clone(),
+            runbook: alert.runbook.clone(),
+            ts_ns: now_ns,
+        }
+    }
 }
 
 /// The routing decision for one raised alert.
@@ -115,16 +140,41 @@ pub struct QuietHours {
     pub end_min: u32,
 }
 
+/// UTC minute-of-day (0..1440) for an epoch-ns clock reading. Pure arithmetic
+/// on the injected clock — no wall-clock read (PD-3).
+fn minute_of_day(now_ns: i64) -> u32 {
+    let mod_day = now_ns.rem_euclid(86_400_000_000_000);
+    (mod_day / 60_000_000_000) as u32
+}
+
 impl QuietHours {
     /// Whether `now_ns` falls in quiet hours. Pure arithmetic on the injected
     /// clock — no wall-clock read (PD-3).
     pub fn contains(&self, now_ns: i64) -> bool {
-        let mod_day = now_ns.rem_euclid(86_400_000_000_000);
-        let minute = (mod_day / 60_000_000_000) as u32;
+        let minute = minute_of_day(now_ns);
         if self.start_min <= self.end_min {
             minute >= self.start_min && minute < self.end_min
         } else {
             minute >= self.start_min || minute < self.end_min
+        }
+    }
+
+    /// Minutes until quiet hours end for `now_ns` — the amount `telegram-flush
+    /// --wait` sleeps before draining — or `0` when `now_ns` is OUTSIDE the
+    /// window (a flush that starts after quiet hours end drains immediately,
+    /// never sleeping ~24h for a wrap-around window). Pure arithmetic on the
+    /// injected clock (PD-3).
+    pub fn minutes_until_end(&self, now_ns: i64) -> u32 {
+        if !self.contains(now_ns) {
+            return 0;
+        }
+        let minute = minute_of_day(now_ns);
+        if self.start_min <= self.end_min {
+            self.end_min - minute
+        } else {
+            // Wraps midnight: `end_min` is next day's, so the wait spans the
+            // remainder of today plus `end_min` minutes of tomorrow.
+            (self.end_min + 1440 - minute) % 1440
         }
     }
 }
@@ -158,14 +208,7 @@ impl AlertRouter {
         }
         self.last_fired.insert(alert.dedupe_key.clone(), now_ns);
 
-        let dispatch = Dispatch {
-            id: alert.id.clone(),
-            severity: alert.severity,
-            channel: alert.severity.channel(),
-            detail: alert.detail.clone(),
-            runbook: alert.runbook.clone(),
-            ts_ns: now_ns,
-        };
+        let dispatch = Dispatch::from_alert(alert, now_ns);
 
         let quiet_now = self.quiet.map(|q| q.contains(now_ns)).unwrap_or(false);
         if alert.severity == Severity::P3 && quiet_now {
