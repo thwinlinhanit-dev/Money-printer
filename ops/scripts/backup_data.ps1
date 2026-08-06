@@ -12,6 +12,10 @@
 #     copy is *noticed*.
 #   - Live files grow while we copy (collectors write 24/7); a small size delta
 #     on the active day's logs is expected and only logged as a NOTE.
+#   - Live collector lock files (.lock_*) are excluded: the running collector
+#     holds them with an exclusive handle, so a live mirror can never copy them
+#     (robocopy ERROR 32, observed 08-06). They are transient coordination
+#     state, not corpus data — on restore the collectors simply recreate them.
 #   - Backups are self-describing: every run appends a JSONL manifest inside the
 #     destination ('<dest>\data\backup_manifest.jsonl') so the backup knows what
 #     it holds even if the source dies.
@@ -91,12 +95,15 @@ if ($Register) {
 # ---- corpus stats helper ------------------------------------------------------
 function Get-CorpusStats {
     param([string]$Path)
-    $files = Get-ChildItem -Path $Path -Recurse -File -ErrorAction SilentlyContinue
+    # Exclude live lock files from BOTH source and dest so the counts stay
+    # comparable (see the .lock_* exclusion note in the header).
+    $files = Get-ChildItem -Path $Path -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike ".lock_*" }
     $bytes = ($files | Measure-Object -Property Length -Sum).Sum
     return [PSCustomObject]@{ Files = $files.Count; Bytes = [long]$bytes }
 }
 
 $srcBefore = Get-CorpusStats $srcRoot
+$excluded = @(Get-ChildItem -Path $srcRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like ".lock_*" }).Count
 if ($WhatIf) {
     Log ("DRY RUN: {0:N0} files / {1:N2} GiB would be mirrored to {2}" -f $srcBefore.Files, ($srcBefore.Bytes / 1GB), $Destination)
     Exit 0
@@ -107,7 +114,7 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 # ---- mirror pass (robocopy /E copies new+changed files, never deletes) -------
 New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
-$roArgs = @($srcRoot, $destRoot, "/E", "/R:$Retries", "/W:1", "/XJ", "/NP", "/NFL", "/NDL")
+$roArgs = @($srcRoot, $destRoot, "/E", "/R:$Retries", "/W:1", "/XJ", "/NP", "/NFL", "/NDL", "/XF", ".lock_*")
 if ($WhatIf) { $roArgs += "/L" }
 $roOut = & robocopy @roArgs 2>&1
 $roCode = $LASTEXITCODE
@@ -151,6 +158,7 @@ $entry = [ordered]@{
     destination    = $Destination
     src_files      = $srcBefore.Files
     src_bytes      = $srcBefore.Bytes
+    src_lock_files_excluded = $excluded
     dst_files      = if ($dest) { $dest.Files } else { $null }
     dst_bytes      = if ($dest) { $dest.Bytes } else { $null }
     robocopy_exit  = $roCode
