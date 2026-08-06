@@ -634,6 +634,73 @@ fn ops_5_restore_drill_restores_a_backup_and_verifies() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn ops_6_report_html_has_all_sections_and_grounded_numbers() {
+    let html = fixture_report().render_html();
+    for heading in [
+        "Equity &amp; Drawdown",
+        "Expectancy (after costs)",
+        "Tracking Error (live vs paper vs backtest)",
+        "Cost Breakdown",
+        "Funnel Transitions &amp; Kills",
+        "Whale Band Accuracy (RES-4)",
+        "Benchmark",
+    ] {
+        assert!(
+            html.contains(&format!("<h2>{heading}</h2>")),
+            "missing HTML section: {heading}"
+        );
+    }
+    // The numbers are grounded — the same tokens the markdown render emits.
+    assert!(html.contains("+3.10%")); // blended/net return
+    assert!(html.contains("-1.20%")); // max drawdown
+    assert!(html.contains("2.14%") && html.contains("93.6%")); // band accuracy rows
+    assert!(html.contains("BTC hold")); // benchmark row (REQUIRED)
+    assert!(html.contains("<table>"));
+    assert!(html.contains("</html>"));
+    // A full fixture has no explicit no-data rows.
+    assert!(!html.contains("class=\"nodata\""));
+}
+
+#[test]
+fn ops_6_report_html_renders_no_data_and_escapes_dynamic_strings() {
+    let mut empty = fixture_report();
+    empty.strategies.clear();
+    empty.tracking.clear();
+    empty.funnel.clear();
+    empty.band_accuracy.clear();
+    let html = empty.render_html();
+    assert!(html.contains("class=\"nodata\""), "explicit no-data rows (RES-5)");
+    assert!(html.contains("No transitions this month."));
+
+    // A hostile strategy name cannot break out of the document.
+    let mut r = fixture_report();
+    r.strategies[0].strategy = "<script>alert(1)</script>".to_string();
+    let html = r.render_html();
+    assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(!html.contains("<script>"), "raw markup must never reach the HTML");
+}
+
+#[test]
+fn ops_6_report_writes_markdown_and_html_to_month_dir() {
+    // spec 009: rendered to markdown + HTML in journal/reports/{YYYY-MM}/.
+    let dir = std::env::temp_dir().join(format!("mpreport-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let month_dir = dir.join("journal").join("reports").join("2026-06");
+    let (md, html) =
+        mp_ops::write_monthly_report(&month_dir, &fixture_report()).expect("write report");
+    assert_eq!(md.file_name().unwrap(), "report.md");
+    assert_eq!(html.file_name().unwrap(), "report.html");
+    let md_text = std::fs::read_to_string(&md).unwrap();
+    let html_text = std::fs::read_to_string(&html).unwrap();
+    assert!(md_text.starts_with("# Monthly Report — 2026-06"));
+    assert!(html_text.contains("<!DOCTYPE html>"));
+    assert!(html_text.contains("<h1>Monthly Report — 2026-06</h1>"));
+    assert!(md_text.contains("## Whale Band Accuracy (RES-4)"));
+    assert!(html_text.contains("<h2>Whale Band Accuracy (RES-4)</h2>"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- OPS-13: weekly band-accuracy drift/decay watch ------------------------
 
 /// A flat trend of `weeks` graded rows numbered 2026-W01.. — the caller
