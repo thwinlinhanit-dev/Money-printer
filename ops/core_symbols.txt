@@ -1,0 +1,23 @@
+# Core Binance USDT-M perpetual symbols for the Phase-0 promotion gate.
+#
+# SINGLE SOURCE OF TRUTH (one symbol per line, blank lines and # comments
+# ignored): loaded by BOTH the collector watchdog (ops/watchdog_collectors.ps1)
+# and the daily integrity pipeline (ops/scripts/daily_pipeline.ps1), so the set
+# that is recorded and the set that is required on each day's scorecard can
+# never drift out of sync.
+#
+# Disk cost: a collector writes ~0.4-0.45 GiB/day/symbol raw (trades + book +
+# funding + OI + liq). The 8 symbols below are ~3.5 GiB/day (~105 GiB/month) —
+# a real commitment, so keep recorded market data on a dedicated backed-up
+# drive (W-6), NOT under ~/Downloads.
+#
+# Edit freely, then restart the watchdog to pick up changes ($Symbols override,
+# or delete this file to fall back to BTCUSDT+ETHUSDT).
+BTCUSDT
+ETHUSDT
+SOLUSDT
+BNBUSDT
+XRPUSDT
+DOGEUSDT
+ADAUSDT
+LINKUSDT

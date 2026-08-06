@@ -25,8 +25,16 @@ evidence links).
   then get built. (This file changes rarely; the backlog changes often.)
 
 **Current status:** Phase 0 in progress — workspace + collectors + sim/research
-stack built; live Binance Futures recorder running (BTCUSDT). Validation gate
-(7 clean multi-symbol days, manifests ≥ 0.995) not yet met. Capital at risk: $0.
+stack built; live Binance Futures recorder running (BTCUSDT, ETHUSDT) with a
+timeout/stall fix (COL-2/COL-29) and a spec-024 egress probe committed. The
+daily integrity gate is automated and verified running: `MoneyPrinterDailyPipeline`
+Task Scheduler task scores each day and prints the promotion streak on
+`data/scorecards/*` (07-18 onward). The Phase-0 core symbol set is now a single
+source of truth (`ops/core_symbols.txt`, 8 perps) wired into both the collector
+watchdog and the daily pipeline so recorded == required; expanding the live
+recorder to that set requires restarting the watchdog (disk ≈ 0.4 GiB/sym/day —
+keep `/data` on a backed-up drive, W-6). Validation gate (7 clean multi-symbol
+days, manifests ≥ 0.995) not yet met. Capital at risk: $0.
 
 **Phase-0 audit baseline (2026-08-04):** `mp-audit --data-dir data-migrated
 --venue binance --symbol BTCUSDT --date 20260729` → DIRTY (`sequence_gap` +

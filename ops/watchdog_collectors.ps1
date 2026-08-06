@@ -17,11 +17,22 @@
 param(
     [switch]$RegisterTask,
     [switch]$AsSystem,
-    [string[]]$Symbols         = @("BTCUSDT", "ETHUSDT"),
+    [string[]]$Symbols         = @(),
     [int]$CheckIntervalSeconds = 20,
     [int]$CooldownSeconds      = 90,
     [int]$GraceSeconds         = 45
 )
+
+# Symbols default: empty = load the single source of truth (ops/core_symbols.txt,
+# one per line) so the recorded set always matches the daily pipeline's required
+# set. Falls back to BTCUSDT+ETHUSDT when the file is absent or empty.
+if ($Symbols.Count -eq 0) {
+    $coreFile = Join-Path $PSScriptRoot "core_symbols.txt"
+    if (Test-Path $coreFile) {
+        $Symbols = @(Get-Content $coreFile | Where-Object { $_ -match '^[A-Za-z0-9]{2,20}$' } | ForEach-Object { $_.Trim() })
+    }
+    if ($Symbols.Count -eq 0) { $Symbols = @("BTCUSDT", "ETHUSDT") }
+}
 
 # audit 08-04: symbols are joined into the spawned command line below, so reject
 # anything that could inject shell metacharacters (UseShellExecute builds a shell

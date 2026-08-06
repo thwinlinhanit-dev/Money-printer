@@ -26,7 +26,7 @@ param(
     [string]$Date,                 # YYYY-MM-DD or YYYYMMDD (default: yesterday UTC)
     [switch]$RegisterTask,         # register the MoneyPrinterDailyPipeline task
     [switch]$SkipCompact,          # audit + scorecard + verdict, no cold writes
-    [string[]]$Recordings  = @("binance:BTCUSDT", "binance:ETHUSDT"),
+    [string[]]$Recordings  = @(),  # venue:symbol pairs to require; empty = core list
     [string[]]$RequiredStreams = @("trade", "book", "funding", "mark_price", "liquidation", "open_interest")
 )
 
@@ -46,6 +46,19 @@ $TaskName   = "MoneyPrinterDailyPipeline"
 $scoreDir   = Join-Path $root "data\scorecards"
 $logFile    = Join-Path $scoreDir "pipeline.log"
 $mpOps      = Join-Path $root "target\release\mp-ops.exe"
+
+# Recordings default: empty = load the single source of truth (ops/core_symbols.txt)
+# and require each core symbol on this venue (binance:<sym>) — so the scorecard's
+# required set ALWAYS matches what the watchdog records (no silent under-scoping
+# of the promotion gate). Falls back to binance:BTCUSDT+ETHUSDT when absent.
+if ($Recordings.Count -eq 0) {
+    $coreFile = Join-Path $root "ops\core_symbols.txt"
+    if (Test-Path $coreFile) {
+        $coreSyms = @(Get-Content $coreFile | Where-Object { $_ -match '^[A-Za-z0-9]{2,20}$' } | ForEach-Object { $_.Trim() })
+        $Recordings = @($coreSyms | ForEach-Object { "binance:$_" })
+    }
+    if ($Recordings.Count -eq 0) { $Recordings = @("binance:BTCUSDT", "binance:ETHUSDT") }
+}
 
 function Log {
     param([string]$Msg, [string]$Level = "INFO")
