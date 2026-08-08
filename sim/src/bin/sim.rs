@@ -89,8 +89,8 @@ fn strategy_named(
             }
             if let Some(xt) = exit_threshold {
                 cfg.exit_threshold = xt;
-            } else if entry_threshold.is_some() {
-                cfg.exit_threshold = entry_threshold.unwrap() * 0.2;
+            } else if let Some(et) = entry_threshold {
+                cfg.exit_threshold = et * 0.2;
             }
             Ok(Box::new(CarryV1::new(
                 mp_core::StrategyId::new("carry-v1"),
@@ -119,11 +119,13 @@ fn run_backtest(
     carry_entry: Option<f64>,
     carry_exit: Option<f64>,
 ) -> Result<Backtester, String> {
-    let mut cfg = SimConfig::default();
-    cfg.min_coverage = coverage;
-    cfg.bar_tf_ns = 1_000_000;
-    cfg.latency_ns = 0;
-    cfg.fill_model = mp_sim::FillModel::L0BarFill;
+    let cfg = SimConfig {
+        min_coverage: coverage,
+        bar_tf_ns: 1_000_000,
+        latency_ns: 0,
+        fill_model: mp_sim::FillModel::L0BarFill,
+        ..SimConfig::default()
+    };
     let mut bt = Backtester::new(
         engine(),
         strategy_named(strategy, events, carry_entry, carry_exit)?,
@@ -185,11 +187,13 @@ fn run_paper(
     seed: u64,
     chunk: usize,
 ) -> Result<Backtester, String> {
-    let mut cfg = SimConfig::default();
-    cfg.min_coverage = 1.0;
-    cfg.bar_tf_ns = 1_000_000;
-    cfg.latency_ns = 0;
-    cfg.fill_model = mp_sim::FillModel::L0BarFill;
+    let cfg = SimConfig {
+        min_coverage: 1.0,
+        bar_tf_ns: 1_000_000,
+        latency_ns: 0,
+        fill_model: mp_sim::FillModel::L0BarFill,
+        ..SimConfig::default()
+    };
     let bt = Backtester::new(
         engine(),
         strategy_named(strategy, events, None, None)?,
@@ -357,11 +361,13 @@ fn run() -> Result<ExitCode, String> {
             );
 
             // Base sim config (same as run_backtest)
-            let mut base_cfg = SimConfig::default();
-            base_cfg.min_coverage = 1.0;
-            base_cfg.bar_tf_ns = 1_000_000;
-            base_cfg.latency_ns = 0;
-            base_cfg.fill_model = mp_sim::FillModel::L0BarFill;
+            let base_cfg = SimConfig {
+                min_coverage: 1.0,
+                bar_tf_ns: 1_000_000,
+                latency_ns: 0,
+                fill_model: mp_sim::FillModel::L0BarFill,
+                ..SimConfig::default()
+            };
 
             let first = events[0].recv_ts_ns;
             let last = events[events.len() - 1].recv_ts_ns;

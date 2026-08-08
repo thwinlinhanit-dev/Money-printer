@@ -79,7 +79,6 @@ mod tests {
     use mp_core::{Side, SymbolId, Venue};
     use mp_features::FeatureEngine;
     use mp_strategies::examples::{CoinFlipStrategy, NullStrategy};
-    use mp_strategies::Strategy;
 
     fn trade(recv: i64, price: f64, side: Side) -> EventEnvelope {
         EventEnvelope::new(
@@ -100,10 +99,12 @@ mod tests {
     fn make_bt() -> Backtester {
         let mut fe = FeatureEngine::new(1_000_000_000);
         fe.register_tick(|| Box::new(mp_features::catalog::Cvd::new(Venue::Bybit)));
-        let mut cfg = SimConfig::default();
-        cfg.bar_tf_ns = 1_000_000;
-        cfg.latency_ns = 0;
-        cfg.fill_model = crate::fills::FillModel::L0BarFill;
+        let cfg = SimConfig {
+            bar_tf_ns: 1_000_000,
+            latency_ns: 0,
+            fill_model: crate::fills::FillModel::L0BarFill,
+            ..SimConfig::default()
+        };
         Backtester::new(fe, Box::new(CoinFlipStrategy::new()), cfg, 7)
     }
 
@@ -158,10 +159,12 @@ mod tests {
     fn sim_15_paper_close_refuses_missing_funding_for_held_perp() {
         let mut fe = FeatureEngine::new(1_000_000_000);
         fe.register_tick(|| Box::new(mp_features::catalog::Cvd::new(Venue::Bybit)));
-        let mut cfg = SimConfig::default();
-        cfg.bar_tf_ns = 1_000_000;
-        cfg.latency_ns = 0;
-        cfg.fill_model = crate::fills::FillModel::L0BarFill;
+        let cfg = SimConfig {
+            bar_tf_ns: 1_000_000,
+            latency_ns: 0,
+            fill_model: crate::fills::FillModel::L0BarFill,
+            ..SimConfig::default()
+        };
         // Null strategy never trades → nothing held → close is fine.
         let mut session = PaperSession::new(Backtester::new(fe, Box::new(NullStrategy), cfg, 1));
         let events: Vec<EventEnvelope> = (0..5)

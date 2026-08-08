@@ -116,7 +116,9 @@ pub fn wall_now_ns() -> i64 {
 /// per-day sequence-gap storms + 22-45 spawns). Every Binance REST fetch goes
 /// through this client so a sick network bounds stalls to ~10s and the loop
 /// resumes (heartbeat keeps ticking, data resumes, gaps stay small).
+#[cfg(feature = "live-http")]
 const REST_TOTAL_TIMEOUT_SECS: u64 = 10;
+#[cfg(feature = "live-http")]
 const REST_CONNECT_TIMEOUT_SECS: u64 = 5;
 
 #[cfg(feature = "live-http")]

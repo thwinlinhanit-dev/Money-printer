@@ -296,7 +296,7 @@ fn res_6_usage_threaded_out_of_completion_parse_for_every_provider() {
             1,
         ),
     ];
-    let mut acc = mp_llm::UsageAccumulator::new();
+    let acc = mp_llm::UsageAccumulator::new();
     for (p, raw, want_in, want_out) in cases {
         let (c, u) = p.completion_and_usage(raw.as_bytes()).unwrap();
         assert_eq!(u.input_tokens, want_in);

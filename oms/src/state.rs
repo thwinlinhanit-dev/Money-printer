@@ -149,15 +149,12 @@ impl OrderStore {
         let order = self.orders.get_mut(client_id)?;
         let was_unknown = order.state == OrderState::Unknown;
         let res = order.apply(event);
-        match res {
-            Ok(next) => {
-                if next == OrderState::Unknown && !was_unknown {
-                    order.unknown_since_ns = Some(now_ns);
-                } else if next != OrderState::Unknown {
-                    order.unknown_since_ns = None;
-                }
+        if let Ok(next) = res {
+            if next == OrderState::Unknown && !was_unknown {
+                order.unknown_since_ns = Some(now_ns);
+            } else if next != OrderState::Unknown {
+                order.unknown_since_ns = None;
             }
-            Err(_) => {}
         }
         Some(res)
     }
@@ -171,7 +168,7 @@ impl OrderStore {
             .filter(|o| o.state == OrderState::Unknown)
             .filter(|o| {
                 o.unknown_since_ns
-                    .map_or(false, |t| now_ns.saturating_sub(t) >= max_ns)
+                    .is_some_and(|t| now_ns.saturating_sub(t) >= max_ns)
             })
             .map(|o| o.client_id.clone())
             .collect()

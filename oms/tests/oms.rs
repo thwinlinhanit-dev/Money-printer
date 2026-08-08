@@ -210,7 +210,7 @@ proptest! {
         for (i, ev) in events.into_iter().enumerate() {
             let before = store.get(&id).unwrap().state;
             match store.apply(&id, ev, now_ns + i as i64) {
-                Some(Ok(next)) if terminal => {
+                Some(Ok(_)) if terminal => {
                     // Terminal states are absorbing (CONV-22).
                     panic!("terminal {before:?} accepted {ev:?}");
                 }

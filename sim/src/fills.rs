@@ -95,10 +95,6 @@ impl PendingBook {
         self.pending.push(p);
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-    }
-
     /// Drain pending matching `keep` (returns true → stay pending).
     /// `on_fill` is called for each order that leaves the book as a fill.
     fn drain(

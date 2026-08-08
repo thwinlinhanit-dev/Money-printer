@@ -20,4 +20,6 @@ mark_source = "rest"
 # the venue edge geo-filters this network (fstream drops non-book streams from
 # some regions). Supported: "http://host:port" (HTTP CONNECT) and
 # "socks5://host:port". The MP_WS_PROXY env var overrides this when set.
+# Verify the filter/fix with: node ops/scripts/ws_probe.mjs (direct probe;
+# full procedure in ops/runbooks/ws-egress-filter.md).
 # proxy = "socks5://127.0.0.1:1080"

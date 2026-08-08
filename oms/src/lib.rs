@@ -65,7 +65,7 @@ pub fn state_machine_self_test() -> Result<(), String> {
     store.submit("self-test");
     if store
         .apply("self-test", Ack, 0)
-        .map_or(false, |r| r.is_ok())
+        .is_some_and(|r| r.is_ok())
     {
         return Err("ack-before-submit must be illegal".into());
     }
