@@ -63,7 +63,9 @@ def test_res_5_generate_or_alert_returns_p3_on_ungrounded(monkeypatch):
     import brief as brief_mod
 
     monkeypatch.setattr(
-        brief_mod, "render_brief", lambda i, v="brief-v1": "## Regime\nmade-up 42424242\n"
+        brief_mod,
+        "render_brief",
+        lambda i, v="brief-v1": "## Regime\nmade-up 42424242\n",
     )
     out, alert = generate_or_alert(inputs, model_id="claude-opus-4-8")
     assert out is None
@@ -117,4 +119,6 @@ def test_res_8_prompt_templates_carry_version_headers():
     assert files, "research/prompts must contain versioned templates (RES-8)"
     for f in files:
         text = f.read_text(encoding="utf-8")
-        assert re.search(r"prompt-version:\s*\S+", text), f"{f.name} lacks a prompt-version header"
+        assert re.search(r"prompt-version:\s*\S+", text), (
+            f"{f.name} lacks a prompt-version header"
+        )

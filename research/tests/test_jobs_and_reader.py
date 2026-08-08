@@ -19,7 +19,11 @@ def _write_fixture(root, with_gap: bool):
     d = root / "trades" / "venue=bybit" / "symbol=BTCUSDT" / "date=2026-07-11"
     d.mkdir(parents=True)
     pl.DataFrame(
-        {"recv_ts_ns": [10, 20, 30], "price": [100.0, 101.0, 99.5], "qty": [1.0, 1.0, 1.0]}
+        {
+            "recv_ts_ns": [10, 20, 30],
+            "price": [100.0, 101.0, 99.5],
+            "qty": [1.0, 1.0, 1.0],
+        }
     ).write_parquet(d / "part-000.parquet")
     m = root / "manifests" / "venue=bybit"
     m.mkdir(parents=True)
@@ -64,13 +68,14 @@ def test_manifest_schema_contract_rejects_old_from_to_ns_names(tmp_path):
     m = tmp_path / "manifests" / "venue=bybit"
     m.mkdir(parents=True)
     bad_manifest = {
-        "from_ns": 0,   # OLD name — must be rejected
-        "to_ns": DAY,   # OLD name — must be rejected
+        "from_ns": 0,  # OLD name — must be rejected
+        "to_ns": DAY,  # OLD name — must be rejected
         "streams": {"trades:BTCUSDT": {"events": 3, "gaps": []}},
     }
     (m / "date=2026-07-11.json").write_text(json.dumps(bad_manifest), encoding="utf-8")
     with pytest.raises(KeyError, match="day_start_ns"):
         from mp_data.reader import coverage as read_coverage
+
         read_coverage(tmp_path, "bybit", "2026-07-11", "trades:BTCUSDT")
 
 
@@ -106,13 +111,22 @@ def test_res_5_6_executable_brief_job_archives_inputs_and_validation(tmp_path):
     input_path.write_text(json.dumps(bundle), encoding="utf-8")
     script = __import__("pathlib").Path(__file__).resolve().parents[1] / "run_brief.py"
     result = subprocess.run(
-        [sys.executable, str(script), "--input", str(input_path), "--archive-dir", str(tmp_path / "briefs")],
+        [
+            sys.executable,
+            str(script),
+            "--input",
+            str(input_path),
+            "--archive-dir",
+            str(tmp_path / "briefs"),
+        ],
         text=True,
         capture_output=True,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    record = json.loads(next((tmp_path / "briefs").glob("*.jsonl")).read_text(encoding="utf-8"))
+    record = json.loads(
+        next((tmp_path / "briefs").glob("*.jsonl")).read_text(encoding="utf-8")
+    )
     assert json.loads(record["input_bundle"]) == bundle
     assert record["validation_result"] == "grounded"
 
@@ -127,9 +141,18 @@ def test_res_2_executable_grading_job(tmp_path):
     }
     input_path = tmp_path / "grading.json"
     input_path.write_text(json.dumps(bundle), encoding="utf-8")
-    script = __import__("pathlib").Path(__file__).resolve().parents[1] / "run_grading.py"
+    script = (
+        __import__("pathlib").Path(__file__).resolve().parents[1] / "run_grading.py"
+    )
     result = subprocess.run(
-        [sys.executable, str(script), "--input", str(input_path), "--out-dir", str(tmp_path / "grades")],
+        [
+            sys.executable,
+            str(script),
+            "--input",
+            str(input_path),
+            "--out-dir",
+            str(tmp_path / "grades"),
+        ],
         text=True,
         capture_output=True,
         check=False,

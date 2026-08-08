@@ -45,12 +45,17 @@ def run_weekly_grading(
         "horizon_ns": horizon_ns,
         "rules": [_row(g) for g in board],
     }
-    grades_path.write_text(json.dumps(payload, sort_keys=True, indent=1), encoding="utf-8")
+    grades_path.write_text(
+        json.dumps(payload, sort_keys=True, indent=1), encoding="utf-8"
+    )
 
     # Leaderboard journal: one line per rule per week, append-only.
     with (out_dir / "leaderboard.jsonl").open("a", encoding="utf-8") as f:
         for rank, g in enumerate(board, start=1):
-            f.write(json.dumps({"week": week, "rank": rank, **_row(g)}, sort_keys=True) + "\n")
+            f.write(
+                json.dumps({"week": week, "rank": rank, **_row(g)}, sort_keys=True)
+                + "\n"
+            )
     return grades_path, True
 
 

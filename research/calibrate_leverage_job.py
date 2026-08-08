@@ -25,7 +25,13 @@ import sys
 from pathlib import Path
 
 from band_accuracy_job import ulid
-from calibrate_leverage import WEIGHT_EPSILON, CalibrationRun, Tier, parse_report, render_toml
+from calibrate_leverage import (
+    WEIGHT_EPSILON,
+    CalibrationRun,
+    Tier,
+    parse_report,
+    render_toml,
+)
 
 
 class CalibrationError(RuntimeError):

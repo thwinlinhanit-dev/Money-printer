@@ -95,7 +95,9 @@ def events(
     cov = coverage(root, venue, date, f"trades:{symbol}")
     if cov is None:
         if mode == "refuse":
-            raise CoverageGap(f"no manifest for {venue}/{date} — unmanifested data is untrusted")
+            raise CoverageGap(
+                f"no manifest for {venue}/{date} — unmanifested data is untrusted"
+            )
         gaps: list[Interval] = []
     else:
         # The manifest's own day bounds define the query window.

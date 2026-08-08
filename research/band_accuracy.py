@@ -81,7 +81,9 @@ def parse_report(obj: Any) -> BandRun:
         try:
             return SideMetrics(
                 n=_as_int(s["n"], f"{key}.n"),
-                mean_relative_error=_as_float(s["mean_relative_error"], f"{key}.mean_relative_error"),
+                mean_relative_error=_as_float(
+                    s["mean_relative_error"], f"{key}.mean_relative_error"
+                ),
                 coverage=_as_float(s["coverage"], f"{key}.coverage"),
             )
         except KeyError as e:
@@ -104,7 +106,9 @@ def parse_report(obj: Any) -> BandRun:
         long=side("long"),
         short=side("short"),
         total=side("total"),
-        events={str(k): _as_int(v, f"events.{k}") for k, v in events.items()} if events else {},
+        events={str(k): _as_int(v, f"events.{k}") for k, v in events.items()}
+        if events
+        else {},
     )
 
 

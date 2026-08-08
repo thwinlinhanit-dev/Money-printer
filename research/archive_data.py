@@ -83,7 +83,13 @@ def upload_with_retry(
         try:
             logger.info(
                 "uploading %s -> s3://%s/%s (attempt %d/%d, size=%d, md5=%s)",
-                local_path.name, bucket, key, attempt, max_retries, file_size, md5_local,
+                local_path.name,
+                bucket,
+                key,
+                attempt,
+                max_retries,
+                file_size,
+                md5_local,
             )
 
             s3_client.upload_file(
@@ -100,28 +106,38 @@ def upload_with_retry(
 
             if remote_size != file_size:
                 logger.error(
-                    "size mismatch: local=%d remote=%d", file_size, remote_size,
+                    "size mismatch: local=%d remote=%d",
+                    file_size,
+                    remote_size,
                 )
                 continue
 
             # Standard S3 ETag is the MD5 for single-part uploads
             if remote_etag and remote_etag != md5_local:
                 logger.error(
-                    "md5 mismatch: local=%s remote=%s", md5_local, remote_etag,
+                    "md5 mismatch: local=%s remote=%s",
+                    md5_local,
+                    remote_etag,
                 )
                 continue
 
             logger.info(
-                "verified OK: %s -> s3://%s/%s", local_path.name, bucket, key,
+                "verified OK: %s -> s3://%s/%s",
+                local_path.name,
+                bucket,
+                key,
             )
             return True
 
         except Exception as e:
             logger.warning(
-                "upload attempt %d/%d failed: %s", attempt, max_retries, e,
+                "upload attempt %d/%d failed: %s",
+                attempt,
+                max_retries,
+                e,
             )
             if attempt < max_retries:
-                delay = 2 ** attempt
+                delay = 2**attempt
                 logger.info("retrying in %ds...", delay)
                 time.sleep(delay)
 
@@ -178,7 +194,9 @@ def main() -> None:
 
         ok = upload_with_retry(s3, local_path, bucket, key)
         if ok:
-            logger.info("verified remote copy; retaining local append-only file: %s", local_path)
+            logger.info(
+                "verified remote copy; retaining local append-only file: %s", local_path
+            )
         else:
             any_failure = True
             logger.error(

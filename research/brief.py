@@ -160,7 +160,9 @@ def _confined_path(briefs_dir: Path, name: str) -> Path:
     return target
 
 
-def archive_brief(briefs_dir: Path, record: ArchiveRecord, name: str = "briefs.jsonl") -> Path:
+def archive_brief(
+    briefs_dir: Path, record: ArchiveRecord, name: str = "briefs.jsonl"
+) -> Path:
     """Append the brief record to the briefs archive (RES-6, append-only W-6).
     Confined to `briefs_dir` (RES-7)."""
     path = _confined_path(Path(briefs_dir), name)

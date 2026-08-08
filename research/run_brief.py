@@ -20,10 +20,16 @@ from brief import ArchiveRecord, InputBundle, archive_brief, generate_or_alert
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="render and archive a grounded daily brief")
-    parser.add_argument("--input", required=True, type=Path, help="structured market-data JSON bundle")
+    parser = argparse.ArgumentParser(
+        description="render and archive a grounded daily brief"
+    )
+    parser.add_argument(
+        "--input", required=True, type=Path, help="structured market-data JSON bundle"
+    )
     parser.add_argument("--archive-dir", type=Path, default=Path("journal/briefs"))
-    parser.add_argument("--model", default=os.environ.get("MP_BRIEF_MODEL", "deterministic-template-v1"))
+    parser.add_argument(
+        "--model", default=os.environ.get("MP_BRIEF_MODEL", "deterministic-template-v1")
+    )
     parser.add_argument("--prompt-version", default="brief-v1")
     args = parser.parse_args(argv)
 

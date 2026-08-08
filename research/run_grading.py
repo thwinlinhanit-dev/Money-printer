@@ -27,16 +27,23 @@ def main(argv: list[str] | None = None) -> int:
         bundle = json.loads(args.input.read_text(encoding="utf-8"))
         week = str(bundle["week"])
         horizon_ns = int(bundle["horizon_ns"])
-        hits = [Hit(str(hit["rule"]), str(hit["symbol"]), int(hit["ts_ns"])) for hit in bundle["hits"]]
+        hits = [
+            Hit(str(hit["rule"]), str(hit["symbol"]), int(hit["ts_ns"]))
+            for hit in bundle["hits"]
+        ]
         prices = {
             str(symbol): [(int(ts), float(price)) for ts, price in series]
             for symbol, series in bundle["prices"].items()
         }
-        baseline = {str(symbol): float(value) for symbol, value in bundle["baseline"].items()}
+        baseline = {
+            str(symbol): float(value) for symbol, value in bundle["baseline"].items()
+        }
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         print(f"P3: grading input unavailable or invalid: {error}", file=sys.stderr)
         return 2
-    path, ran = run_weekly_grading(week, hits, prices, horizon_ns, baseline, args.out_dir)
+    path, ran = run_weekly_grading(
+        week, hits, prices, horizon_ns, baseline, args.out_dir
+    )
     print(json.dumps({"path": str(path), "ran": ran}, sort_keys=True))
     return 0
 

@@ -56,7 +56,9 @@ def parse_report(obj: Any) -> CalibrationRun:
     if not isinstance(obj, dict):
         raise ValueError(f"calibration report is not an object: {type(obj).__name__}")
     if obj.get("study") != "leverage_calibration":
-        raise ValueError(f"not a leverage_calibration report: study={obj.get('study')!r}")
+        raise ValueError(
+            f"not a leverage_calibration report: study={obj.get('study')!r}"
+        )
 
     tiers = obj.get("tiers")
     if not isinstance(tiers, list) or not tiers:
@@ -86,7 +88,9 @@ def parse_report(obj: Any) -> CalibrationRun:
         n=_as_int(obj.get("n", 0), "n"),
         positions_seen=_as_int(obj.get("positions_seen", 0), "positions_seen"),
         total_notional=_as_float(obj.get("total_notional", 0.0), "total_notional"),
-        maintenance_buffer=_as_float(obj.get("maintenance_buffer", 0.0), "maintenance_buffer"),
+        maintenance_buffer=_as_float(
+            obj.get("maintenance_buffer", 0.0), "maintenance_buffer"
+        ),
         sum_weights=_as_float(obj.get("sum_weights", 0.0), "sum_weights"),
         tiers=tuple(parsed),
     )

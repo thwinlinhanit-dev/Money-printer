@@ -32,15 +32,38 @@ def default_binary() -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="calibrate liq.est_bands leverage-tier weights (RES-4/LIQ-11)")
-    parser.add_argument("--log", action="append", required=True, type=Path, help="mp raw event log with spec 028 positions (repeatable)")
-    parser.add_argument("--config", type=Path, help="current features.toml (its tier set is calibrated; defaults if omitted)")
+    parser = argparse.ArgumentParser(
+        description="calibrate liq.est_bands leverage-tier weights (RES-4/LIQ-11)"
+    )
+    parser.add_argument(
+        "--log",
+        action="append",
+        required=True,
+        type=Path,
+        help="mp raw event log with spec 028 positions (repeatable)",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="current features.toml (its tier set is calibrated; defaults if omitted)",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("research/calibration"))
     parser.add_argument("--git-sha", help="commit under which the logs were recorded")
     parser.add_argument("--run-id", help="ULID run id (defaults to a fresh ULID)")
-    parser.add_argument("--runs-dir", type=Path, default=None, help="where whale_study journals its SIM-10 record (default <out-dir>/runs)")
-    parser.add_argument("--whale-study", type=Path, default=None, help="path to the whale_study binary")
-    parser.add_argument("--print-toml", action="store_true", help="print only the [liq_est_bands] TOML section to stdout")
+    parser.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="where whale_study journals its SIM-10 record (default <out-dir>/runs)",
+    )
+    parser.add_argument(
+        "--whale-study", type=Path, default=None, help="path to the whale_study binary"
+    )
+    parser.add_argument(
+        "--print-toml",
+        action="store_true",
+        help="print only the [liq_est_bands] TOML section to stdout",
+    )
     args = parser.parse_args(argv)
 
     binary = args.whale_study or default_binary()
@@ -55,7 +78,10 @@ def main(argv: list[str] | None = None) -> int:
             runs_dir=args.runs_dir,
         )
     except CalibrationError as error:
-        print(f"P4: leverage calibration inputs unavailable or invalid: {error}", file=sys.stderr)
+        print(
+            f"P4: leverage calibration inputs unavailable or invalid: {error}",
+            file=sys.stderr,
+        )
         return 2
 
     if args.print_toml:

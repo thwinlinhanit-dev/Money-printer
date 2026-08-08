@@ -31,14 +31,30 @@ def default_binary() -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="grade a week of recorded liq data (RES-4)")
-    parser.add_argument("--log", action="append", required=True, type=Path, help="mp raw event log (repeatable)")
-    parser.add_argument("--config", type=Path, help="features.toml with liq.est_bands (defaults if omitted)")
+    parser = argparse.ArgumentParser(
+        description="grade a week of recorded liq data (RES-4)"
+    )
+    parser.add_argument(
+        "--log",
+        action="append",
+        required=True,
+        type=Path,
+        help="mp raw event log (repeatable)",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="features.toml with liq.est_bands (defaults if omitted)",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("research/band_accuracy"))
-    parser.add_argument("--week", help="ISO week (YYYY-Www); defaults to the run's data range")
+    parser.add_argument(
+        "--week", help="ISO week (YYYY-Www); defaults to the run's data range"
+    )
     parser.add_argument("--git-sha", help="commit under which the logs were recorded")
     parser.add_argument("--run-id", help="ULID run id (defaults to a fresh ULID)")
-    parser.add_argument("--whale-study", type=Path, default=None, help="path to the whale_study binary")
+    parser.add_argument(
+        "--whale-study", type=Path, default=None, help="path to the whale_study binary"
+    )
     parser.add_argument(
         "--runs-dir",
         type=Path,
@@ -60,7 +76,9 @@ def main(argv: list[str] | None = None) -> int:
             runs_dir=args.runs_dir,
         )
     except BandJobError as error:
-        print(f"P4: band-accuracy inputs unavailable or invalid: {error}", file=sys.stderr)
+        print(
+            f"P4: band-accuracy inputs unavailable or invalid: {error}", file=sys.stderr
+        )
         return 2
     week = payload["week"] if payload else args.week or "?"
     print(json.dumps({"path": str(path), "week": week, "ran": ran}, sort_keys=True))

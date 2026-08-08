@@ -20,7 +20,9 @@ class Hit:
     ts_ns: int
 
 
-def forward_return(prices: list[tuple[int, float]], ts_ns: int, horizon_ns: int) -> float | None:
+def forward_return(
+    prices: list[tuple[int, float]], ts_ns: int, horizon_ns: int
+) -> float | None:
     """Return over ``[ts, ts+horizon]`` using the last price at or before each
     end (step lookup). ``None`` if either endpoint has no price yet.
 

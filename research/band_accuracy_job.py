@@ -87,7 +87,14 @@ def run_weekly_band_accuracy(
         )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    record = _run_study(logs, binary, config, git_sha, run_id, Path(runs_dir) if runs_dir else out_dir / "runs")
+    record = _run_study(
+        logs,
+        binary,
+        config,
+        git_sha,
+        run_id,
+        Path(runs_dir) if runs_dir else out_dir / "runs",
+    )
     if record.observations == 0:
         # No spec 028 whale positions paired in the replay: the week has no
         # validation signal. Unavailable data is a failed job, not an
@@ -118,13 +125,20 @@ def run_weekly_band_accuracy(
         # idempotent even though the binary journaled its per-run record.
         return grades_path, False, None
 
-    grades_path.write_text(json.dumps(payload, sort_keys=True, indent=1), encoding="utf-8")
+    grades_path.write_text(
+        json.dumps(payload, sort_keys=True, indent=1), encoding="utf-8"
+    )
 
     # Trend journal: one line per graded week, append-only (W-6).
     with (out_dir / JOURNAL_NAME).open("a", encoding="utf-8") as f:
         f.write(
             json.dumps(
-                {"week": week, "run_id": record.run_id, **_side(record.total), "config_hash": record.config_hash},
+                {
+                    "week": week,
+                    "run_id": record.run_id,
+                    **_side(record.total),
+                    "config_hash": record.config_hash,
+                },
                 sort_keys=True,
             )
             + "\n"

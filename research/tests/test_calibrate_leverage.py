@@ -46,7 +46,13 @@ def report(
     }
 
 
-def write_shim(tmp_path: Path, *, payload: dict | None = None, exit_code: int = 0, stdout: str | None = None) -> Path:
+def write_shim(
+    tmp_path: Path,
+    *,
+    payload: dict | None = None,
+    exit_code: int = 0,
+    stdout: str | None = None,
+) -> Path:
     body = f"import sys\nprint({json.dumps(stdout if stdout is not None else json.dumps(payload))})\n"
     if exit_code != 0:
         body = f"import sys\nsys.stderr.write('boom')\nsys.exit({exit_code})\n"
@@ -68,7 +74,11 @@ def test_res_4_calibrate_parse_report_fields():
     assert r.maintenance_buffer == 1.5
     assert r.sum_weights == 1.0
     assert len(r.tiers) == 6
-    assert r.tiers[1].leverage == 2.0 and r.tiers[1].weight == 0.4 and r.tiers[1].count == 1
+    assert (
+        r.tiers[1].leverage == 2.0
+        and r.tiers[1].weight == 0.4
+        and r.tiers[1].count == 1
+    )
     assert r.tiers[5].leverage == 50.0 and r.tiers[5].weight == 0.2
 
 
@@ -149,7 +159,12 @@ def test_res_4_calibrate_job_happy_path(tmp_path):
     # The record is self-contained (reproducible from itself, SIM-10).
     assert record["config_hash"] == "deadbeefdeadbeef"
 
-    lines = (tmp_path / "out" / "calibrations.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    lines = (
+        (tmp_path / "out" / "calibrations.jsonl")
+        .read_text(encoding="utf-8")
+        .strip()
+        .splitlines()
+    )
     assert len(lines) == 1
     ev = json.loads(lines[0])
     assert ev["run_id"] == "cal-1" and ev["n"] == 4 and ev["sum_weights"] == 1.0
@@ -170,7 +185,10 @@ def test_res_4_calibrate_job_fail_closed(tmp_path):
         run_leverage_calibration([log], tmp_path / "out", shim)
 
     # An empty census is a failed job, never a bogus override.
-    shim = write_shim(tmp_path, payload=report(n=0, positions_seen=0, total_notional=0.0, sum_weights=0.0))
+    shim = write_shim(
+        tmp_path,
+        payload=report(n=0, positions_seen=0, total_notional=0.0, sum_weights=0.0),
+    )
     with pytest.raises(CalibrationError):
         run_leverage_calibration([log], tmp_path / "out", shim)
 
@@ -209,7 +227,16 @@ def test_res_4_calibrate_cli_exit_codes_and_toml(tmp_path, capsys):
     log = tmp_path / "positions.log"
     log.write_text("ignored", encoding="utf-8")
 
-    code = cli_main(["--log", str(log), "--whale-study", str(shim), "--out-dir", str(tmp_path / "out")])
+    code = cli_main(
+        [
+            "--log",
+            str(log),
+            "--whale-study",
+            str(shim),
+            "--out-dir",
+            str(tmp_path / "out"),
+        ]
+    )
     assert code == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["n"] == 4 and summary["run_id"] == "cal-1"
@@ -217,10 +244,27 @@ def test_res_4_calibrate_cli_exit_codes_and_toml(tmp_path, capsys):
     # Second invocation with a fresh out-dir (records are immutable per run,
     # so the same run_id cannot write twice).
     code = cli_main(
-        ["--log", str(log), "--whale-study", str(shim), "--out-dir", str(tmp_path / "out2"), "--print-toml"]
+        [
+            "--log",
+            str(log),
+            "--whale-study",
+            str(shim),
+            "--out-dir",
+            str(tmp_path / "out2"),
+            "--print-toml",
+        ]
     )
     assert code == 0
     assert capsys.readouterr().out.startswith("[liq_est_bands]\n")
 
-    code = cli_main(["--log", str(tmp_path / "missing.log"), "--whale-study", str(shim), "--out-dir", str(tmp_path / "out")])
+    code = cli_main(
+        [
+            "--log",
+            str(tmp_path / "missing.log"),
+            "--whale-study",
+            str(shim),
+            "--out-dir",
+            str(tmp_path / "out"),
+        ]
+    )
     assert code == 2
