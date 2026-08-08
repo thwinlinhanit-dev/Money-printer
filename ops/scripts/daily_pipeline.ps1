@@ -53,20 +53,10 @@ while ($true) {
 $TaskName   = "MoneyPrinterDailyPipeline"
 $scoreDir   = Join-Path $root "data\scorecards"
 
-# 0. PD guardrails (audit 08-04 #6): the bash guardrails cannot run on this
-#    native Windows host, so the PowerShell port runs first - mechanical
-#    rulebook enforcement (PD-1..4, W-7, CONV-21, OPS-4) before any number
-#    from the scorecard is trusted. Fail-closed: a guardrails violation stops
-#    the pipeline with a distinct, grep-able error.
-$guardrails = Join-Path $root "ops\ci\guardrails.ps1"
-if (Test-Path $guardrails) {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $guardrails
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[!!] guardrails failed - the tree violates the rulebook (PD-1..4/W-7); fix before trusting today's scorecard" -ForegroundColor Red
-        Exit 1
-    }
-    Write-Host "[ok] guardrails: all checks passed" -ForegroundColor Green
-}
+# 0. PD guardrails (audit 08-04 #6) run later in the script, after Log and
+#    Invoke-Native are defined (audit 08-08): the scheduled task runs hidden,
+#    so the guardrails verdict must land in data/scorecards/pipeline.log, not
+#    just the lost console.
 $logFile    = Join-Path $scoreDir "pipeline.log"
 $mpOps      = Join-Path $root "target\release\mp-ops.exe"
 
@@ -111,6 +101,27 @@ function Invoke-Native {
     $code = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
     return ,@($out, $code)
+}
+
+# 0. PD guardrails (audit 08-04 #6): the bash guardrails cannot run on this
+#    native Windows host, so the PowerShell port runs first - mechanical
+#    rulebook enforcement (PD-1..4, W-7, CONV-21, OPS-4) before any number
+#    from the scorecard is trusted. Fail-closed: a violation stops the
+#    pipeline with a distinct, grep-able error. Invoked through Invoke-Native
+#    so its output is captured and logged (audit 08-08: the scheduled task's
+#    window is hidden - a failure must be visible in pipeline.log).
+$guardrails = Join-Path $root "ops\ci\guardrails.ps1"
+if (Test-Path $guardrails) {
+    $gr = Invoke-Native -FilePath "powershell.exe" -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $guardrails)
+    foreach ($gline in @($gr[0])) {
+        $gs = ($gline | Out-String).Trim()
+        if ($gs -ne "") { Log $gs "INFO" }
+    }
+    if ($gr[1] -ne 0) {
+        Log "guardrails failed - the tree violates the rulebook (PD-1..4/W-7); fix before trusting today's scorecard" "ERROR"
+        Exit 1
+    }
+    Log "guardrails: all checks passed" "INFO"
 }
 
 # ---- task registration ------------------------------------------------------
@@ -169,11 +180,20 @@ Log "Daily pipeline start: date=$dateDashed recordings=$($Recordings -join ',') 
 # Stale-guard: a release binary that predates a subcommand would fail with
 # "unknown subcommand" mid-pipeline, so verify `scorecard` exists too.
 function Invoke-Build {
+    # Route through Invoke-Native (audit 08-08): cargo writes its progress to
+    # stderr, and under $ErrorActionPreference=Stop PowerShell 5.1 raises a
+    # terminating NativeCommandError on stderr output - the old `2>&1 |`
+    # pipe killed the whole pipeline silently (task result=1, no log entry)
+    # whenever a rebuild was needed (also explains the 08-07/08-08 00:05 UTC
+    # silent failures: no scorecards were ever archived).
     Push-Location $root
-    cargo build -p mp-ops --release 2>&1 | Where-Object { $_ -match "error|Finished" } | ForEach-Object { Log $_ "WARN" }
-    $code = $LASTEXITCODE
+    $res = Invoke-Native -FilePath "cargo" -Arguments @("build", "-p", "mp-ops", "--release")
     Pop-Location
-    if ($code -ne 0) { Log "mp-ops build failed (exit $code)" "ERROR"; Exit 1 }
+    foreach ($line in @($res[0])) {
+        $s = ($line | Out-String).Trim()
+        if ($s -match "error|warning: unused|Finished") { Log $s "WARN" }
+    }
+    if ($res[1] -ne 0) { Log "mp-ops build failed (exit $($res[1]))" "ERROR"; Exit 1 }
 }
 if (-not (Test-Path $mpOps)) {
     Log "mp-ops.exe not found - building release binary" "WARN"
