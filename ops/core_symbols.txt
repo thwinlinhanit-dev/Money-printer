@@ -1,23 +1,30 @@
-# Core Binance USDT-M perpetual symbols for the Phase-0 promotion gate.
+# Core recordings for the Phase-0 promotion gate (SINGLE SOURCE OF TRUTH).
 #
-# SINGLE SOURCE OF TRUTH (one symbol per line, blank lines and # comments
-# ignored): loaded by BOTH the collector watchdog (ops/watchdog_collectors.ps1)
-# and the daily integrity pipeline (ops/scripts/daily_pipeline.ps1), so the set
-# that is recorded and the set that is required on each day's scorecard can
-# never drift out of sync.
+# One recording per line as `venue:SYMBOL`.  Loaded by BOTH the collector
+# watchdog (ops/watchdog_collectors.ps1) and the daily integrity pipeline
+# (ops/scripts/daily_pipeline.ps1), so the set that is recorded and the set
+# that is required on each day's scorecard can never drift out of sync.
 #
-# Disk cost: a collector writes ~0.4-0.45 GiB/day/symbol raw (trades + book +
-# funding + OI + liq). The 8 symbols below are ~3.5 GiB/day (~105 GiB/month) —
-# a real commitment, so keep recorded market data on a dedicated backed-up
-# drive (W-6), NOT under ~/Downloads.
+# 2026-08-08: this host's egress is geo-filtered by Binance futures
+# (spec 024 incident) — Binance can never produce promotable days from this
+# network (forceOrder/liquidation has no REST fallback; proven live three
+# ways).  The Phase-0 required venue is now Hyperliquid, whose permissionless
+# API has no geo-blocks and no KYC (verified live 2026-08-08: WS trades +
+# l2Book + activeAssetCtx flow, audit CLEAN coverage 1.0).  Symbols are BARE
+# coin names (BTC, ETH), NOT USDT pairs: the hyperliquid venue derives the
+# subscription coin from the symbol (BTCUSDT -> BTC) but the recording's
+# symbol table carries the bare coin, so a `hyperliquid:BTCUSDT` recording
+# would fail the audit's symbol_mismatch check.
 #
-# Edit freely, then restart the watchdog to pick up changes ($Symbols override,
-# or delete this file to fall back to BTCUSDT+ETHUSDT).
-BTCUSDT
-ETHUSDT
-SOLUSDT
-BNBUSDT
-XRPUSDT
-DOGEUSDT
-ADAUSDT
-LINKUSDT
+# Liquidation data comes from the on-chain whale census (`mp-whale`, spec 028)
+# and feeds the liq-est band research edge (spec 029).  It is recorded
+# separately (data/raw/{date}_hyperliquid_positions.log) and is NOT a required
+# stream of the gate — the gate's required stream set is:
+#   trade book funding mark_price open_interest
+#
+# Disk cost: keep recorded market data on a dedicated backed-up drive (W-6),
+# NOT under ~/Downloads.
+#
+# Edit freely, then restart the watchdog to pick up changes.
+hyperliquid:BTC
+hyperliquid:ETH

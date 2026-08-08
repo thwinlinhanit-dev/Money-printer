@@ -13,41 +13,111 @@
 #    `cargo build` and rustup/cargo are installed per-user under
 #    $env:USERPROFILE, so a SYSTEM-context run has no cargo on PATH.)
 #   .\ops\watchdog_collectors.ps1 -RegisterTask -AsSystem
+#
+# Recordings come from ops/core_symbols.txt as `venue:SYMBOL` lines (a plain
+# SYMBOL line means the binance venue).  One live `mp-collector` per line.
+# The Hyperliquid on-chain whale census (`mp-whale`, spec 028) is supervised
+# alongside them - its log feeds the liq-est band research edge (spec 029).
 
 param(
     [switch]$RegisterTask,
     [switch]$AsSystem,
-    [string[]]$Symbols         = @(),
+    [string[]]$Recordings      = @(),  # venue:symbol pairs; empty = ops/core_symbols.txt
     [int]$CheckIntervalSeconds = 20,
     [int]$CooldownSeconds      = 90,
     [int]$GraceSeconds         = 45
 )
 
-# Symbols default: empty = load the single source of truth (ops/core_symbols.txt,
-# one per line) so the recorded set always matches the daily pipeline's required
-# set. Falls back to BTCUSDT+ETHUSDT when the file is absent or empty.
-if ($Symbols.Count -eq 0) {
+# Recordings default: empty = load the single source of truth
+# (ops/core_symbols.txt, one `venue:SYMBOL` per line; a plain SYMBOL means
+# the binance venue) so the recorded set always matches the daily pipeline's
+# required set.  Falls back to hyperliquid:BTC+ETH when the file is absent.
+function Resolve-Recordings {
+    param([string[]]$Raw)
+    # Emit one object per entry directly to the pipeline: an explicit array
+    # build + `return ,$items` was observed to double-wrap and collapse the
+    # pair list into a single Object[] (venue then stringified as
+    # "hyperliquid hyperliquid" in the spawn args - verified 2026-08-08).
+    foreach ($entry in $Raw) {
+        $entry = $entry.Trim()
+        if ($entry -match '^([a-z][a-z0-9]*):([A-Z0-9]{2,20})$') {
+            [pscustomobject]@{ venue = $Matches[1]; symbol = $Matches[2] }
+        } elseif ($entry -match '^([A-Z0-9]{2,20})$') {
+            [pscustomobject]@{ venue = 'binance'; symbol = $Matches[1] }
+        } else {
+            Write-Host "[!!] Invalid recording '$entry' (expected venue:SYMBOL or SYMBOL); aborting." -ForegroundColor Red
+            Exit 1
+        }
+    }
+}
+
+$recPairs = @()
+if ($Recordings.Count -eq 0) {
     $coreFile = Join-Path $PSScriptRoot "core_symbols.txt"
     if (Test-Path $coreFile) {
-        $Symbols = @(Get-Content $coreFile | Where-Object { $_ -match '^[A-Za-z0-9]{2,20}$' } | ForEach-Object { $_.Trim() })
+        # Trim BEFORE filtering so a line with leading whitespace is not
+        # silently dropped (audit 08-08).
+        $Recordings = @(Get-Content $coreFile | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9]' -and $_ -notmatch '^\s*#' } | Where-Object { $_ -ne '' })
     }
-    if ($Symbols.Count -eq 0) { $Symbols = @("BTCUSDT", "ETHUSDT") }
+    if ($Recordings.Count -eq 0) { $Recordings = @("hyperliquid:BTC", "hyperliquid:ETH") }
 }
-
-# audit 08-04: symbols are joined into the spawned command line below, so reject
-# anything that could inject shell metacharacters (UseShellExecute builds a shell
-# command string). Alphanumeric-only, 2..20 chars.
-foreach ($sym in $Symbols) {
-    if ($sym -notmatch '^[A-Z0-9]{2,20}$') {
-        Write-Host "[!!] Invalid symbol '$sym' (must match ^[A-Z0-9]{2,20}\$); aborting." -ForegroundColor Red
-        Exit 1
-    }
-}
+$recPairs = @(Resolve-Recordings $Recordings)
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$exe  = Join-Path $root "target\release\mp-collector.exe"
+$collectorExe = Join-Path $root "target\release\mp-collector.exe"
+$whaleExe     = Join-Path $root "target\release\mp-whale.exe"
+$whaleConfig  = Join-Path $root "collectors\whale_positions.toml"
 
-# ---- task registration ------------------------------------------------------
+# ---- supervised process table -------------------------------------------------
+# Each entry is a hashtable-ish object: kind (collector|whale), venue, symbol,
+# exe + base args, and the filesystem names used for liveness.  Note the two
+# binaries name their artifacts differently: mp-collector writes its heartbeat
+# as mp-collector-{venue}-{symbol} (dash) but its instance lock as
+# .lock_{venue}_{symbol} (underscore); mp-whale uses binutil's underscore
+# naming throughout - kept explicit here so a name change in one binary cannot
+# silently break supervision.
+$supervised = @()
+foreach ($r in $recPairs) {
+    $supervised += [pscustomobject]@{
+        id        = "$($r.venue):$($r.symbol)"
+        kind      = 'collector'
+        venue     = $r.venue
+        symbol    = $r.symbol
+        exe       = $collectorExe
+        args      = $null
+        heartbeat = "mp-collector-$($r.venue)-$($r.symbol).heartbeat"
+        lock      = ".lock_$($r.venue)_$($r.symbol)"
+        dataLog   = "{date}_$($r.venue)_$($r.symbol).log"
+        trace     = "trace_{date}_$($r.venue)_$($r.symbol).log"
+    }
+}
+# spec 028 whale census (Hyperliquid public REST, no auth).  Log:
+# {date}_hyperliquid_positions.log; heartbeat mp-collector-hyperliquid_positions.heartbeat.
+$supervised += [pscustomobject]@{
+    id        = 'whale'
+    kind      = 'whale'
+    venue     = 'hyperliquid'
+    symbol    = 'positions'
+    exe       = $whaleExe
+    args      = "--config `"$whaleConfig`""
+    heartbeat = 'mp-collector-hyperliquid_positions.heartbeat'
+    lock      = '.lock_hyperliquid_positions'
+    dataLog   = '{date}_hyperliquid_positions.log'
+    trace     = $null
+}
+
+# Spawn args per venue.  Binance keeps the spec 024 REST mitigations
+# (trade_source/mark_source=rest); other venues (hyperliquid) are pure WS -
+# trade_source=rest requires a Binance normalizer, so it must NOT be passed.
+foreach ($s in $supervised) {
+    if ($s.kind -eq 'collector' -and $s.venue -eq 'binance') {
+        $s.args = "--symbol `"$($s.symbol)`" --trade-source rest --mark-source rest"
+    } elseif ($s.kind -eq 'collector') {
+        $s.args = "--venue `"$($s.venue)`" --symbol `"$($s.symbol)`""
+    }
+}
+
+# ---- task registration --------------------------------------------------------
 if ($RegisterTask) {
     $TaskName = "MoneyPrinterCollectorsWatchdog"
     Write-Host "Registering: $TaskName" -ForegroundColor Yellow
@@ -95,16 +165,18 @@ if ($RegisterTask) {
     Exit 0
 }
 
-# ---- foreground loop --------------------------------------------------------
+# ---- foreground loop ----------------------------------------------------------
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "  MONEY PRINTER COLLECTOR WATCHDOG" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 
 Set-Location $root
-Write-Host "Building binary..." -ForegroundColor Yellow
+Write-Host "Building binaries..." -ForegroundColor Yellow
 cargo build -p mp-collectors --features live-ws,live-http --bin mp-collector --release 2>&1 | Where-Object { $_ -match "Compiling|Finished|error" }
-if ($LASTEXITCODE -ne 0) { Write-Host "Build failed." -ForegroundColor Red; Exit 1 }
-Write-Host "Binary ready: $exe" -ForegroundColor Green
+if ($LASTEXITCODE -ne 0) { Write-Host "mp-collector build failed." -ForegroundColor Red; Exit 1 }
+cargo build -p mp-collectors --features live-http --bin mp-whale --release 2>&1 | Where-Object { $_ -match "Compiling|Finished|error" }
+if ($LASTEXITCODE -ne 0) { Write-Host "mp-whale build failed." -ForegroundColor Red; Exit 1 }
+Write-Host "Binaries ready: $collectorExe / $whaleExe" -ForegroundColor Green
 
 $rawDir = Join-Path $root "data\raw"
 if (-not (Test-Path $rawDir)) { New-Item -ItemType Directory -Path $rawDir -Force | Out-Null }
@@ -120,23 +192,21 @@ function WLog {
     Write-Host $line -ForegroundColor $col
 }
 
-WLog "Watchdog started. Symbols: $($Symbols -join ',')  cooldown=${CooldownSeconds}s  grace=${GraceSeconds}s"
+$ids = @($supervised | ForEach-Object { $_.id })
+WLog "Watchdog started. Recordings: $($ids -join ',')  cooldown=${CooldownSeconds}s  grace=${GraceSeconds}s"
 
-function Spawn-Collector {
-    param([string]$Sym)
-    $lock = Join-Path $rawDir ".lock_binance_$Sym"
-    if (Test-Path $lock) { Remove-Item $lock -Force -ErrorAction SilentlyContinue }
-
+function Spawn-Process {
+    param([string]$ExePath, [string]$ArgString)
     # KEY FIX: UseShellExecute=true fully detaches from this process's stdio.
     # No pipe is created, so the collector never blocks on stdout.
-    # $Sym is validated above (^[A-Z0-9]{2,20}$) and double-quoted here.
+    # Args are built from validated alphanumeric venue/symbol values and
+    # double-quoted here (audit 08-04 anti-injection).
     # --trace-file: the collector writes its tracing logs itself (append-only,
-    # per-day file) because stderr is discarded by the detachment — keeps the
+    # per-day file) because stderr is discarded by the detachment - keeps the
     # freeze diagnostics from a respawn cycle instead of losing them.
-    $tracePath = Join-Path $rawDir ("trace_{0}_binance_{1}.log" -f (Get-Date).ToUniversalTime().ToString("yyyyMMdd"), $Sym)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName         = $exe
-    $psi.Arguments        = "--symbol `"$Sym`" --no-whale --trade-source rest --mark-source rest --trace-file `"$tracePath`""
+    $psi.FileName         = $ExePath
+    $psi.Arguments        = $ArgString
     $psi.WorkingDirectory = [string]$root
     $psi.UseShellExecute  = $true
     $psi.WindowStyle      = [System.Diagnostics.ProcessWindowStyle]::Hidden
@@ -150,20 +220,24 @@ function Spawn-Collector {
 $lastSpawn  = @{}
 $spawnCount = @{}
 $spawnedPids = @{}
-foreach ($s in $Symbols) {
-    $lastSpawn[$s]  = [datetime]::MinValue
-    $spawnCount[$s] = 0
-    $spawnedPids[$s] = $null
+$lastDataLen   = @{}
+$lastDataLenTs = @{}
+foreach ($s in $supervised) {
+    $lastSpawn[$s.id]  = [datetime]::MinValue
+    $spawnCount[$s.id] = 0
+    $spawnedPids[$s.id] = $null
+    $lastDataLen[$s.id]   = 0
+    $lastDataLenTs[$s.id] = [datetime]::MinValue
 }
 
 Write-Host "Running. Ctrl+C to stop." -ForegroundColor Gray
 
 while ($true) {
-    foreach ($sym in $Symbols) {
-        $hbFile    = Join-Path $rawDir "mp-collector-binance-$sym.heartbeat"
-        $todayStr  = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
-        $dataLog   = Join-Path $rawDir "${todayStr}_binance_${sym}.log"
-        $tSinceSpawn = ((Get-Date) - $lastSpawn[$sym]).TotalSeconds
+    $todayStr = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+    foreach ($s in $supervised) {
+        $hbFile    = Join-Path $rawDir $s.heartbeat
+        $dataLog   = Join-Path $rawDir ($s.dataLog.Replace('{date}', $todayStr))
+        $tSinceSpawn = ((Get-Date) - $lastSpawn[$s.id]).TotalSeconds
 
         $needRestart   = $false
         $restartReason = ""
@@ -177,7 +251,7 @@ while ($true) {
         # 15s, so staleness detection is a strictly stronger liveness signal
         # anyway (it also catches hung processes, which a process query can't).
         if ($tSinceSpawn -gt $GraceSeconds) {
-            # Heartbeat check (collector writes every 15s)
+            # Heartbeat check (collectors write every 15s)
             if (Test-Path $hbFile) {
                 $hbAge = ((Get-Date) - (Get-Item $hbFile).LastWriteTime).TotalSeconds
                 if ($hbAge -gt 75) {
@@ -188,12 +262,48 @@ while ($true) {
                 $needRestart   = $true
                 $restartReason = "no heartbeat file"
             }
-            # Log-write stall check (data should arrive every few seconds)
+            # Log-write stall check (data should arrive every few seconds;
+            # the whale census writes at least once per 60s top-N poll)
             if (-not $needRestart -and (Test-Path $dataLog)) {
                 $logAge = ((Get-Date) - (Get-Item $dataLog).LastWriteTime).TotalSeconds
                 if ($logAge -gt 150) {
                     $needRestart   = $true
                     $restartReason = "data log stalled ($([int]$logAge)s)"
+                }
+            }
+            # Data-flow check (audit 08-08): a collector whose WS is dead but
+            # keeps emitting Status::Stale grows its log by one tiny frame per
+            # ~15s (~5 B/s), while a healthy HL feed grows it by hundreds of
+            # B/s (trades + activeAssetCtx).  Neither the heartbeat (written
+            # regardless of data) nor the log-stall check above (Stale events
+            # keep LastWriteTime fresh) can see this - today's 10h stale
+            # window (2026-08-08) is exactly that case - so track the growth
+            # rate over the last window and restart on a sustained stall.
+            # (A trace-file scan was tried first, but the --trace-file sink is
+            # buffered and stays 0 bytes until 8KB/exit - unusable for liveness.)
+            if (-not $needRestart -and $s.kind -eq 'collector' -and (Test-Path $dataLog)) {
+                $curLen = (Get-Item $dataLog).Length
+                if ($lastDataLenTs[$s.id] -ne [datetime]::MinValue) {
+                    $elapsed = ((Get-Date) - $lastDataLenTs[$s.id]).TotalSeconds
+                    if ($elapsed -ge 60) {
+                        $growth = $curLen - $lastDataLen[$s.id]
+                        $rate   = $growth / $elapsed
+                        # Negative growth = torn-tail truncation on reopen;
+                        # re-baseline without judging this window.
+                        if ($growth -lt 0) {
+                            $lastDataLen[$s.id]   = $curLen
+                            $lastDataLenTs[$s.id] = Get-Date
+                        } elseif ($rate -lt 20) {
+                            $needRestart   = $true
+                            $restartReason = "data flow stalled ({0:N1} B/s over {1:N0}s)" -f $rate, $elapsed
+                        } else {
+                            $lastDataLen[$s.id]   = $curLen
+                            $lastDataLenTs[$s.id] = Get-Date
+                        }
+                    }
+                } else {
+                    $lastDataLen[$s.id]   = $curLen
+                    $lastDataLenTs[$s.id] = Get-Date
                 }
             }
         }
@@ -203,26 +313,37 @@ while ($true) {
             # native read (proven safe); the CIM query previously used to
             # enumerate processes here is not. A stale heartbeat means the
             # collector is dead or hung, so killing the tracked PID is correct.
-            $prevPid = $spawnedPids[$sym]
+            $prevPid = $spawnedPids[$s.id]
             if ($prevPid) {
                 Stop-Process -Id $prevPid -Force -ErrorAction SilentlyContinue
             }
-            $spawnedPids[$sym] = $null
+            $spawnedPids[$s.id] = $null
             Start-Sleep -Milliseconds 400
-            Remove-Item (Join-Path $rawDir ".lock_binance_$sym") -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $rawDir $s.lock) -Force -ErrorAction SilentlyContinue
+            # A fresh process must get a fresh data-flow baseline: the old
+            # process's baseline would otherwise make the first evaluation
+            # after a restart judge the new process against stale growth
+            # (audit 08-08: one false 'data flow stalled' on restart).
+            $lastDataLen[$s.id]   = 0
+            $lastDataLenTs[$s.id] = [datetime]::MinValue
 
             # Cooldown (skip on first spawn: spawnCount=0)
-            if ($spawnCount[$sym] -gt 0 -and $tSinceSpawn -lt $CooldownSeconds) {
-                WLog "$sym cooldown ($([int]$tSinceSpawn)s < ${CooldownSeconds}s): $restartReason" "WARN"
+            if ($spawnCount[$s.id] -gt 0 -and $tSinceSpawn -lt $CooldownSeconds) {
+                WLog "$($s.id) cooldown ($([int]$tSinceSpawn)s < ${CooldownSeconds}s): $restartReason" "WARN"
                 continue
             }
 
-            $spawnCount[$sym]++
-            WLog "$sym spawning #$($spawnCount[$sym]): $restartReason" "WARN"
-            $spawnedPid = Spawn-Collector -Sym $sym
-            $spawnedPids[$sym] = $spawnedPid
-            $lastSpawn[$sym] = Get-Date
-            WLog "$sym spawned PID=$spawnedPid"
+            $spawnCount[$s.id]++
+            WLog "$($s.id) spawning #$($spawnCount[$s.id]): $restartReason" "WARN"
+            $traceArg = ""
+            if ($s.kind -eq 'collector') {
+                $tracePath = Join-Path $rawDir ($s.trace.Replace('{date}', $todayStr))
+                $traceArg  = " --trace-file `"$tracePath`""
+            }
+            $spawnedPid = Spawn-Process -ExePath $s.exe -ArgString ($s.args + $traceArg)
+            $spawnedPids[$s.id] = $spawnedPid
+            $lastSpawn[$s.id] = Get-Date
+            WLog "$($s.id) spawned PID=$spawnedPid"
         }
     }
 

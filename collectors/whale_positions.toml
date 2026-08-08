@@ -1,0 +1,27 @@
+# Hyperliquid whale-position collector (spec 028, WHL-8).  Public REST, no auth.
+# Supervised by ops/watchdog_collectors.ps1 (spawned alongside the market
+# collectors).  Run manually:
+#   cargo run -p mp-collectors --features live-http --bin mp-whale -- \
+#     --config collectors/whale_positions.toml
+# Addresses are opaque 0x identifiers only — no external labels (WHL-3).
+data_dir = "data"
+
+# Top-N leaderboard addresses polled every 60s (WHL-1/WHL-7).
+top_n = 50
+top_poll_interval_s = 60
+
+# Watchlist: empty on the default host — the leaderboard poll is the primary
+# source.  Add opaque 0x addresses here to track specific wallets on the
+# faster 30s cadence.
+watchlist = []
+watch_poll_interval_s = 30
+
+# Leaderboard time window ("1d", "7d", "30d").
+leaderboard_window = "7d"
+
+# Coin filter: empty = record positions for all coins (feeds the spec 028/029
+# whale + liq-est-band research edge).  Set e.g. ["BTC", "ETH"] to bound volume.
+symbols = []
+
+# Pacing between per-address REST fetches (Hyperliquid rate limits, WHL-1).
+min_poll_gap_ms = 150

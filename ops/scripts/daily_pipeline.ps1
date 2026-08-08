@@ -7,8 +7,8 @@
 # auditable file.
 #
 # Flow (mirrors daily_maintenance.sh):
-#   1. scorecard  yesterday's recording matrix (all required streams, both
-#      symbols) -> data/scorecards/<date>.json
+#   1. scorecard  yesterday's recording matrix (all required streams and
+#      recordings) -> data/scorecards/<date>.json
 #   2. NOT promotable -> WARN + exit 1 (Task Scheduler flags the run); the
 #      scorecard is still archived so the streak verdict stays complete.
 #   3. promotable  -> `mp-ops compact` each recording through the INT-4
@@ -27,7 +27,15 @@ param(
     [switch]$RegisterTask,         # register the MoneyPrinterDailyPipeline task
     [switch]$SkipCompact,          # audit + scorecard + verdict, no cold writes
     [string[]]$Recordings  = @(),  # venue:symbol pairs to require; empty = core list
-    [string[]]$RequiredStreams = @("trade", "book", "funding", "mark_price", "liquidation", "open_interest")
+    # 2026-08-08: the gate's required stream set is the one the current
+    # Phase-0 venue (hyperliquid) can actually deliver over WS: trades,
+    # snapshot books, and activeAssetCtx (mark/funding/OI).  Hyperliquid has
+    # no WS liquidation stream by design - liquidation data comes from the
+    # on-chain whale census (`mp-whale`, spec 028, recorded separately) and
+    # feeds the liq-est band research edge (spec 029), it is not a required
+    # gate stream.  Re-add "liquidation" when a venue with a native liq
+    # stream (e.g. Bybit, Phase 2) joins the required set.
+    [string[]]$RequiredStreams = @("trade", "book", "funding", "mark_price", "open_interest")
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,20 +52,41 @@ while ($true) {
 }
 $TaskName   = "MoneyPrinterDailyPipeline"
 $scoreDir   = Join-Path $root "data\scorecards"
+
+# 0. PD guardrails (audit 08-04 #6): the bash guardrails cannot run on this
+#    native Windows host, so the PowerShell port runs first - mechanical
+#    rulebook enforcement (PD-1..4, W-7, CONV-21, OPS-4) before any number
+#    from the scorecard is trusted. Fail-closed: a guardrails violation stops
+#    the pipeline with a distinct, grep-able error.
+$guardrails = Join-Path $root "ops\ci\guardrails.ps1"
+if (Test-Path $guardrails) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $guardrails
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[!!] guardrails failed - the tree violates the rulebook (PD-1..4/W-7); fix before trusting today's scorecard" -ForegroundColor Red
+        Exit 1
+    }
+    Write-Host "[ok] guardrails: all checks passed" -ForegroundColor Green
+}
 $logFile    = Join-Path $scoreDir "pipeline.log"
 $mpOps      = Join-Path $root "target\release\mp-ops.exe"
 
 # Recordings default: empty = load the single source of truth (ops/core_symbols.txt)
-# and require each core symbol on this venue (binance:<sym>) — so the scorecard's
-# required set ALWAYS matches what the watchdog records (no silent under-scoping
-# of the promotion gate). Falls back to binance:BTCUSDT+ETHUSDT when absent.
+# as `venue:symbol` lines (a plain SYMBOL line means binance:<sym>) - so the
+# scorecard's required set ALWAYS matches what the watchdog records (no silent
+# under-scoping of the promotion gate). Falls back to hyperliquid:BTC+ETH when absent.
 if ($Recordings.Count -eq 0) {
     $coreFile = Join-Path $root "ops\core_symbols.txt"
     if (Test-Path $coreFile) {
-        $coreSyms = @(Get-Content $coreFile | Where-Object { $_ -match '^[A-Za-z0-9]{2,20}$' } | ForEach-Object { $_.Trim() })
-        $Recordings = @($coreSyms | ForEach-Object { "binance:$_" })
+        # Trim BEFORE filtering so a line with leading whitespace is not
+        # silently dropped (audit 08-08).
+        $coreLines = @(Get-Content $coreFile | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9]' -and $_ -notmatch '^\s*#' } | Where-Object { $_ -ne '' })
+        $Recordings = @()
+        foreach ($line in $coreLines) {
+            if ($line -match '^([a-z][a-z0-9]*):([A-Z0-9]{2,20})$') { $Recordings += "$($Matches[1]):$($Matches[2])" }
+            elseif ($line -match '^[A-Z0-9]{2,20}$') { $Recordings += "binance:$line" }
+        }
     }
-    if ($Recordings.Count -eq 0) { $Recordings = @("binance:BTCUSDT", "binance:ETHUSDT") }
+    if ($Recordings.Count -eq 0) { $Recordings = @("hyperliquid:BTC", "hyperliquid:ETH") }
 }
 
 function Log {
@@ -158,6 +187,17 @@ if (-not (Test-Path $mpOps)) {
     if ($usage -notmatch "scorecard" -or $usage -notmatch "promote") {
         Log "mp-ops.exe is stale (missing scorecard/promote subcommands) - rebuilding" "WARN"
         Invoke-Build
+    } else {
+        # Schema staleness guard (audit 08-08): the subcommand probe cannot see
+        # a schema-version mismatch - an older mp-ops reads schema-v3 raw logs
+        # as unreadable/malformed (which audits as non-promotable, not an
+        # error, silently blocking the gate).  Rebuild whenever mp-ops
+        # predates the newest raw recording.
+        $newestRaw = Get-ChildItem (Join-Path $root "data\raw") -Filter "*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($newestRaw -and (Get-Item $mpOps).LastWriteTime -lt $newestRaw.LastWriteTime) {
+            Log "mp-ops.exe predates the newest raw recording - rebuilding (schema staleness guard)" "WARN"
+            Invoke-Build
+        }
     }
 }
 

@@ -29,6 +29,7 @@ Real-time market data ingestion from cryptocurrency exchange WebSocket streams a
 - Heartbeat file written every 15s: `mp-collector-{venue}-{symbol}.heartbeat`
 - Binance book seeded from REST snapshot immediately after WS connect (before processing depth deltas)
 - Binance trade source `trade_source = "ws" | "rest"` (config or `--trade-source`, default `ws`): REST mode polls `fapi/v1/aggTrades` on the shared rate budget with a fromId watermark, reports skipped id ranges as `Status::GapDetected`, and suppresses WS aggTrade frames (COL-25..27; required while fstream drops the trade stream — spec 024 incident 08-04)
+- Egress proxy for the WS transport: `proxy = "http://host:port"` (HTTP CONNECT) or `"socks5://host:port"` in config, `MP_WS_PROXY` env overrides both the config and flag paths; TLS terminates against the venue, never the proxy (spec 024 incident 08-04). Verify a fix with `node ops/scripts/ws_probe.mjs` + the audit `streams` map (runbook `ops/runbooks/ws-egress-filter.md`)
 - Frame loss triggers book reset and `Status::BackpressureDrop` event emission
 - Backoff: 250ms base, 30s cap, full-jitter (COL-1)
 - Depth reseed retries are rate-budgeted AND time-bounded: a failed Binance reseed defers its next attempt ~2s (audit 08-04; no per-iteration busy-spin)

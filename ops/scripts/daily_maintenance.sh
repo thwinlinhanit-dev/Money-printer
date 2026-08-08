@@ -1,5 +1,5 @@
 #!/bin/bash
-# Daily integrity gate → compaction → manifest pipeline (spec 024).
+# Daily integrity gate -> compaction -> manifest pipeline (spec 024).
 # Schedule via crontab at 00:05 UTC:
 #   5 0 * * * /opt/money-printer/ops/scripts/daily_maintenance.sh
 set -euo pipefail
@@ -11,8 +11,11 @@ LOG_DIR="/opt/money-printer/data"
 BIN_DIR="/opt/money-printer/bin"
 SCRIPT_DIR="/opt/money-printer/ops/scripts"
 VENV_DIR="/opt/money-printer/.venv"
-RECORDINGS="${RECORDINGS:-binance:BTCUSDT binance:ETHUSDT}"
-REQUIRED_STREAMS="${REQUIRED_STREAMS:-trade book funding mark_price liquidation open_interest}"
+# 2026-08-08: Phase-0 venue is hyperliquid (egress is geo-filtered by Binance
+# futures, spec 024). Symbols are bare coin names. Liquidation data comes from
+# the on-chain whale census (spec 028) and is not a required gate stream.
+RECORDINGS="${RECORDINGS:-hyperliquid:BTC hyperliquid:ETH}"
+REQUIRED_STREAMS="${REQUIRED_STREAMS:-trade book funding mark_price open_interest}"
 
 cd "/opt/money-printer"
 
