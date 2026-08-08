@@ -147,3 +147,18 @@ authenticated trading, strategy changes, and long-running hosting policy.
 - 2026-08-04: `mp-audit --json` per-recording summaries now include the
   `streams` map (per-stream event counts) so operators can verify a stream
   is populated without a separate reader.
+- 2026-08-06 (re-verified, filter STILL active): direct raw probe from the
+  host (`node ops/scripts/ws_probe.mjs` — node's native WebSocket; Python is
+  absent from the host and a PowerShell/.NET ClientWebSocket probe undercounts
+  to zero on the same connection) over a 20s window shows
+  `depth@100ms`=190, `bookTicker`=729, and `aggTrade`=0, `markPrice@1s`=0,
+  `forceOrder`=0 — fstream still drops the non-book streams from this egress.
+  The 2026-08-05 scorecard confirms the consequence: `streams` map populated
+  only via the REST mitigations (trade=741858, mark_price=4488, funding=4488,
+  book=665474) and the day is NOT promotable — `sequence_gap` ×57,
+  `stale_stream` ×1, `coverage_gap` ×1 (the 15s REST mark poll cannot hold the
+  1s WS cadence). `forceOrder` has no REST fallback, so its appearance in the
+  audit `streams` map is the honest post-fix signal that WS non-book streams
+  flow again. Fix remains the egress proxy (`MP_WS_PROXY` / config `proxy`,
+  transport shipped 08-04); runbook: `ops/runbooks/ws-egress-filter.md`,
+  probe: `ops/scripts/ws_probe.mjs`.

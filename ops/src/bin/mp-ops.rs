@@ -30,6 +30,15 @@
 //!           journal/telegram/delivered.jsonl ({id, delivered_ts_ns}) — the
 //!           delivery log the monthly report renders (OPS-6): what WAS
 //!           delivered, as opposed to what is still pending.
+//!   p1-webhook --id ID --detail TEXT [--ts-ns N]
+//!           P1 egress edge (owner decision 2026-08-06, audit 08-04 #3):
+//!           posts a P1 dispatch to the owner-configured webhook sink
+//!           (MP_OPS_P1_WEBHOOK) via curl — TLS is the host's, so https
+//!           works (audit 08-04 #9, never forced cleartext). The channel is
+//!           WIRED but dead until credentials exist: URL unset ⇒ the command
+//!           fails loudly (exit 2) with the "dead until creds" reason — never
+//!           a silent drop, never a fake send. --ts-ns injects the dispatch
+//!           timestamp (default now; PD-3 edge clock).
 //!   telegram-stale [--dir DIR] [--threshold-hours N] [--dedupe-ns N] [--telegram]
 //!           OPS-14 near-real-time watch on the quiet-hours batch ledger:
 //!           raises telegram-stale (P2) when a dispatch sits queued longer
@@ -46,13 +55,15 @@
 //!   cargo run --package mp-ops --bin mp-ops -- band-accuracy-decay --trend research/band_accuracy/band_accuracy.jsonl --runs-dir runs --telegram
 //!   cargo run --package mp-ops --bin mp-ops -- telegram-flush --wait
 //!   cargo run --package mp-ops --bin mp-ops -- telegram-stale --telegram
+//!   MP_OPS_P1_WEBHOOK=https://hooks.example.com/alert cargo run --package mp-ops --bin mp-ops -- \
+//!     p1-webhook --id recon-diverged --detail 'BTCUSDT position mismatch'
 
 use mp_core::log::LogReader;
 use mp_core::{EventEnvelope, SymbolTable, Venue};
 use mp_ops::{
     append_batch, append_run_record, band_accuracy_decay_alert, flush_batch,
-    load_band_accuracy_trend, load_telegram_batch, post_telegram, stale_batch_alert, AlertRouter,
-    Dispatch, QuietHours, RouteOutcome, TelegramConfig,
+    load_band_accuracy_trend, load_telegram_batch, post_telegram, stale_batch_alert, Alert,
+    AlertRouter, Dispatch, QuietHours, RouteOutcome, Severity, TelegramConfig,
 };
 use mp_storage::promotion::check_promotion;
 use mp_storage::{audit_raw_log, compactor, AuditConfig, DailyScorecard, RawLogAudit};
@@ -763,6 +774,49 @@ fn cmd_telegram_stale(args: &[String]) -> Result<String, String> {
     }
     serde_json::to_string(&verdict).map_err(|e| e.to_string())
 }
+/// P1 egress edge (owner decision 2026-08-06, audit 08-04 #3): the shipped
+/// call site for the P1 "phone-call webhook" channel. WIRED but dead until
+/// credentials exist — with `MP_OPS_P1_WEBHOOK` set, a P1 dispatch (built
+/// from `--id`/`--detail`, the same `Dispatch::from_alert` shape the rest of
+/// the framework uses) is POSTed there via curl; unset, the command fails
+/// loudly (exit 2) with the "dead until creds" reason — never a silent drop,
+/// never a fake send. https is accepted (TLS is the host's curl, audit 08-04
+/// #9); `--ts-ns` injects the dispatch timestamp (default now, PD-3 edge
+/// clock) for deterministic tests.
+fn cmd_p1_webhook(args: &[String]) -> Result<String, String> {
+    let id = need(args, "--id")?;
+    let detail = need(args, "--detail")?;
+    if id.is_empty() || detail.is_empty() {
+        return Err("p1-webhook: --id and --detail must be non-empty".into());
+    }
+    let url = std::env::var("MP_OPS_P1_WEBHOOK").map_err(|_| {
+        "p1-webhook: MP_OPS_P1_WEBHOOK unset — P1 egress is dead until credentials are \
+         provisioned (owner decision 2026-08-06); set the URL to activate the channel"
+            .to_string()
+    })?;
+    let ts_ns = match flag(args, "--ts-ns") {
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|_| "--ts-ns must be an integer")?,
+        None => now_ns(),
+    };
+    let dispatch = Dispatch::from_alert(&Alert::new(id, Severity::P1, 0, detail), ts_ns);
+    AlertRouter::post_p1_webhook(&dispatch, &url).map_err(|e| format!("p1-webhook: {e}"))?;
+    // The URL is NOT echoed in the verdict: a webhook URL can embed a sink
+    // key/token (healthchecks-style), and the Telegram edge already keeps
+    // credentials out of output (PD-2).
+    serde_json::to_string(&serde_json::json!({
+        "egress": "sent",
+        "id": dispatch.id,
+        "severity": dispatch.severity.as_str(),
+        "channel": "telegram_phone",
+        "detail": dispatch.detail,
+        "runbook": dispatch.runbook,
+        "ts_ns": dispatch.ts_ns,
+    }))
+    .map_err(|e| e.to_string())
+}
+
 /// Sleep `secs` — the quiet-hours wait (`telegram-flush --wait`).
 /// `MP_OPS_SLEEP` overrides the sleeper (a command receiving the seconds),
 /// the same seam the weekly wrapper used, so e2e tests never block on a real
@@ -823,7 +877,7 @@ fn main() -> ExitCode {
     if args.len() < 2 {
         eprintln!("Usage: mp-ops <subcommand> [options]");
         eprintln!(
-            "Subcommands: compact, audit, scorecard, promote, band-accuracy-decay, telegram-flush, telegram-stale"
+            "Subcommands: compact, audit, scorecard, promote, band-accuracy-decay, telegram-flush, telegram-stale, p1-webhook"
         );
         return ExitCode::FAILURE;
     }
@@ -836,6 +890,7 @@ fn main() -> ExitCode {
         "band-accuracy-decay" => cmd_band_accuracy_decay(&args[2..]),
         "telegram-flush" => cmd_telegram_flush(&args[2..]),
         "telegram-stale" => cmd_telegram_stale(&args[2..]),
+        "p1-webhook" => cmd_p1_webhook(&args[2..]),
         other => Err(format!("unknown subcommand: {other}")),
     };
 
@@ -855,7 +910,7 @@ fn main() -> ExitCode {
             // "check failed, see journald" and never fabricates a verdict.
             if matches!(
                 args[1].as_str(),
-                "band-accuracy-decay" | "telegram-flush" | "telegram-stale"
+                "band-accuracy-decay" | "telegram-flush" | "telegram-stale" | "p1-webhook"
             ) {
                 ExitCode::from(2)
             } else {

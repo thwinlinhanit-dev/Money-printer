@@ -16,8 +16,12 @@
 //   node ops/scripts/ws_probe.mjs                 # futures defaults, 20s
 //   node ops/scripts/ws_probe.mjs <url> <secs>    # custom endpoint/window
 //
-// Output: one "STREAM <label>=<count>" line per subscription. A subscription
-// that should flow but counts 0 is the filter. Exit 0 = probe completed.
+// The streams are FIXED to BTCUSDT (edit $streams below to probe another
+// symbol). Output: one "STREAM <label>=<count>" line per subscription. A
+// subscription that should flow but counts 0 is the filter.
+// Exit: 0 = probe completed AND the SUBSCRIBE ack arrived; 2 = connect or
+// subscribe failed (fail-closed — a dead connection must not masquerade as
+// "everything filtered", CONV-8).
 //
 // Proxy limitation: node's built-in WebSocket cannot route through a proxy, so
 // this probe only verifies DIRECT egress. To verify that a proxy restores the
@@ -55,6 +59,8 @@ const eventBySub = {
 
 const tally = {};
 const started = Date.now();
+let acked = false;
+let connectFailed = false;
 const ws = new WebSocket(url);
 
 ws.onopen = () => {
@@ -66,6 +72,7 @@ ws.onmessage = (m) => {
   try {
     const j = JSON.parse(m.data);
     if (j.id === 1 && !j.e) {
+      acked = true;
       console.log('SUBSCRIBE_ACKS=1');
       return;
     }
@@ -76,6 +83,7 @@ ws.onmessage = (m) => {
 };
 
 ws.onerror = () => {
+  connectFailed = true;
   console.log('WS_ERROR');
 };
 
@@ -92,5 +100,8 @@ setTimeout(() => {
   } catch (e) {
     /* already closed */
   }
-  process.exit(0);
+  // Fail-closed (CONV-8): a connection that errored or never got its SUBSCRIBE
+  // ack must exit 2, not 0 — otherwise a dead connection looks like "the
+  // filter dropped everything".
+  process.exit(connectFailed || !acked ? 2 : 0);
 }, seconds * 1000);

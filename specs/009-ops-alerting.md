@@ -325,6 +325,21 @@ the human reads it — the report is for the owner, not for the machine.
   Requirement numbering continues at
   OPS-13/OPS-14 because OPS-11/OPS-12 belong to spec 021's bot journal.
 
+## Decisions (continued)
+- 2026-08-06: **P1 webhook egress is WIRED but dead until credentials** (audit
+  08-04 #3/#9 close): `post_p1_webhook` is reachable from a shipped binary via
+  `mp-ops p1-webhook --id --detail [--ts-ns]` — with `MP_OPS_P1_WEBHOOK` set it
+  POSTs the `Dispatch::from_alert` JSON to the sink through `curl` (the host's
+  TLS stack, so https is accepted — the P1 money-at-risk channel is never
+  forced cleartext, closing #9); unset, the command fails loudly (exit 2,
+  "dead until credentials") instead of silently dropping — closing #3's
+  "silently dead" complaint. No code change is needed the day real
+  credentials are provisioned: the channel activates by setting the env var.
+  Production P1 sinks SHOULD be https (the money-at-risk body is never sent
+  in the clear by default); http remains accepted for local stubs and
+  trusted internal sinks only.
+
 ## Open questions
 - Phone-call escalation provider for P1 (Twilio vs a healthchecks add-on) —
-  owner picks by budget.
+  owner picks by budget. (The webhook CHANNEL is wired 2026-08-06; only the
+  provider/creds choice remains.)

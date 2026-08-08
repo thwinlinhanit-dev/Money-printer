@@ -224,17 +224,28 @@ impl AlertRouter {
         std::mem::take(&mut self.batch)
     }
 
-    /// Post a P1 dispatch to the owner-configured webhook sink (O1). This is
-    /// the P1 "phone-call webhook" channel made real: when the owner sets
-    /// `MP_OPS_P1_WEBHOOK` the binary edge posts the dispatch JSON there;
-    /// when unset the caller keeps its warn-only fallback (documented —
-    /// functionality-gated, not silently dead). Never called for P2/P3.
+    /// Post a P1 dispatch to the owner-configured webhook sink (O1) — the
+    /// P1 "phone-call webhook" channel made real and REACHABLE: the
+    /// `mp-ops p1-webhook` subcommand is the shipped call site (owner decision
+    /// 2026-08-06). When the owner sets `MP_OPS_P1_WEBHOOK` the dispatch JSON
+    /// is POSTed there; when unset the subcommand fails loudly — "dead until
+    /// creds", never a silent drop. Never called for P2/P3.
+    ///
+    /// TLS is the host's: like the Telegram edge (`post_telegram`), the send
+    /// shells out to `curl` so https endpoints work without a Rust TLS
+    /// dependency — a P1 (money-at-risk) channel is never forced to be
+    /// cleartext-only (audit 08-04 #9). http is accepted too (local stubs /
+    /// internal sinks). Fail-closed: any non-2xx or transport failure is an
+    /// error to the caller — a sink that silently "accepted" a 500 would be
+    /// worse than the honest error.
     ///
     /// Off the decision path (PD-3): this is alert egress, and it reads no
-    /// clock and no secrets — the URL arrives via owner-managed env. Any
-    /// network failure is reported to the caller so it can at least log it.
+    /// clock and no secrets — the URL arrives via owner-managed env.
     pub fn post_p1_webhook(dispatch: &Dispatch, url: &str) -> Result<(), String> {
         debug_assert_eq!(dispatch.severity, Severity::P1, "webhook sink is P1-only");
+        if !webhook_url_ok(url) {
+            return Err("MP_OPS_P1_WEBHOOK must be an http:// or https:// URL".to_string());
+        }
         let body = format!(
             "{{\"id\":{},\"severity\":{},\"detail\":{},\"runbook\":{},\"ts_ns\":{}}}",
             json_str(&dispatch.id),
@@ -243,50 +254,45 @@ impl AlertRouter {
             json_str(&dispatch.runbook),
             dispatch.ts_ns,
         );
-        let (host, path) = url
-            .strip_prefix("http://")
-            .filter(|_| !url.starts_with("https")) // https would need TLS; refuse honestly
-            .and_then(|rest| rest.split_once('/'))
-            .map(|(host, rest)| (host.to_string(), format!("/{rest}")))
-            .ok_or_else(|| {
-                "MP_OPS_P1_WEBHOOK must be an http:// host[:port]/path URL".to_string()
-            })?;
-        let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        use std::io::{Read, Write};
-        use std::net::TcpStream;
-        let mut stream = TcpStream::connect(host.as_str())
-            .map_err(|e| format!("p1 webhook connect {host}: {e}"))?;
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .map_err(|e| e.to_string())?;
-        stream
-            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
-            .map_err(|e| e.to_string())?;
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|e| e.to_string())?;
-        let mut buf = Vec::new();
-        stream
-            .take(8192)
-            .read_to_end(&mut buf)
-            .map_err(|e| e.to_string())?;
-        let text = String::from_utf8_lossy(&buf);
+        let mut cmd = std::process::Command::new("curl");
+        cmd.args(["-sS", "-m", "30", "-X", "POST"]);
+        cmd.arg("-H").arg("Content-Type: application/json");
+        cmd.arg("--data-binary").arg(body);
+        // Trailing status line (curl -w) after the response body; parsing the
+        // last line keeps the code portable across Windows/Unix output sinks.
+        cmd.arg("-w").arg("\n%{http_code}");
+        cmd.arg(url);
+        let out = cmd
+            .output()
+            .map_err(|e| format!("curl spawn failed (is curl installed?): {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "curl exit {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
         // Fail closed on anything but a 2xx: an alert sink that "accepted" a
-        // 500 would be worse than the honest warn-only fallback.
-        let status = text.split_whitespace().nth(1).unwrap_or_default();
-        if status.starts_with('2') {
+        // 500 would be worse than the honest error.
+        let text = String::from_utf8_lossy(&out.stdout);
+        let code = text.rsplit('\n').next().unwrap_or_default().trim();
+        if code.starts_with('2') {
             Ok(())
         } else {
-            Err(format!("p1 webhook non-2xx: {}", status))
+            Err(format!("p1 webhook non-2xx: {code}"))
         }
     }
 
     pub fn batch_len(&self) -> usize {
         self.batch.len()
     }
+}
+
+/// Scheme gate for `MP_OPS_P1_WEBHOOK`: only http(s) is acceptable. Pure —
+/// no network, no clock — so the decision "this URL is well-formed" is unit-
+/// testable without a live endpoint.
+fn webhook_url_ok(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
 }
 
 /// Minimal JSON-string escaper for the P1 webhook payload (the ops crate does
@@ -307,4 +313,22 @@ fn json_str(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The webhook sink accepts http(s) and refuses anything else — the
+    /// scheme gate is pure so the "this URL is well-formed" decision needs
+    /// no network (audit 08-04 #9: https must be accepted, never forced
+    /// cleartext).
+    #[test]
+    fn p1_webhook_url_gate_accepts_http_and_https_only() {
+        assert!(webhook_url_ok("http://127.0.0.1:8080/hook"));
+        assert!(webhook_url_ok("https://hooks.example.com/alert"));
+        assert!(!webhook_url_ok("ftp://hooks.example.com/x"));
+        assert!(!webhook_url_ok("hooks.example.com/x"));
+        assert!(!webhook_url_ok(""));
+    }
 }

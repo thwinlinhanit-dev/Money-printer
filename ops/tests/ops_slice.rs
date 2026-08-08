@@ -2057,3 +2057,89 @@ fn sto_7_disk_watchdog_alerts_and_never_deletes() {
     assert_eq!(std::fs::read(&data).unwrap(), b"recorded market data");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- P1 webhook egress (owner decision 2026-08-06, audit 08-04 #3/#9) ----
+
+/// The P1 channel is WIRED: `mp-ops p1-webhook` posts the dispatch JSON to
+/// the owner-configured sink via curl (the host's TLS stack — https is
+/// accepted, never forced cleartext) and reports `egress: sent`. The stub
+/// captures the raw HTTP request; the payload must carry the exact
+/// `Dispatch::from_alert` shape (id/severity/detail/runbook/ts_ns).
+#[test]
+fn ops_9_p1_webhook_posts_dispatch_via_curl_to_stub() {
+    if !curl_available() {
+        eprintln!("SKIPPED: curl not available on this host");
+        return;
+    }
+    let (url, handle) = stub_telegram_server();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args([
+            "p1-webhook",
+            "--id",
+            "recon-diverged",
+            "--detail",
+            "BTCUSDT position mismatch",
+            "--ts-ns",
+            "1234",
+        ])
+        .env("MP_OPS_P1_WEBHOOK", &url)
+        .output()
+        .expect("run mp-ops p1-webhook");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("\"egress\":\"sent\""), "{stdout}");
+    assert!(stdout.contains("\"severity\":\"P1\""), "{stdout}");
+    assert!(stdout.contains("\"ts_ns\":1234"), "{stdout}");
+
+    let req = handle.join().unwrap();
+    assert!(req.starts_with("POST /"), "{req}");
+    assert!(req.contains("Content-Type: application/json"), "{req}");
+    assert!(req.contains("\"id\":\"recon-diverged\""), "{req}");
+    assert!(req.contains("\"severity\":\"P1\""), "{req}");
+    assert!(req.contains("\"detail\":\"BTCUSDT position mismatch\""), "{req}");
+    assert!(req.contains("\"runbook\":\"ops/runbooks/recon-diverged.md\""), "{req}");
+    assert!(req.contains("\"ts_ns\":1234"), "{req}");
+}
+
+/// Dead until creds, loudly: `MP_OPS_P1_WEBHOOK` unset ⇒ the command exits 2
+/// with the "dead until credentials" reason — never a silent drop, never a
+/// fake send (the audit's #3 complaint was exactly the silent dead channel).
+#[test]
+fn ops_9_p1_webhook_fails_closed_when_unconfigured() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args(["p1-webhook", "--id", "recon-diverged", "--detail", "x"])
+        .env_remove("MP_OPS_P1_WEBHOOK")
+        .output()
+        .expect("run mp-ops p1-webhook (unconfigured)");
+    assert_eq!(out.status.code(), Some(2), "fail-closed exit 2");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("MP_OPS_P1_WEBHOOK unset") && stderr.contains("dead until credentials"),
+        "loud reason, not a silent drop: {stderr}"
+    );
+}
+
+/// Fail-closed on a failed delivery: a non-2xx sink response is an error
+/// (exit 2), never a "sent" lie — the same posture as the Telegram edge.
+#[test]
+fn ops_9_p1_webhook_rejects_non_2xx_sink_response() {
+    if !curl_available() {
+        eprintln!("SKIPPED: curl not available on this host");
+        return;
+    }
+    let (url, _handle) = stub_telegram_server_with_body(
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args(["p1-webhook", "--id", "recon-diverged", "--detail", "x"])
+        .env("MP_OPS_P1_WEBHOOK", &url)
+        .output()
+        .expect("run mp-ops p1-webhook (500)");
+    assert_eq!(out.status.code(), Some(2), "non-2xx must fail closed");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("non-2xx"), "{stderr}");
+}
