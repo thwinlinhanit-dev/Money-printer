@@ -96,6 +96,10 @@ decision), or **[maybe-never]** (recorded so it stops being re-proposed).
 - **[v2] security hardening spec** — threat model (key theft, VPS compromise,
   supply chain), key rotation runbook, withdrawal-address allowlisting at
   venue level, dependency audit cadence.
+- **[v1.x] bincode 2 migration** — bincode 1.3.3 is unmaintained
+  (RUSTSEC-2025-0141, flagged by the cargo-audit CI job); the event-log codec
+  is the only consumer. API-breaking upgrade, so spec it before touching the
+  log format (W-6: migration = write new + verify).
 
 ## Ops & reporting
 - **[v1.x] tax/accounting export** — fills journal → per-jurisdiction lot
