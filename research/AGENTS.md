@@ -30,6 +30,7 @@ Python research package for offline analysis: daily brief generation via LLM, st
 ## Verification
 
 - `cd research && python -m pytest`
+- `cd research && ruff format --check .` — format contract (config: `research/ruff.toml`, line-length 88, py312); enforced by the CI research job. Run `ruff format .` to normalize before committing.
 
 ## Child DOX Index
 

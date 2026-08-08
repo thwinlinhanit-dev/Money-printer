@@ -45,7 +45,8 @@ pass output is generation; this pass is criticism. They catch different bugs.
    your head, write it into the relevant spec's *Decisions* section now (W-5,
    Lever 4 of docs/AGENT_FORCE_MULTIPLIERS.md).
 
-7. **Run the gates:** `ops/ci/guardrails.sh`, then `cargo fmt --check &&
+7. **Run the gates:** `ops/ci/guardrails.sh` (or `ops/ci/guardrails.ps1` on
+   the native Windows host — same checks), then `cargo fmt --check &&
    cargo clippy -- -D warnings && cargo test` (when the workspace exists).
    Paste real output in your summary — never claim green without running.
 

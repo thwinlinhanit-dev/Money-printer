@@ -1,0 +1,6 @@
+# ruff configuration for research/ — the format contract enforced by the CI
+# research job (`ruff format --check`) and the repo's one-time normalization
+# pass (2026-08-06). Keep pinned here so a future ruff default change cannot
+# silently alter the check's behavior.
+line-length = 88
+target-version = "py312"

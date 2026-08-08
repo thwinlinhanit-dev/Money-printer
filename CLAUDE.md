@@ -63,9 +63,10 @@ local details, but no child doc may weaken DOX.
   are append-only. Migration = write new + verify + only the human deletes.
 - **W-7** Update `specs/README.md` status table in the same commit as the work.
 - **W-8** Before any push, run the `self-review` skill
-  (`.claude/skills/self-review/SKILL.md`) and `ops/ci/guardrails.sh`. The
-  guardrails script mechanically enforces PD-1..4 and W-7; weakening it to
-  pass is a PD-5 violation.
+  (`.claude/skills/self-review/SKILL.md`) and `ops/ci/guardrails.sh` (on the
+  native Windows host: `ops/ci/guardrails.ps1`, the same checks in
+  PowerShell). The guardrails script mechanically enforces PD-1..4 and W-7;
+  weakening it to pass is a PD-5 violation.
 
 ## Why this repo is shaped this way
 

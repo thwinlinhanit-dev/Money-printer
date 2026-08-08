@@ -43,6 +43,13 @@ jobs:
         run: |
           cargo clippy -p mp-collectors --features live-ws --all-targets -- -D warnings
           cargo clippy -p mp-llm --features live-http --all-targets -- -D warnings
+          # live-http feature-gated clippy for the two crates that expose a
+          # REST edge (spec 027 HBS-1 HBS-8 historical bootstrap in mp-storage;
+          # spec 020 snapshot fetch in mp-collectors) — the default-feature
+          # clippy above does NOT see these code paths, so a live-only lint
+          # would ship silently (verified passing 2026-08-06).
+          cargo clippy -p mp-storage --features live-http --all-targets -- -D warnings
+          cargo clippy -p mp-collectors --features live-http --all-targets -- -D warnings
       - name: No workspace yet
         if: steps.detect.outputs.present == 'false'
         run: echo "No Cargo.toml — docs/specs-only change, rust job is a no-op."
@@ -55,7 +62,32 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install pytest
-        run: pip install pytest polars
+      - name: Install test deps (pytest, polars, ruff)
+        run: pip install pytest polars ruff
+      - name: Format check (ruff format --check; config research/ruff.toml)
+        run: cd research && ruff format --check .
       - name: Research tests (RES-1..6, pure stdlib)
         run: cd research && python -m pytest -q
+
+  deps-audit:
+    runs-on: ubuntu-latest
+    # NOTE: paths-filtering is workflow-level only in GitHub Actions and would
+    # starve the other jobs (guardrails must run on docs-only pushes), so this
+    # job runs unconditionally — the prebuilt action makes it cheap (~30s).
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect lockfile
+        id: detect
+        run: |
+          if [ -f Cargo.lock ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
+      # RustSec advisory audit (cargo-audit via the official rustsec/audit-check
+      # action; prebuilt binary + auto-updated advisory DB). Fails the job only
+      # on security advisories — unmaintained/informational advisories are
+      # reported but non-blocking (verified 2026-08-06: lockfile has 0 vulns;
+      # bincode 1.3.3 RUSTSEC-2025-0141 + paste 1.0.15 RUSTSEC-2024-0436 are
+      # flagged unmaintained — tracked as known debt in docs/BACKLOG.md).
+      - name: Audit dependencies (RustSec)
+        if: steps.detect.outputs.present == 'true'
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
