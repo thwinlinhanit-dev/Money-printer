@@ -20,6 +20,7 @@ live-http = ["dep:reqwest", "dep:zip"]
 
 [dependencies]
 mp-core = { path = "../core" }
+mp-features = { path = "../features" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

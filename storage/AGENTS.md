@@ -24,12 +24,15 @@ Cold storage layer: transforms raw event logs into Hive-partitioned Parquet tabl
 - `src/bin/mp-audit.rs` — data-integrity audit CLI (INT-3); also surfaces the promotion gate
 - `src/bin/mp-cross-venue.rs` — cross-venue gap detector CLI (spec 026, CVG-12)
 - `src/bin/mp-bootstrap.rs` — historical bootstrap CLI (spec 027, HBS-1/HBS-9)
+- `src/materialize.rs` — log→FeatureStore materialization pipeline (spec 016; mp-features engine, EVT-5 merge, canonical log ordering, symbols snapshot, `MP_MATERIALIZE_MAX_BYTES` RAM guard)
+- `src/bin/mp-materialize.rs` — materialization CLI (spec 016, `--log --config --out --git-sha`; prints `symbols_hash`/snapshot path)
 
 ## Verification
 
 - `cargo test -p mp-storage`
 - `cargo test -p mp-storage --features live-http` (spec 027 HBS-1/HBS-8 live-download mock-server suite)
 - `cargo test -p mp-storage --test storage`
+- `cargo test -p mp-storage --test materialize` (spec 016 pipeline)
 
 ## Child DOX Index
 

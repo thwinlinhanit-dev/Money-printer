@@ -18,6 +18,7 @@ pub mod feature_store;
 pub mod historical;
 pub mod layout;
 pub mod manifest;
+pub mod materialize;
 pub mod migrate;
 pub mod parquet_macro;
 pub mod parquet_options;
@@ -65,6 +66,10 @@ pub use historical::{
 #[cfg(feature = "live-http")]
 pub use historical_download::{unzip_single_csv, BinanceVisionSource, RetryPolicy, Throttle};
 pub use manifest::{derive_manifest, Gap, GapKind, QualityManifest, StreamStats};
+pub use materialize::{
+    materialize_logs, materialize_logs_limited, MaterializeStats, SymbolRow,
+    DEFAULT_MAX_BACKFILL_BYTES,
+};
 pub use migrate::{migrate_log, MigrateError, MigrateOutcome};
 pub use promotion::{
     check_promotion, check_promotion_n, PromotionVerdict, REQUIRED_CONSECUTIVE_CLEAN_DAYS,

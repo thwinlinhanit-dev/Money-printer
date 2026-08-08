@@ -287,7 +287,8 @@ fn sto_9_scd2_as_of_resolves_across_change() {
         min_notional: 5.0,
         valid_from_ns: 0,
         valid_to_ns: 0, // open
-    });
+    })
+    .unwrap();
     // Tick size changes at t=1000.
     scd.append(SymbolVersion {
         venue: Venue::Bybit,
@@ -298,7 +299,8 @@ fn sto_9_scd2_as_of_resolves_across_change() {
         min_notional: 5.0,
         valid_from_ns: 1000,
         valid_to_ns: 0,
-    });
+    })
+    .unwrap();
 
     assert_eq!(
         scd.as_of(Venue::Bybit, "BTCUSDT", 500).unwrap().tick_size,
@@ -344,6 +346,7 @@ fn fea_6_materialize_versions_on_params_change_never_overwrites() {
         feature_ver: 1,
         engine_git_sha: "abc123".into(),
         params_hash: "aaaa0000".into(),
+        symbols_hash: String::new(), // raw-store rows: no shared table recorded
     };
 
     // First materialization → ver=0.

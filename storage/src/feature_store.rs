@@ -29,6 +29,7 @@ use std::sync::Arc;
 pub const KV_FEATURE_VER: &str = "feature_ver";
 pub const KV_ENGINE_GIT_SHA: &str = "engine_git_sha";
 pub const KV_PARAMS_HASH: &str = "params_hash";
+pub const KV_SYMBOLS_HASH: &str = "symbols_hash";
 
 /// One materialized feature sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,6 +48,11 @@ pub struct FeatureMeta {
     pub feature_ver: u16,
     pub engine_git_sha: String,
     pub params_hash: String,
+    /// Content hash of the symbols snapshot (`{root}/symbols/{hash}.json`)
+    /// whose id order this file's `symbol_id`s refer to — rows carry numeric
+    /// ids only, so the snapshot is how a consumer resolves them. Empty when
+    /// the producer did not record one (e.g. the per-symbol streaming store).
+    pub symbols_hash: String,
 }
 
 fn feature_schema() -> Arc<Schema> {
@@ -102,6 +108,7 @@ pub fn write_features(
             KeyValue::new(KV_FEATURE_VER.into(), meta.feature_ver.to_string()),
             KeyValue::new(KV_ENGINE_GIT_SHA.into(), meta.engine_git_sha.clone()),
             KeyValue::new(KV_PARAMS_HASH.into(), meta.params_hash.clone()),
+            KeyValue::new(KV_SYMBOLS_HASH.into(), meta.symbols_hash.clone()),
         ]))
         .build();
 
@@ -125,6 +132,7 @@ fn rows_content_hash(rows: &[FeatureRow], meta: &FeatureMeta) -> u64 {
     h = fnv1a_absorb(h, &meta.feature_ver.to_le_bytes());
     h = fnv1a_absorb(h, meta.engine_git_sha.as_bytes());
     h = fnv1a_absorb(h, meta.params_hash.as_bytes());
+    h = fnv1a_absorb(h, meta.symbols_hash.as_bytes());
     for r in rows {
         h = fnv1a_absorb(h, &r.symbol_id.to_le_bytes());
         h = fnv1a_absorb(h, &r.venue_code.to_le_bytes());
@@ -151,9 +159,17 @@ fn write_features_no_overwrite(
         if rows_content_hash(&existing, &existing_meta) == rows_content_hash(rows, meta) {
             return Ok(0); // identical content: nothing to do
         }
+        // Name the differing dimensions so a mismatch is diagnosable (e.g. a
+        // re-materialization over a store written before `symbols_hash` existed
+        // shows up as existing symbols_hash="" vs new non-empty).
         return Err(StorageError::Parquet(format!(
-            "refusing to overwrite {} with different content (W-6)",
-            path.display()
+            "refusing to overwrite {} with different content (W-6): existing (params_hash={}, \
+             symbols_hash={}) vs new (params_hash={}, symbols_hash={})",
+            path.display(),
+            existing_meta.params_hash,
+            existing_meta.symbols_hash,
+            meta.params_hash,
+            meta.symbols_hash,
         )));
     }
     write_features(path, rows, meta)
@@ -175,11 +191,15 @@ pub fn read_feature_meta(path: &Path) -> Result<Option<FeatureMeta>, StorageErro
         get(KV_FEATURE_VER),
         get(KV_ENGINE_GIT_SHA),
         get(KV_PARAMS_HASH),
+        get(KV_SYMBOLS_HASH),
     ) {
-        (Some(v), Some(sha), Some(ph)) => Ok(Some(FeatureMeta {
+        // `symbols_hash` is optional for backward tolerance: files written
+        // before the KV existed default to "" instead of being unreadable.
+        (Some(v), Some(sha), Some(ph), sh) => Ok(Some(FeatureMeta {
             feature_ver: v.parse().unwrap_or(0),
             engine_git_sha: sha,
             params_hash: ph,
+            symbols_hash: sh.unwrap_or_default(),
         })),
         _ => Ok(None),
     }
@@ -344,7 +364,10 @@ impl StreamingFeatureStore {
     }
 }
 
-fn date_str(ns: i64) -> String {
+/// UTC date string (`YYYY-MM-DD`) for a nanosecond timestamp — the partition
+/// day a row lands on. Shared by the streaming store and the offline
+/// materializer (spec 016) so both partition on the row's OWN event time.
+pub(crate) fn date_str(ns: i64) -> String {
     let secs = (ns / 1_000_000_000).max(0) as u64;
     let days = secs / 86400;
     let mut y = 1970i64;
@@ -400,6 +423,7 @@ pub fn materialize(
         feature_ver: meta.feature_ver,
         engine_git_sha: meta.engine_git_sha.clone(),
         params_hash: meta.params_hash.clone(),
+        symbols_hash: meta.symbols_hash.clone(),
     };
     let path = root
         .join(feature)
@@ -407,6 +431,9 @@ pub fn materialize(
         .join(format!("venue={venue_slug}"))
         .join(format!("symbol={symbol_id}"))
         .join(format!("{date}.parquet"));
-    write_features(&path, rows, &meta)?;
+    // W-6 no-overwrite guard (same rule as the streaming store): an identical
+    // re-materialization is a byte-level no-op; divergent content on the same
+    // version is a hard error, never a silent clobber.
+    write_features_no_overwrite(&path, rows, &meta)?;
     Ok(path)
 }

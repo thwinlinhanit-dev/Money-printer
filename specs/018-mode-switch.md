@@ -66,7 +66,7 @@ Automatic on any fault (asymmetry: auto-off, manual-on). If a safety check fails
 - [ ] Test: `mod_3_paper_uses_sim_fills` — live feed, verify no real orders
 - [ ] Test: `mod_4_live_enables_safety_checks` — verify dead-man, recon, kill switch
 - [ ] Test: `mod_5_mode_switch_requires_human_confirm` — mock human input, verify gate
-- [ ] Guardrail: `ops/ci/guardrails.sh` checks for mode = "live" in repo (already exists, verify)
+- [x] Guardrail: `ops/ci/guardrails.sh` and its PowerShell port `ops/ci/guardrails.ps1` check for `mode = "live"` in tracked config (PD-1; verified 2026-08-06 — both scripts pass green)
 
 ## Decisions
 - 2026-07-19: Mode file: `/etc/money-printer/mode.toml` (outside repo, 0600 perms).

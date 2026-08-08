@@ -60,18 +60,49 @@ Example: `data/features/funding_rate/hyperliquid/BTC/2026-07-19.parquet`
 - **MAT-6** Offline replay MUST produce identical `FeatureUpdate` sequence as live run.
 
 ## Acceptance criteria
-- [ ] `FeatureStore` compiles and writes valid Parquet
-- [ ] Test: `mat_1_write_feature_updates` — write 1000 updates, read back identical
-- [ ] Test: `mat_2_partition_layout_correct` — verify directory structure
-- [ ] Test: `mat_3_deterministic_output` — two runs, compare file hashes
-- [ ] Test: `mat_4_offline_replay_matches_live` — live run vs Parquet replay, identical screener hits
-- [ ] Test: `mat_5_flush_threshold_respected` — verify flush at boundary
+- [x] `FeatureStore` compiles and writes valid Parquet
+- [x] Test: `mat_6_materialize_writes_layout_and_roundtrips` — writes `feature/venue/symbol/date.parquet`, read back identical values
+- [x] Test: `mat_5_materialize_is_deterministic_and_idempotent` — two runs, identical file bytes and file set
+- [x] Test: `fea_6_params_change_allocates_new_version_and_never_overwrites` — config params change → new version, prior files untouched
+- [x] Test: `mat_6_multi_log_symbols_remap_and_merge` — symbols shared across logs resolve to one id (EVT-5), events merge in ts order
+- [x] Test: `mat_6_cli_materializes_and_exits_zero` — `mp-materialize` end-to-end via `CARGO_BIN_EXE`
+- [x] Test: `mat_6_materialize_skips_missing_config_file_cleanly` — clean non-zero exit, no partial store
+- [x] Test: `mat_5_log_argument_order_does_not_change_symbol_ids_or_bytes` — `--log` order is canonicalized; reversed argument order produces byte-identical layout + bytes
+- [x] Test: `mat_5_symbols_snapshot_written_and_resolves_ids` — shared table persisted as `{root}/symbols/{hash}.json`, hash in every Parquet footer; `symbol_id` resolvable
+- [x] Test: `mat_5_ram_guard_rejects_oversized_corpus_before_reading` — corpus over `MP_MATERIALIZE_MAX_BYTES` fails closed with guidance, writes nothing
+- [ ] Test: `mat_4_offline_replay_matches_live` — live run vs Parquet replay, identical screener hits (research-level gate, still open)
+- [ ] Test: `mat_5_flush_threshold_respected` — verify live flush at boundary
 - [ ] Integration: run feature engine + store for 1 hour, verify files appear
 
 ## Decisions
 - 2026-07-19: Use `arrow` + `parquet` crates (Rust native, no Python dependency).
 - 2026-07-19: Buffer size: 10,000 updates or 60 seconds, whichever first.
 - 2026-07-19: Compression: zstd (good ratio, fast decompression for replay).
+- 2026-08-06: `mp-storage` gains an `mp-features` dependency; materialization lives in
+  `storage/src/materialize.rs` (logs → shared symbol remap → EVT-5 merge → engine →
+  `FeatureStore`) behind `mp-materialize` CLI. `features::engine_from_config` is the
+  one-code-path config→engine wiring reused by the binary (previously the engine was
+  library-tested only).
+- 2026-08-06: batch `materialize` reuses the streaming store's `write_features_no_overwrite`
+  guard — identical re-materialization is a byte-level no-op, divergent content on the
+  same version is a hard error (W-6). MAT-5 determinism proven by raw-byte comparison of
+  two independent runs, not row-equality.
+- 2026-08-06 (hardening, audit 08-06): (a) **Canonical input order** — `--log` paths are
+  sorted byte-wise and exact duplicates dropped before symbol interning, so symbol-id
+  assignment and merge order depend only on the input SET; `--log a --log b` ≡
+  `--log b --log a` down to the byte. (b) **Self-describing symbols** — every run
+  persists the shared table as an immutable content-addressed snapshot
+  `{root}/symbols/{hash}.json` (id/venue/venue_symbol rows in id order) and records the hash
+  in every Parquet footer (`symbols_hash` KV); rows carry numeric ids only, so without
+  the snapshot the store was unresolvable. (c) **RAM guard** — total on-disk log bytes
+  are checked against `MP_MATERIALIZE_MAX_BYTES` (default 16 GiB) BEFORE any log is
+  opened; a run over the cap fails closed with per-day-slicing guidance instead of OOMing
+  (streaming merge remains future work). The symbols snapshot is written only after all
+  feature files succeed (no orphan on failure) and skipped for an empty table. The W-6
+  content hash now includes `symbols_hash`, so re-running over a store written by the
+  pre-snapshot binary hard-errors naming the mismatching dimension — the materializer
+  shipped the same day, so such stores are non-resumable (fresh `--out` or a params
+  change allocates a new `ver=N`).
 
 ## Open questions
 - None.
