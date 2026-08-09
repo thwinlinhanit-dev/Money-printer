@@ -57,6 +57,14 @@ promote --scorecards-dir data/scorecards`.
   `storage/src/materialize.rs` + `features::engine_from_config`; integration
   coverage in `storage/tests/materialize.rs` (layout/round-trip, determinism,
   params-change version bump, multi-log merge, CLI e2e).
+- **Automated 2026-08-08 (Phase-0 Hyperliquid):** the daily pipeline now runs
+  materialization itself for every promotable day — `features/features.toml`
+  (production config, `whale_net`/`whale_print`/`liq_est_bands`/`footprint`/
+  `cvd` on hyperliquid + the funding/oi/imbalance passthroughs) and the log set
+  = the day's recordings + the spec 028 whale-positions census (feeds
+  `whale.net`/`whale.delta`). Output lands in `data/features` with the git sha
+  as engine provenance (FEA-6); first real run happens with the first
+  promotable day (2026-08-09 audited 2026-08-10).
 
 ---
 

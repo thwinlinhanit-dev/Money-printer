@@ -1,0 +1,97 @@
+# Feature catalog params (FEA-7) — PRODUCTION config for the Phase-0
+# Hyperliquid venue. Copy of features.toml.example with every section pinned
+# explicitly (no reliance on code defaults) and venue slugs set to the single
+# recorded venue (hyperliquid). Parsed with deny_unknown_fields (a mistyped
+# key is an error, not a silent default). This file's canonical hash is
+# written into every materialized feature's Parquet footer (FEA-6); changing
+# any value forces a new `ver=N` feature-store directory — recorded feature
+# data is never overwritten (W-6).
+#
+# Consumed by:
+#   mp-materialize --config features/features.toml (spec 016, daily pipeline
+#   Phase 2: runs for every promotable day) and by the live runner's
+#   engine_from_config (FEA-4: recorded features are the live features).
+
+# Bar timeframe for bar-derived features, in nanoseconds (60s).
+bar_tf_ns = 60000000000
+
+[cvd]
+# Per-venue cumulative volume delta — Hyperliquid trade prints feed it.
+venues = ["hyperliquid"]
+
+[whale_print]
+# A single trade at or above this notional is a whale print.
+min_notional = 250000.0
+# Hyperliquid-only (large-print edge on the HL public tape).
+venues = ["hyperliquid"]
+
+[whale_net]
+# Aggregate whale net positioning + deltas (spec 028 census -> feature engine
+# 004): per-symbol sum of signed position notional across recorded addresses
+# (`whale.net.hyperliquid`) and its change vs the previous reading
+# (`whale.delta.hyperliquid`). Fed by the mp-whale census log
+# ({date}_hyperliquid_positions.log), which the daily pipeline passes to
+# mp-materialize alongside the trade/book logs.
+venues = ["hyperliquid"]
+# A position not refreshed within this window (ns) is evicted from the
+# census — a flattened position or a leaderboard drop-off must not linger
+# in the aggregate. 10 min (~10 top-N polls at the 60s cadence).
+stale_after_ns = 600000000000
+
+[liq_cluster]
+# Liquidations within this window (ns) summing to >= min_cluster_notional
+# form a cluster. No-op on Hyperliquid (no native liq stream) until a venue
+# with one joins the required set.
+window_ns = 60000000000
+min_cluster_notional = 5000000.0
+
+[liq_agg]
+# Cross-venue de-sampled liquidation tape (spec 029). No-op on Hyperliquid.
+dedup_window_ns = 250000000
+agg_window_ns = 1000000000
+
+[liq_est_bands]
+# Estimated liquidation cascade bands (spec 029), from OI + mark + leverage
+# tiers. ESTIMATED (model), not ground truth — validate against spec 028 real
+# liq prices (RES-4) before any strategy use. Hyperliquid delivers the
+# mark_price and open_interest streams, so these fire from day one.
+maintenance_buffer = 1.5
+# Leverage tiers + OI weights — DOCUMENTED ASSUMPTIONS until calibrated from
+# the recorded spec 028 real leverage distribution:
+#   cargo run -p mp-features --bin whale_study -- --log <positions.log> --leverage-calibration --json
+#   python3 research/run_calibrate_leverage.py --log <positions.log> --print-toml   (spec 029 LIQ-11)
+[[liq_est_bands.leverage_tiers]]
+leverage = 1.0
+weight = 0.05
+[[liq_est_bands.leverage_tiers]]
+leverage = 2.0
+weight = 0.10
+[[liq_est_bands.leverage_tiers]]
+leverage = 5.0
+weight = 0.15
+[[liq_est_bands.leverage_tiers]]
+leverage = 10.0
+weight = 0.25
+[[liq_est_bands.leverage_tiers]]
+leverage = 20.0
+weight = 0.25
+[[liq_est_bands.leverage_tiers]]
+leverage = 50.0
+weight = 0.20
+
+[footprint]
+# Orderflow delta / imbalance per size bucket (spec 004 §Order flow) from the
+# Hyperliquid trade tape.
+bar_tf_ns = 60000000000
+[[footprint.buckets]]
+name = "small"
+min_usd = 0.0
+max_usd = 25000.0
+[[footprint.buckets]]
+name = "mid"
+min_usd = 25000.0
+max_usd = 100000.0
+[[footprint.buckets]]
+name = "whale"
+min_usd = 100000.0
+max_usd = 1.7976931348623157e308
