@@ -266,10 +266,13 @@ impl AlertRouter {
             .output()
             .map_err(|e| format!("curl spawn failed (is curl installed?): {e}"))?;
         if !out.status.success() {
+            // Do NOT echo curl's stderr verbatim (PD-2, audit 2026-08-08): on
+            // transport errors stderr can embed the URL — which may carry a
+            // sink token — while the success path deliberately never prints
+            // it. Report only the exit code; the URL is owner-known in env.
             return Err(format!(
-                "curl exit {}: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
+                "curl exited {} (stderr suppressed — may contain the webhook URL)",
+                out.status
             ));
         }
         // Fail closed on anything but a 2xx: an alert sink that "accepted" a

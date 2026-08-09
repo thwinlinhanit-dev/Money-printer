@@ -57,6 +57,30 @@ for recording in ${RECORDINGS}; do
         "${require_args[@]}"
 done
 
+# --- 2.5 Materialize features for the approved day (spec 016 Phase 2) -------
+# The feature store is the research substrate: written only for days that
+# passed the INT-4 gate (dirty days would bake gaps/staleness into features).
+# Log set = every required recording + the whale-positions census for venues
+# that have one (spec 028 feeds whale.net/delta). Exact duplicate --log paths
+# are dropped by the CLI (MAT-5 canonical input set).
+MAT_BIN="${BIN_DIR}/mp-materialize"
+FEATURES_TOML="/opt/money-printer/features/features.toml"
+GIT_SHA="$(git -C /opt/money-printer rev-parse HEAD 2>/dev/null || echo unknown)"
+mat_args=()
+for recording in ${RECORDINGS}; do
+    VENUE="${recording%%:*}"; SYMBOL="${recording#*:}"
+    RAW_LOG="${LOG_DIR}/raw/${YESTERDAY//-/}_${VENUE}_${SYMBOL}.log"
+    if [ -f "$RAW_LOG" ]; then mat_args+=(--log "$RAW_LOG"); fi
+    POS_LOG="${LOG_DIR}/raw/${YESTERDAY//-/}_${VENUE}_positions.log"
+    if [ -f "$POS_LOG" ]; then mat_args+=(--log "$POS_LOG"); fi
+done
+if [ "${#mat_args[@]}" -eq 0 ]; then
+    echo "[$(date -u)] Materialize: no raw logs found for $YESTERDAY - skipping" >&2
+else
+    echo "[$(date -u)] Materializing features for $YESTERDAY"
+    "$MAT_BIN" "${mat_args[@]}" --config "$FEATURES_TOML" --out "${LOG_DIR}/features" --git-sha "$GIT_SHA"
+fi
+
 # --- 3. Archive verified copies; source recordings remain append-only ---
 if [ -d "${VENV_DIR}" ]; then
     # shellcheck disable=SC1091

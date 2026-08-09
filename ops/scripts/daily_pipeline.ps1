@@ -11,9 +11,11 @@
 #      recordings) -> data/scorecards/<date>.json
 #   2. NOT promotable -> WARN + exit 1 (Task Scheduler flags the run); the
 #      scorecard is still archived so the streak verdict stays complete.
-#   3. promotable  -> `mp-ops compact` each recording through the INT-4
+#   3. promotable  -> `mp-materialize` the day's logs into the feature store
+#      (spec 016 Phase 2: recordings + whale-positions census, FEA-6 footer).
+#   4. promotable  -> `mp-ops compact` each recording through the INT-4
 #      verified gate (quarantined logs are refused before cold writes).
-#   4. Print the promotion streak verdict (longest run of promotable days
+#   5. Print the promotion streak verdict (longest run of promotable days
 #      across data/scorecards/*.json) - the daily "N/7" line.
 #
 # Usage:
@@ -26,6 +28,7 @@ param(
     [string]$Date,                 # YYYY-MM-DD or YYYYMMDD (default: yesterday UTC)
     [switch]$RegisterTask,         # register the MoneyPrinterDailyPipeline task
     [switch]$SkipCompact,          # audit + scorecard + verdict, no cold writes
+    [switch]$SkipMaterialize,      # audit + scorecard + verdict, no feature-store writes
     [string[]]$Recordings  = @(),  # venue:symbol pairs to require; empty = core list
     # 2026-08-08: the gate's required stream set is the one the current
     # Phase-0 venue (hyperliquid) can actually deliver over WS: trades,
@@ -195,6 +198,18 @@ function Invoke-Build {
     }
     if ($res[1] -ne 0) { Log "mp-ops build failed (exit $($res[1]))" "ERROR"; Exit 1 }
 }
+
+function Invoke-Build-Materialize {
+    # Same native-stderr discipline as Invoke-Build (audit 08-08).
+    Push-Location $root
+    $res = Invoke-Native -FilePath "cargo" -Arguments @("build", "-p", "mp-storage", "--release", "--bin", "mp-materialize")
+    Pop-Location
+    foreach ($line in @($res[0])) {
+        $s = ($line | Out-String).Trim()
+        if ($s -match "error|warning: unused|Finished") { Log $s "WARN" }
+    }
+    if ($res[1] -ne 0) { Log "mp-materialize build failed (exit $($res[1]))" "ERROR"; Exit 1 }
+}
 if (-not (Test-Path $mpOps)) {
     Log "mp-ops.exe not found - building release binary" "WARN"
     Invoke-Build
@@ -290,6 +305,64 @@ if (-not $promotable) {
     Log "NOT promotable - day $dateDashed fails the INT-4 gate. No cold writes." "WARN"
     # Exit 1 so Task Scheduler records a failed run (the outage is worth a flag).
     Exit 1
+}
+
+# ---- 2.5 materialize features for the approved day (spec 016 Phase 2) -------
+# The feature store is the research substrate: it is only written for days that
+# passed the INT-4 gate (dirty days would bake gaps/staleness into features).
+# Log set = every required recording + the whale-positions census for venues
+# that have one (spec 028 feeds whale.net/delta). Engine provenance is the git
+# sha of the tree that ran the pipeline (FEA-6 footer).
+if (-not $SkipMaterialize) {
+    $matBin = Join-Path $root "target\release\mp-materialize.exe"
+    $newestRaw = Get-ChildItem (Join-Path $root "data\raw") -Filter "*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not (Test-Path $matBin) -or ($newestRaw -and (Get-Item $matBin -ErrorAction SilentlyContinue).LastWriteTime -lt $newestRaw.LastWriteTime)) {
+        Log "mp-materialize.exe missing or stale - building release binary" "WARN"
+        Invoke-Build-Materialize
+    }
+    $cfgPath = Join-Path $root "features\features.toml"
+    $matArgs = @()
+    $matLogCount = 0
+    $seenVenues = @{}
+    foreach ($rec in $Recordings) {
+        $p = $rec.Split(":")
+        $logPath = Join-Path $root ("data\raw\{0}_{1}_{2}.log" -f $dateFlat, $p[0], $p[1])
+        if (Test-Path $logPath) {
+            $matArgs += "--log"; $matArgs += $logPath; $matLogCount++
+        }
+        if (-not $seenVenues.ContainsKey($p[0])) {
+            $seenVenues[$p[0]] = $true
+            $posPath = Join-Path $root ("data\raw\{0}_{1}_positions.log" -f $dateFlat, $p[0])
+            if (Test-Path $posPath) {
+                $matArgs += "--log"; $matArgs += $posPath; $matLogCount++
+            }
+        }
+    }
+    $gitSha = "unknown"
+    $shaOut = (& git rev-parse HEAD 2>&1 | Out-String)
+    if ($LASTEXITCODE -eq 0 -and $shaOut.Trim()) { $gitSha = $shaOut.Trim() }
+    $matArgs += "--config"; $matArgs += $cfgPath
+    $matArgs += "--out";  $matArgs += (Join-Path $root "data\features")
+    $matArgs += "--git-sha"; $matArgs += $gitSha
+
+    if ($matLogCount -eq 0) {
+        Log "materialize: no raw logs found for $dateDashed - skipping" "WARN"
+    } else {
+        Log "Running mp-materialize over $matLogCount log(s) for $dateDashed ..."
+        $env:RUST_LOG = "off"
+        Push-Location $root
+        try {
+            $matResult = Invoke-Native -FilePath $matBin -Arguments $matArgs
+        } finally {
+            Pop-Location
+            Remove-Item Env:RUST_LOG -ErrorAction SilentlyContinue
+        }
+        $matOut = $matResult[0]; $matExit = $matResult[1]
+        if ($matExit -ne 0) { Log "mp-materialize failed (exit $matExit): $matOut" "ERROR"; Exit 1 }
+        Log "  $($matOut | Out-String).Trim()"
+    }
+} else {
+    Log "SkipMaterialize set - no feature-store writes."
 }
 
 # ---- 3. compact through the INT-4 verified gate -----------------------------

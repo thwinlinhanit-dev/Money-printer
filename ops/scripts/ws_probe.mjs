@@ -61,6 +61,7 @@ const tally = {};
 const started = Date.now();
 let acked = false;
 let connectFailed = false;
+let subscribeRejected = false;
 const ws = new WebSocket(url);
 
 ws.onopen = () => {
@@ -71,9 +72,20 @@ ws.onopen = () => {
 ws.onmessage = (m) => {
   try {
     const j = JSON.parse(m.data);
-    if (j.id === 1 && !j.e) {
-      acked = true;
-      console.log('SUBSCRIBE_ACKS=1');
+    // A response to our SUBSCRIBE (id === 1): Binance answers success with
+    // { "result": null, "id": 1 } and rejection with
+    // { "error": { code, msg }, "id": 1 }. Audit 2026-08-08 (P2): the old gate
+    // (`j.id === 1 && !j.e`) treated BOTH as the ack, so a subscribe REJECTION
+    // exited 0 — defeating the documented fail-closed exit-2 contract. Require
+    // the success shape explicitly and flag a rejection as a failure.
+    if (j.id === 1) {
+      if (j.error) {
+        subscribeRejected = true;
+        console.log('SUBSCRIBE_REJECTED=' + String(j.error.code || 'unknown'));
+      } else if ('result' in j) {
+        acked = true;
+        console.log('SUBSCRIBE_ACKS=1');
+      }
       return;
     }
     if (j.e) tally[j.e] = (tally[j.e] || 0) + 1;
@@ -100,8 +112,9 @@ setTimeout(() => {
   } catch (e) {
     /* already closed */
   }
-  // Fail-closed (CONV-8): a connection that errored or never got its SUBSCRIBE
-  // ack must exit 2, not 0 — otherwise a dead connection looks like "the
-  // filter dropped everything".
-  process.exit(connectFailed || !acked ? 2 : 0);
+  // Fail-closed (CONV-8): a connection that errored, never got its SUBSCRIBE
+  // ack, OR had its SUBSCRIBE rejected must exit 2, not 0 — otherwise a dead
+  // connection or a refused subscription looks like "the filter dropped
+  // everything".
+  process.exit(connectFailed || subscribeRejected || !acked ? 2 : 0);
 }, seconds * 1000);
