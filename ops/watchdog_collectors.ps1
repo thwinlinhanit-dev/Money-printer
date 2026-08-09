@@ -172,10 +172,29 @@ Write-Host "==========================================" -ForegroundColor Cyan
 
 Set-Location $root
 Write-Host "Building binaries..." -ForegroundColor Yellow
-cargo build -p mp-collectors --features live-ws,live-http --bin mp-collector --release 2>&1 | Where-Object { $_ -match "Compiling|Finished|error" }
-if ($LASTEXITCODE -ne 0) { Write-Host "mp-collector build failed." -ForegroundColor Red; Exit 1 }
-cargo build -p mp-collectors --features live-http --bin mp-whale --release 2>&1 | Where-Object { $_ -match "Compiling|Finished|error" }
-if ($LASTEXITCODE -ne 0) { Write-Host "mp-whale build failed." -ForegroundColor Red; Exit 1 }
+# Best-effort rebuild (audit 08-08): a running collector holds its exe open on
+# Windows, so ANY crate change makes cargo's relink fail with "Access is
+# denied" (os error 5). The rebuild is a convenience, not a liveness
+# requirement - supervision only needs *some* binary on disk. Fail soft:
+# warn and continue with the existing binary (the running processes are
+# already executing it). Only abort if there is no binary at all.
+foreach ($b in @(
+    @{ name = "mp-collector"; exe = $collectorExe; args = @("--features", "live-ws,live-http", "--bin", "mp-collector", "--release") },
+    @{ name = "mp-whale";    exe = $whaleExe;    args = @("--features", "live-http", "--bin", "mp-whale", "--release") }
+)) {
+    # A bare string variable would be passed as ONE argument (PowerShell
+    # never splits it); array-splat instead so each flag stays separate.
+    $buildArgs = $b.args
+    cargo build -p mp-collectors @buildArgs 2>&1 | Where-Object { $_ -match "Compiling|Finished|error" }
+    if ($LASTEXITCODE -ne 0) {
+        if (Test-Path $b.exe) {
+            Write-Host "$($b.name) rebuild failed (exe likely locked by a running process) - continuing with existing binary." -ForegroundColor Yellow
+        } else {
+            Write-Host "$($b.name) build failed and no binary exists - cannot supervise." -ForegroundColor Red
+            Exit 1
+        }
+    }
+}
 Write-Host "Binaries ready: $collectorExe / $whaleExe" -ForegroundColor Green
 
 $rawDir = Join-Path $root "data\raw"
