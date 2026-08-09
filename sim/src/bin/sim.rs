@@ -279,6 +279,16 @@ fn run() -> Result<ExitCode, String> {
             // already-consumed frames, so this is idempotent (SIM-15). The
             // loop is time-free (PD-3): it sleeps a fixed duration and counts
             // polls — no wall-clock reads on this decision path.
+            //
+            // Universe (audit 2026-08-08, P2): the strategy must be built from
+            // the symbols actually present in the log, NOT `&[]` — otherwise a
+            // universe-gated strategy (`carry-v1` gates every update on
+            // `universe.symbols.contains(..)`) emits zero intents and the
+            // session silently certifies an empty, useless run. We read the
+            // log's current contents once up front to discover the universe and
+            // seed the session; the close path re-reads it for `record_run`, so
+            // today's tail is not extra I/O beyond what the CLI already does.
+            let initial = read_log(&log)?;
             let cfg = SimConfig {
                 min_coverage: 1.0,
                 bar_tf_ns: 1_000_000,
@@ -288,10 +298,16 @@ fn run() -> Result<ExitCode, String> {
             };
             let mut session = PaperSession::new(Backtester::new(
                 engine(),
-                strategy_named(&strategy, &[], None, None)?,
+                strategy_named(&strategy, &initial, None, None)?,
                 cfg,
                 seed,
             ));
+            // Seed the session with the already-present frames; subsequent
+            // polls re-read the whole log and dedup on the merge key (SIM-15),
+            // so seeding here is idempotent with the tail loop below.
+            session
+                .push_batch(initial)
+                .map_err(|e| format!("paper feed refused: {e}"))?;
             let mut idle = 0u32;
             for poll in 0..max_polls {
                 let mut batch = Vec::new();
