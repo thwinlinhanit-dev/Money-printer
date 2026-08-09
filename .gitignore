@@ -20,6 +20,7 @@ secrets*
 /runs
 /research/out
 /journal/briefs
+/journal/telegram
 *.parquet
 *.ndjson.zst
 *.log
