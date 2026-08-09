@@ -127,10 +127,16 @@ pub fn write_features(
 /// Deterministic content hash (FNV-1a) over rows + the FEA-6 footer metadata.
 /// Used for the per-flush unique suffix and the no-overwrite guard; the same
 /// rows always hash the same, so a re-flush of unchanged content is a no-op.
+///
+/// `engine_git_sha` is deliberately EXCLUDED (audit 2026-08-08, P2): it is
+/// provenance, not content. A byte-identical dataset re-materialized with a
+/// real `--git-sha` after an `unknown` run differs ONLY in provenance, and
+/// including it made the W-6 no-overwrite guard mislabel that re-stamp as data
+/// divergence and refuse it. The guard's contract is "refuse to clobber
+/// different DATA"; provenance lives in the FEA-6 footer regardless.
 fn rows_content_hash(rows: &[FeatureRow], meta: &FeatureMeta) -> u64 {
     let mut h = FNV1A_OFFSET;
     h = fnv1a_absorb(h, &meta.feature_ver.to_le_bytes());
-    h = fnv1a_absorb(h, meta.engine_git_sha.as_bytes());
     h = fnv1a_absorb(h, meta.params_hash.as_bytes());
     h = fnv1a_absorb(h, meta.symbols_hash.as_bytes());
     for r in rows {
@@ -240,14 +246,29 @@ fn dc<T: 'static>(b: &RecordBatch, i: usize) -> Result<&T, StorageError> {
         .ok_or_else(|| StorageError::Arrow(format!("bad column type at {i}")))
 }
 
-/// Resolve the `ver=N` directory for `(feature, params_hash)` under `root`,
-/// implementing the FEA-6 "changed params ⇒ new ver, never overwrite" rule:
+/// Resolve the `ver=N` directory for `(feature, params_hash, feature_ver)`
+/// under `root`, implementing the FEA-6 "changed params or version ⇒ new ver,
+/// never overwrite" rule:
 /// - if an existing `ver=N` has a matching `_params` marker ⇒ reuse it
 ///   (idempotent re-materialization);
 /// - otherwise allocate `max(existing)+1` (or 0 if none) and write its marker.
 ///
+/// The identity key is `params_hash:feature_ver` (FEA-6 requires a version
+/// bump to allocate a NEW directory even when the params are unchanged; the
+/// prior `params_hash`-only keying silently reused `ver=0` and then tripped
+/// the W-6 overwrite guard — audit 2026-08-08, P2). Existing stores are
+/// unaffected: a same-`feature_ver` re-materialization still matches markers
+/// written before this change, because they all carry the same `ver=N`
+/// component.
+///
 /// Returns the resolved version.
-pub fn resolve_version(root: &Path, feature: &str, params_hash: &str) -> Result<u16, StorageError> {
+pub fn resolve_version(
+    root: &Path,
+    feature: &str,
+    params_hash: &str,
+    feature_ver: u16,
+) -> Result<u16, StorageError> {
+    let key = format!("{params_hash}:{feature_ver}");
     let feat_dir = root.join(feature);
     std::fs::create_dir_all(&feat_dir)?;
     let mut max_ver: Option<u16> = None;
@@ -264,15 +285,23 @@ pub fn resolve_version(root: &Path, feature: &str, params_hash: &str) -> Result<
         max_ver = Some(max_ver.map_or(n, |m| m.max(n)));
         let marker = entry.path().join("_params");
         if let Ok(existing) = std::fs::read_to_string(&marker) {
-            if existing.trim() == params_hash {
-                return Ok(n); // same params ⇒ reuse this version (idempotent)
+            let existing = existing.trim();
+            // Match either the new composite key or a legacy bare `params_hash`
+            // whose `ver` component already equals this `feature_ver` (all
+            // markers written before this change are ver=1-equivalent, so a
+            // legacy marker is only "the same" when the version also matches).
+            let legacy_match = !existing.contains(':')
+                && existing == params_hash
+                && n == feature_ver;
+            if existing == key || legacy_match {
+                return Ok(n); // same params+version ⇒ reuse this version (idempotent)
             }
         }
     }
     let new_ver = max_ver.map_or(0, |m| m + 1);
     let ver_dir = feat_dir.join(format!("ver={new_ver}"));
     std::fs::create_dir_all(&ver_dir)?;
-    std::fs::write(ver_dir.join("_params"), params_hash)?;
+    std::fs::write(ver_dir.join("_params"), key)?;
     Ok(new_ver)
 }
 
@@ -341,7 +370,12 @@ impl StreamingFeatureStore {
         self.buffer.sort_by_key(|r| r.ts_ns);
         // FEA-6: resolve (or allocate) the version for this params hash —
         // never a hardcoded ver (was ver=1).
-        let ver = resolve_version(&self.root, &self.feature, &self.meta.params_hash)?;
+        let ver = resolve_version(
+            &self.root,
+            &self.feature,
+            &self.meta.params_hash,
+            self.meta.feature_ver,
+        )?;
         // Partition by each row's OWN date floor: a midnight-straddling buffer
         // writes rows where they belong, not under one flush-call date.
         let mut by_date: BTreeMap<String, Vec<FeatureRow>> = BTreeMap::new();
@@ -418,7 +452,7 @@ pub fn materialize(
     rows: &[FeatureRow],
     meta: &FeatureMeta,
 ) -> Result<PathBuf, StorageError> {
-    let ver = resolve_version(root, feature, &meta.params_hash)?;
+    let ver = resolve_version(root, feature, &meta.params_hash, meta.feature_ver)?;
     let meta = FeatureMeta {
         feature_ver: meta.feature_ver,
         engine_git_sha: meta.engine_git_sha.clone(),

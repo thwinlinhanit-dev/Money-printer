@@ -12,7 +12,7 @@ Cold storage layer: transforms raw event logs into Hive-partitioned Parquet tabl
 - `src/dataset.rs` — dataset management
 - `src/manifest.rs` — manifest tracking
 - `src/scd2.rs` — slowly changing dimension tracking
-- `src/feature_store.rs` — feature store materialization
+- `src/feature_store.rs` — feature store materialization (W-6 `rows_content_hash` excludes `engine_git_sha` — provenance, not content; FEA-6 `resolve_version` keys on `params_hash:feature_ver`, legacy bare-`params_hash` markers match when `ver` equals the running `feature_ver`)
 - `src/prune.rs` — data pruning
 - `src/audit.rs` — audit logging
 - `src/migrate.rs` — legacy raw-log migration (schema-1 → current, W-6 write-new + verify)

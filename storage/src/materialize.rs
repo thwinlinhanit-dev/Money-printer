@@ -38,7 +38,7 @@
 //! times from the logs.
 
 use crate::feature_store::{date_str, materialize, FeatureMeta, FeatureRow};
-use mp_core::{fnv1a_absorb, log::LogReader, SymbolTable, Venue, FNV1A_OFFSET};
+use mp_core::{fnv1a_absorb, log::LogReader, MarketEvent, SymbolTable, Venue, FNV1A_OFFSET};
 use mp_features::{engine_from_config, FeatureEngine, FeaturesConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -160,16 +160,40 @@ pub fn materialize_logs_limited(
         // Log-local ids → shared ids (EVT-8): same (venue, symbol) is one id
         // everywhere, so cross-log feature state merges correctly.
         let metas = reader.symbols().to_vec();
-        for ev in events.iter_mut() {
-            let meta = metas.get(ev.symbol.0 as usize).ok_or_else(|| {
-                format!(
-                    "{}: symbol id {} has no metadata (corrupt log?)",
+        if metas.is_empty() {
+            // Symbol-less log: only control/status events can legitimately
+            // appear (a data event would have interned its symbol). A whale
+            // day with no positions records only GapDetected statuses, and
+            // control events produce no features — drop them instead of
+            // failing the whole materialization (audit 2026-08-08). Anything
+            // that is NOT a control event is unresolvable corruption and
+            // stays fail-closed.
+            let dropped = events.len();
+            events.retain(|ev| !matches!(ev.body, MarketEvent::Status { .. }));
+            if !events.is_empty() {
+                return Err(format!(
+                    "{}: {} event(s) reference symbols but the log has no symbol table (corrupt log?)",
                     path.display(),
-                    ev.symbol.0
-                )
-            })?;
-            let shared = symbols.intern_default(meta.venue, &meta.venue_symbol);
-            ev.symbol = shared;
+                    events.len()
+                ));
+            }
+            tracing::warn!(
+                path = %path.display(),
+                dropped,
+                "symbol-less log: dropped control events"
+            );
+        } else {
+            for ev in events.iter_mut() {
+                let meta = metas.get(ev.symbol.0 as usize).ok_or_else(|| {
+                    format!(
+                        "{}: symbol id {} has no metadata (corrupt log?)",
+                        path.display(),
+                        ev.symbol.0
+                    )
+                })?;
+                let shared = symbols.intern_default(meta.venue, &meta.venue_symbol);
+                ev.symbol = shared;
+            }
         }
         sources.push(events.into_iter());
     }

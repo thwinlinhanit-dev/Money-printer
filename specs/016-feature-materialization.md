@@ -100,9 +100,21 @@ Example: `data/features/funding_rate/hyperliquid/BTC/2026-07-19.parquet`
   (streaming merge remains future work). The symbols snapshot is written only after all
   feature files succeed (no orphan on failure) and skipped for an empty table. The W-6
   content hash now includes `symbols_hash`, so re-running over a store written by the
-  pre-snapshot binary hard-errors naming the mismatching dimension — the materializer
-  shipped the same day, so such stores are non-resumable (fresh `--out` or a params
-  change allocates a new `ver=N`).
+   pre-snapshot binary hard-errors naming the mismatching dimension — the materializer
+   shipped the same day, so such stores are non-resumable (fresh `--out` or a params
+   change allocates a new `ver=N`).
+- 2026-08-08 (hardening, audit 08-08): (a) **`engine_git_sha` is provenance, not
+  content** — it is excluded from the W-6 `rows_content_hash`. Re-materializing
+  byte-identical data with a real `--git-sha` after an `unknown` run used to
+  hard-error as "different content"; that was provenance re-stamping mislabeled as
+  data divergence. The sha is still written to every FEA-6 footer (and asserted in
+  tests) — only its role in the *equality* hash changed. (b) **FEA-6 version keying**
+  — `resolve_version` now keys a version directory on `params_hash:feature_ver` (was
+  `params_hash` only), so a feature-code upgrade with unchanged params allocates a
+  NEW `ver=N` as FEA-6 requires instead of silently reusing `ver=0` and tripping the
+  overwrite guard. Legacy bare-`params_hash` markers still match when their `ver`
+  equals the running `feature_ver` (all pre-change markers are ver=1-equivalent), so
+  existing stores remain resumable.
 
 ## Open questions
 - None.
