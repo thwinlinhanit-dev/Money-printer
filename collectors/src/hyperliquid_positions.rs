@@ -1,9 +1,15 @@
 //! Hyperliquid on-chain per-user position census normalizer (spec 028,
-//! WHL-1..9). Polls the public REST `POST https://api.hyperliquid.xyz/info`
-//! (no auth) for the top-N leaderboard addresses + a configured watchlist,
-//! then fetches each address's `clearinghouseState` and emits
+//! WHL-1..9). Polls the public REST API (no auth) for the top-N leaderboard
+//! addresses + a configured watchlist, then fetches each address's
+//! `clearinghouseState` (`POST https://api.hyperliquid.xyz/info`) and emits
 //! [`MarketEvent::WhalePosition`] events — real liquidation prices from real
 //! positions, the ground truth that calibrates spec 029 estimated liq bands.
+//!
+//! Leaderboard source (2026-08-08): the original `POST /info
+//! {"type":"leaderboard"}` was removed upstream (HTTP 422); the protocol now
+//! serves it as a public GET from the stats-data bucket
+//! (`https://stats-data.hyperliquid.xyz/Mainnet/leaderboard`, refreshed
+//! ~hourly) — see [`rest::fetch_leaderboard_blocking`].
 //!
 //! Positions enter as DATA ONLY (WHL-5): they become strategy-consumable
 //! features only after event-study grading (RES-4). Copy-trading is rejected.
@@ -71,29 +77,76 @@ pub fn gap_detected(symbol: SymbolId, recv_ts_ns: i64, detail: String) -> EventE
     )
 }
 
-/// Parse a `type=leaderboard` response into the ranked addresses (WHL-1).
-/// Returns the addresses in the venue's rank order — the top of the list is
-/// the top-N set. Malformed entries are skipped; a response that yields
-/// nothing is a parse error (never a silently empty top-N poll).
-pub fn leaderboard_addresses(payload: &[u8]) -> Result<Vec<String>, NormError> {
+/// Build the `Status::Census` event a COMPLETED poll emits (WHL-7): "at this
+/// receive time the census ran and found `positions` open positions across
+/// the polled addresses." Zero-position polls are real observations — the
+/// raw log must keep recording them so (a) the audit sees a live census
+/// rather than a silent gap, and (b) the watchdog's log-stall check never
+/// mistakes a quiet (flat) market for a dead collector.
+pub fn census_detected(symbol: SymbolId, recv_ts_ns: i64, positions: usize) -> EventEnvelope {
+    EventEnvelope::new(
+        Venue::Hyperliquid,
+        symbol,
+        recv_ts_ns,
+        recv_ts_ns,
+        0,
+        MarketEvent::Status {
+            kind: mp_core::StatusKind::Census,
+            detail: format!("census ran, {positions} position(s)"),
+        },
+    )
+}
+
+/// Parse the current stats-data leaderboard response (the replacement for
+/// the removed `POST /info type=leaderboard`, WHL-1) into addresses ranked by
+/// the requested window's PnL — the top of the list is the top-N set.
+/// `time_window` maps to the response's window keys: "1d"→"day", "7d"→"week",
+/// "30d"→"month", anything else → "allTime". Malformed entries are skipped;
+/// a response that yields nothing is a parse error (never a silently empty
+/// top-N poll). Addresses are opaque 0x ids; names/pnl are never imported as
+/// labels (WHL-3).
+pub fn leaderboard_addresses(payload: &[u8], time_window: &str) -> Result<Vec<String>, NormError> {
     let v: Value = serde_json::from_slice(payload).map_err(|e| NormError::Parse(e.to_string()))?;
-    let arr = v
-        .as_array()
-        .ok_or_else(|| NormError::Parse("leaderboard response is not an array".into()))?;
-    let mut out = Vec::with_capacity(arr.len());
-    for entry in arr {
-        // The address is an opaque on-chain identifier; name/pnl are never
-        // imported as labels (WHL-3).
-        if let Some(addr) = str_field(entry, "address") {
-            out.push(addr.to_owned());
+    let rows = v
+        .get("leaderboardRows")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| NormError::Parse("leaderboard response lacks leaderboardRows".into()))?;
+    let window_key = match time_window {
+        "1d" => "day",
+        "7d" => "week",
+        "30d" => "month",
+        _ => "allTime",
+    };
+    let mut ranked: Vec<(f64, String)> = Vec::with_capacity(rows.len());
+    for entry in rows {
+        let Some(addr) = str_field(entry, "ethAddress") else {
+            continue;
+        };
+        if addr.is_empty() || !addr.starts_with("0x") {
+            continue;
         }
+        // Window PnL as the ranking key; a record missing its window still
+        // ranks (0.0) — the census is never silently shrunk by a partial row.
+        let pnl = entry
+            .get("windowPerformances")
+            .and_then(|w| w.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|kv| kv.get(0).and_then(Value::as_str) == Some(window_key))
+            })
+            .and_then(|kv| kv.get(1))
+            .and_then(|perf| f64_field(perf, "pnl"))
+            .unwrap_or(0.0);
+        ranked.push((pnl, addr.to_owned()));
     }
-    if out.is_empty() {
+    // Highest PnL first — the venue's rank order (WHL-1).
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    if ranked.is_empty() {
         return Err(NormError::Parse(
             "leaderboard response yielded no addresses".into(),
         ));
     }
-    Ok(out)
+    Ok(ranked.into_iter().map(|(_, a)| a).collect())
 }
 
 impl Normalizer for HyperliquidPositionsNormalizer {
@@ -186,10 +239,12 @@ pub mod rest {
 
     use super::*;
 
-    /// Public leaderboard request body (WHL-1: no auth, no key — PD-2).
-    pub fn leaderboard_body(time_window: &str) -> serde_json::Value {
-        serde_json::json!({ "type": "leaderboard", "timeWindow": time_window })
-    }
+    /// Public leaderboard endpoint (WHL-1: no auth, no key — PD-2). The
+    /// original `POST /info {"type":"leaderboard"}` was removed upstream
+    /// (HTTP 422 since 2026-08); the leaderboard now lives in the stats-data
+    /// bucket, refreshed ~hourly. `MP_HYPERLIQUID_LEADERBOARD_URL` overrides
+    /// (testnet or a pinned snapshot for tests).
+    pub const LEADERBOARD_URL: &str = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard";
 
     /// Public per-user `clearinghouseState` request body (no auth).
     pub fn clearinghouse_body(address: &str) -> serde_json::Value {
@@ -218,12 +273,31 @@ pub mod rest {
         serde_json::from_str(&text).map_err(|e| format!("hyperliquid info json: {e}"))
     }
 
-    /// Fetch the top-N leaderboard addresses for `time_window` (e.g. "7d").
+    /// Fetch the top-N leaderboard addresses for `time_window` (e.g. "7d"),
+    /// ranked by that window's PnL. GET from the stats-data bucket (the
+    /// full leaderboard is ~34 MB, refreshed upstream ~hourly — the whale
+    /// caches the list and re-polls the addresses' positions on its own
+    /// faster cadence). Fail-closed: any non-2xx or parse failure is an
+    /// error (WHL-7 records a GapDetected, never a silent skip).
     pub fn fetch_leaderboard_blocking(time_window: &str) -> Result<Vec<String>, String> {
-        let body = leaderboard_body(time_window);
-        let v = info_blocking(&body)?;
-        let raw = serde_json::to_vec(&v).map_err(|e| format!("reserialize: {e}"))?;
-        leaderboard_addresses(&raw).map_err(|e| format!("leaderboard parse: {e}"))
+        let url = std::env::var("MP_HYPERLIQUID_LEADERBOARD_URL")
+            .unwrap_or_else(|_| LEADERBOARD_URL.to_string());
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120)) // ~34 MB payload
+            .build()
+            .map_err(|e| format!("http client: {e}"))?;
+        let resp = client
+            .get(&url)
+            .send()
+            .map_err(|e| format!("hyperliquid leaderboard request: {e}"))?;
+        let status = resp.status();
+        let body = resp
+            .bytes()
+            .map_err(|e| format!("hyperliquid leaderboard body: {e}"))?;
+        if !status.is_success() {
+            return Err(format!("hyperliquid leaderboard HTTP {status}"));
+        }
+        leaderboard_addresses(&body, time_window).map_err(|e| format!("leaderboard parse: {e}"))
     }
 
     /// Fetch one address's `clearinghouseState` and wrap it with the address

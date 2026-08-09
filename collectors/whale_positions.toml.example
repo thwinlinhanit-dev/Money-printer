@@ -6,10 +6,18 @@
 data_dir = "data"
 
 # How many top addresses to pull from the leaderboard each top-N poll (WHL-1).
+# The address list comes from the public stats-data leaderboard
+# (https://stats-data.hyperliquid.xyz/Mainnet/leaderboard, the replacement for
+# the removed POST /info type=leaderboard — 2026-08-08), re-fetched on
+# leaderboard_refresh_s and cached; the per-address position polls below run
+# against the cached list.
 top_n = 50
 
 # Leaderboard poll cadence (WHL-7; a missed poll emits Status::GapDetected).
 top_poll_interval_s = 60
+
+# How often to re-fetch the (large, ~34 MB, refreshed ~hourly) leaderboard.
+leaderboard_refresh_s = 3600
 
 # Watchlist addresses polled on the faster cadence (WHL-1).
 watchlist = [

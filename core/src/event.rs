@@ -103,6 +103,11 @@ pub enum StatusKind {
         /// Number of frames dropped in this batch.
         dropped: u64,
     },
+    /// A periodic census poll completed (spec 028): the whale position
+    /// collector records one per top-N/watchlist poll so the raw log stays
+    /// fresh even when every tracked address is flat (a zero-position census
+    /// is a real observation, not silence). Neutral for audit/manifest.
+    Census,
 }
 
 /// Where an event came from within one collector connection.  The envelope

@@ -6,9 +6,16 @@
 # Addresses are opaque 0x identifiers only — no external labels (WHL-3).
 data_dir = "data"
 
-# Top-N leaderboard addresses polled every 60s (WHL-1/WHL-7).
+# Top-N leaderboard addresses polled every 60s (WHL-1/WHL-7).  The address
+# list itself comes from the public stats-data leaderboard
+# (https://stats-data.hyperliquid.xyz/Mainnet/leaderboard — the replacement
+# for the removed POST /info type=leaderboard, 2026-08-08) and is re-fetched
+# on leaderboard_refresh_s; the per-address position polls run on
+# top_poll_interval_s against the cached list.
 top_n = 50
 top_poll_interval_s = 60
+# Re-fetch the (large, ~34 MB, refreshed ~hourly upstream) leaderboard.
+leaderboard_refresh_s = 3600
 
 # Watchlist: empty on the default host — the leaderboard poll is the primary
 # source.  Add opaque 0x addresses here to track specific wallets on the

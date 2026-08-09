@@ -130,12 +130,31 @@ features (004) step, after the RES-4 event study.
   any position not refreshed within `stale_after_ns` (default 10 min) —
   `whale.net` is the current census, never a graveyard of dead positions.
   Remaining from the tier-2 BACKLOG item: wallet-cohort grading.
+- 2026-08-08 (judgment call, W-5 — found live): the leaderboard API moved. The
+  original `POST /info {"type":"leaderboard","timeWindow":"7d"}` now returns
+  HTTP 422 (type removed) and `GET /POST /leaderboard` return 404 — the whale
+  had silently recorded only GapDetected statuses all day (the watchdog's
+  data-flow check passed because status events keep the log growing). The
+  replacement is the public stats-data bucket
+  `GET https://stats-data.hyperliquid.xyz/Mainnet/leaderboard` (~34 MB,
+  refreshed ~hourly, no auth) with `leaderboardRows[].ethAddress` +
+  `windowPerformances` (per-window pnl/roi/vlm; keys day/week/month/allTime).
+  `leaderboard_addresses` now ranks by the configured window's PnL
+  ("1d"→day, "7d"→week, "30d"→month, else allTime). Because the payload is
+  large and refreshes ~hourly, the whale caches the list and re-fetches it on
+  a new `leaderboard_refresh_s` (default 3600); the 60s `top_poll_interval_s`
+  re-polls the cached addresses' `clearinghouseState`. `clearinghouseState`
+  (the per-address fetch) is unchanged. Note: WHL-1's "api.hyperliquid.xyz"
+  wording now reads as "the public no-auth REST API" — the leaderboard host
+  is stats-data.hyperliquid.xyz, the per-address fetch stays on
+  api.hyperliquid.xyz.
 
 
 ## Open questions
 
 - Exact Hyperliquid endpoint(s) for top-N positions + historical changes —
-  verify at implementation (API drifts, pitfall #2). Candidate: `info`
-  `clearinghouseState` per user; a stable public top-N path needs confirmation.
+  verify at implementation (API drifts, pitfall #2). RESOLVED 2026-08-08: the
+  top-N path is the public stats-data leaderboard GET (see Decisions), the
+  per-user path is `info` `clearinghouseState` (stable).
 - `WhalePosition` schema fields + spec-001 amendment text — owner sign-off.
 - Poll cadence vs Hyperliquid rate limits — calibrate at implementation.

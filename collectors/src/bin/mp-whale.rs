@@ -36,12 +36,16 @@ mod impl_ {
     use mp_collectors::hyperliquid_positions::rest::{
         fetch_clearinghouse_state_blocking, fetch_leaderboard_blocking,
     };
-    use mp_collectors::hyperliquid_positions::{gap_detected, HyperliquidPositionsNormalizer};
+    use mp_collectors::hyperliquid_positions::{
+        census_detected, gap_detected, HyperliquidPositionsNormalizer,
+    };
     use mp_collectors::Normalizer;
     use mp_core::log::EventLogWriter;
     use mp_core::{EventEnvelope, Venue};
     use serde::Deserialize;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     #[derive(Debug, Deserialize)]
@@ -55,6 +59,14 @@ mod impl_ {
         /// Leaderboard poll cadence (WHL-7 default 60s).
         #[serde(default = "default_top_interval")]
         top_poll_interval_s: u64,
+        /// How often the leaderboard (the address source) is re-fetched. The
+        /// stats-data leaderboard is ~34 MB and refreshes upstream ~hourly
+        /// (2026-08-08: the old `POST /info type=leaderboard` was removed;
+        /// the replacement is a public GET from
+        /// stats-data.hyperliquid.xyz/Mainnet/leaderboard). The 60s
+        /// `top_poll_interval_s` re-polls the CACHED addresses' positions.
+        #[serde(default = "default_leaderboard_refresh")]
+        leaderboard_refresh_s: u64,
         /// Watchlist addresses (opaque 0x) polled on the faster cadence.
         #[serde(default)]
         watchlist: Vec<String>,
@@ -81,6 +93,9 @@ mod impl_ {
     fn default_top_interval() -> u64 {
         60
     }
+    fn default_leaderboard_refresh() -> u64 {
+        3600
+    }
     fn default_watch_interval() -> u64 {
         30
     }
@@ -97,8 +112,14 @@ mod impl_ {
                 .map_err(|e| format!("read whale config {path}: {e}"))?;
             let cfg: WhaleConfig =
                 toml::from_str(&text).map_err(|e| format!("parse whale config {path}: {e}"))?;
-            if cfg.top_n == 0 || cfg.top_poll_interval_s == 0 || cfg.watch_poll_interval_s == 0 {
-                return Err("whale config requires top_n > 0 and non-zero poll intervals".into());
+            if cfg.top_n == 0
+                || cfg.top_poll_interval_s == 0
+                || cfg.watch_poll_interval_s == 0
+                || cfg.leaderboard_refresh_s == 0
+            {
+                return Err(
+                    "whale config requires top_n > 0 and non-zero poll intervals".into(),
+                );
             }
             return Ok(cfg);
         }
@@ -124,6 +145,9 @@ mod impl_ {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(default_top_n),
             top_poll_interval_s: default_top_interval(),
+            leaderboard_refresh_s: binutil::flag(args, "--leaderboard-refresh-s")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_leaderboard_refresh),
             watchlist,
             watch_poll_interval_s: default_watch_interval(),
             leaderboard_window: default_window(),
@@ -156,7 +180,22 @@ mod impl_ {
         let mut last_top_poll = Instant::now() - Duration::from_secs(config.top_poll_interval_s);
         let mut last_watch_poll =
             Instant::now() - Duration::from_secs(config.watch_poll_interval_s);
+        let mut last_leaderboard =
+            Instant::now() - Duration::from_secs(config.leaderboard_refresh_s);
         let mut last_heartbeat = Instant::now();
+        // Cached top-N address list from the leaderboard. The download is ~34
+        // MB and takes ~40 s on this egress (2026-08-08), so it runs on a
+        // background thread — a synchronous fetch would block the poll loop,
+        // stall the 15 s heartbeat, and trip the watchdog's staleness respawn
+        // on every refresh. The 60s top poll re-reads this cache.
+        let top_cache: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        // Set by the refresh thread on failure; the main loop surfaces it once
+        // as a WHL-7 GapDetected (gaps are data, never silently swallowed).
+        let refresh_failed: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        // True while a refresh thread is downloading — a slow (~40 s) fetch
+        // must never overlap itself (a small leaderboard_refresh_s would
+        // otherwise pile up concurrent 34 MB downloads).
+        let refresh_in_progress: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
         loop {
             let mut event_buffer: Vec<EventEnvelope> = Vec::new();
@@ -173,37 +212,90 @@ mod impl_ {
             let mut fail_top = false;
             let mut fail_watch = false;
 
+            if last_leaderboard.elapsed() >= Duration::from_secs(config.leaderboard_refresh_s)
+                && !refresh_in_progress.swap(true, Ordering::SeqCst)
+            {
+                last_leaderboard = Instant::now();
+                let cache = top_cache.clone();
+                let failed = refresh_failed.clone();
+                let done = refresh_in_progress.clone();
+                let window = config.leaderboard_window.clone();
+                std::thread::spawn(move || {
+                    // Clear the in-progress guard on every exit path — a
+                    // panicking fetch must never wedge the flag and silently
+                    // kill all future refreshes (audit 08-09).
+                    let result = std::panic::catch_unwind(|| fetch_leaderboard_blocking(&window));
+                    done.store(false, Ordering::SeqCst);
+                    match result {
+                        Ok(Ok(addresses)) => {
+                            let n = addresses.len();
+                            if let Ok(mut c) = cache.lock() {
+                                *c = addresses;
+                            }
+                            tracing::info!(n, "leaderboard refreshed");
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "leaderboard poll failed");
+                            failed.store(true, Ordering::SeqCst);
+                        }
+                        Err(_) => {
+                            tracing::warn!("leaderboard fetch panicked");
+                            failed.store(true, Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+            // One gap event per refresh failure (WHL-7), not one per loop.
+            if refresh_failed.swap(false, Ordering::SeqCst) {
+                fail_top = true;
+            }
+
             if last_top_poll.elapsed() >= Duration::from_secs(config.top_poll_interval_s) {
                 last_top_poll = Instant::now();
-                match fetch_leaderboard_blocking(&config.leaderboard_window) {
-                    Ok(addresses) => {
-                        let poll_recv = binutil::now_ns();
-                        for addr in addresses.iter().take(config.top_n) {
-                            if let Err(e) = fetch_and_record(
-                                &mut normalizer,
-                                addr,
-                                &config.symbols,
-                                poll_recv,
-                                &mut event_buffer,
-                            ) {
-                                tracing::warn!(address = %addr, error = %e, "top-N position fetch failed");
-                                fail_top = true;
-                            }
-                            pace(config.min_poll_gap_ms);
-                        }
-                        any = true;
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "leaderboard poll failed");
+                let poll_recv = binutil::now_ns();
+                let cached = top_cache.lock().map(|c| c.clone()).unwrap_or_default();
+                let mut positions_found = 0usize;
+                for addr in cached.iter().take(config.top_n) {
+                    let before = event_buffer.len();
+                    if let Err(e) = fetch_and_record(
+                        &mut normalizer,
+                        addr,
+                        &config.symbols,
+                        poll_recv,
+                        &mut event_buffer,
+                    ) {
+                        tracing::warn!(address = %addr, error = %e, "top-N position fetch failed");
                         fail_top = true;
+                    } else {
+                        positions_found += event_buffer.len() - before;
+                    }
+                    pace(config.min_poll_gap_ms);
+                    // A top-N poll with the full top_n can take 60s+ (each
+                    // per-address fetch is ~1s). Keep the heartbeat fresh so a
+                    // long poll never trips the watchdog's 75s staleness.
+                    if last_heartbeat.elapsed() >= Duration::from_secs(15) {
+                        last_heartbeat = Instant::now();
+                        binutil::touch_heartbeat(&raw_dir, "hyperliquid_positions");
                     }
                 }
+                // A completed census poll is itself a data point: record it so
+                // the raw log stays fresh on flat days (zero positions is a
+                // real observation, and the watchdog's log-stall check must
+                // not mistake a quiet market for a dead collector).
+                let sym = normalizer
+                    .symbols()
+                    .lookup(Venue::Hyperliquid, "")
+                    .unwrap_or(mp_core::SymbolId(0));
+                event_buffer.push(census_detected(sym, recv_ns, positions_found));
+                any = true;
             }
 
             if last_watch_poll.elapsed() >= Duration::from_secs(config.watch_poll_interval_s) {
                 last_watch_poll = Instant::now();
                 let poll_recv = binutil::now_ns();
+                let mut positions_found = 0usize;
                 for addr in &config.watchlist {
+                    let before = event_buffer.len();
                     if let Err(e) = fetch_and_record(
                         &mut normalizer,
                         addr,
@@ -213,9 +305,20 @@ mod impl_ {
                     ) {
                         tracing::warn!(address = %addr, error = %e, "watchlist position fetch failed");
                         fail_watch = true;
+                    } else {
+                        positions_found += event_buffer.len() - before;
                     }
                     pace(config.min_poll_gap_ms);
+                    if last_heartbeat.elapsed() >= Duration::from_secs(15) {
+                        last_heartbeat = Instant::now();
+                        binutil::touch_heartbeat(&raw_dir, "hyperliquid_positions");
+                    }
                 }
+                let sym = normalizer
+                    .symbols()
+                    .lookup(Venue::Hyperliquid, "")
+                    .unwrap_or(mp_core::SymbolId(0));
+                event_buffer.push(census_detected(sym, recv_ns, positions_found));
                 any = true;
             }
 

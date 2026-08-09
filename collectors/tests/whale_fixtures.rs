@@ -30,24 +30,29 @@ const TWO_POSITIONS: &str = r#"[
 #[cfg(feature = "live-http")]
 #[test]
 fn whl_1_polls_public_rest_no_auth() {
-    // The request bodies carry only the public info type + user/window — no
-    // key, no auth, no secret (PD-2).
-    use mp_collectors::hyperliquid_positions::rest::{clearinghouse_body, leaderboard_body};
-    let lb = leaderboard_body("7d");
-    assert_eq!(lb["type"], "leaderboard");
-    assert_eq!(lb["timeWindow"], "7d");
-    assert!(lb.get("api_key").is_none() && lb.get("secret").is_none());
-
+    // The per-address fetch carries only the public info type + user — no
+    // key, no auth, no secret (PD-2). The leaderboard source is the public
+    // stats-data GET (2026-08-08: the old `POST /info type=leaderboard` was
+    // removed upstream — HTTP 422), which authenticates by nothing at all.
+    use mp_collectors::hyperliquid_positions::rest::clearinghouse_body;
     let ch = clearinghouse_body("0xdeadbeef");
     assert_eq!(ch["type"], "clearinghouseState");
     assert_eq!(ch["user"], "0xdeadbeef");
     assert!(ch.get("api_key").is_none() && ch.get("secret").is_none());
 
-    // Recorded leaderboard fixture parses into ranked opaque addresses.
-    let fixture = r#"[{"name":"alice","address":"0xaaaa000000000000000000000000000000000001","pnl":"1234"},
-                      {"name":"bob","address":"0xbbbb000000000000000000000000000000000002","pnl":"900"}]"#;
-    let addrs = leaderboard_addresses(fixture.as_bytes()).unwrap();
+    // Recorded stats-data leaderboard fixture parses into opaque addresses
+    // ranked by the requested window's PnL (7d → "week"; a missing week still
+    // ranks at 0.0 and never drops out).
+    let fixture = r#"{"leaderboardRows": [
+        {"ethAddress":"0xaaaa000000000000000000000000000000000001",
+         "windowPerformances":[["week",{"pnl":"1234"}],["allTime",{"pnl":"9000"}]]},
+        {"ethAddress":"0xbbbb000000000000000000000000000000000002",
+         "windowPerformances":[["week",{"pnl":"900"}]]}
+    ]}"#;
+    let addrs = leaderboard_addresses(fixture.as_bytes(), "7d").unwrap();
     assert_eq!(addrs.len(), 2);
+    assert_eq!(addrs[0], "0xaaaa000000000000000000000000000000000001");
+    assert_eq!(addrs[1], "0xbbbb000000000000000000000000000000000002");
     assert!(addrs.iter().all(|a| a.starts_with("0x")));
 }
 
@@ -56,8 +61,9 @@ fn whl_1_polls_public_rest_no_auth() {
 fn whl_1_leaderboard_parse_errors_on_empty() {
     // An empty/undocumented leaderboard response must fail loudly, not look
     // like a successful (empty) top-N poll.
-    assert!(leaderboard_addresses(b"[]").is_err());
-    assert!(leaderboard_addresses(b"not json").is_err());
+    assert!(leaderboard_addresses(b"{}", "7d").is_err());
+    assert!(leaderboard_addresses(b"{\"leaderboardRows\": []}", "7d").is_err());
+    assert!(leaderboard_addresses(b"not json", "7d").is_err());
 }
 
 proptest! {
