@@ -1352,6 +1352,110 @@ fn ops_9_telegram_flush_wait_holds_until_quiet_end_then_drains() {
 }
 
 #[test]
+fn ops_9_mp_ops_telegram_send_delivers_immediately_even_in_quiet_hours() {
+    // `telegram-send` is the one-shot wrapper-verdict edge (the daily
+    // pipeline's promotion-gate verdict): NO quiet-hours batching — a verdict
+    // produced at 00:05 UTC (inside 22:00-07:00) must land now, not sit in
+    // the ledger until the next flush. All-day quiet (0..1440) must still
+    // deliver immediately.
+    if !curl_available() {
+        eprintln!("SKIPPED: curl not available on this host");
+        return;
+    }
+    let (url, handle) = stub_telegram_server();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args([
+            "telegram-send",
+            "--id",
+            "daily-pipeline",
+            "--detail",
+            "day 2026-08-09: 2 recording(s) | streak 0/7",
+            "--severity",
+            "p2",
+        ])
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "12345")
+        .env("MP_OPS_TELEGRAM_URL", &url)
+        .env("MP_OPS_QUIET_START_MIN", "0")
+        .env("MP_OPS_QUIET_END_MIN", "1440")
+        .output()
+        .expect("run mp-ops telegram-send");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("\"sent\":true"), "{stdout}");
+    assert!(stdout.contains("\"severity\":\"P2\""), "{stdout}");
+    // P2's channel is Telegram (immediate); the point is it is NOT batched
+    // despite the all-day quiet env — the dispatch is sent now.
+    assert!(stdout.contains("\"channel\":\"telegram\""), "{stdout}");
+
+    let req = handle.join().unwrap();
+    assert!(req.contains("/botTESTTOKEN/sendMessage"), "{req}");
+    assert!(req.contains("chat_id=12345"), "{req}");
+    assert!(req.contains("disable_notification=true"), "{req}");
+    // Body is URL-encoded by curl --data-urlencode: spaces => '+', '/' => %2F.
+    assert!(req.contains("day+2026-08-09"), "{req}");
+    assert!(req.contains("streak+0%2F7"), "{req}");
+    assert!(req.contains("daily-pipeline"), "{req}");
+}
+
+#[test]
+fn ops_9_mp_ops_telegram_send_fails_closed_without_credentials() {
+    // Unset credentials ⇒ exit 2 with a named reason (CONV-8) — never a
+    // silent drop and never a fake "sent". Same posture as telegram-flush.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args([
+            "telegram-send",
+            "--id",
+            "daily-pipeline",
+            "--detail",
+            "day 2026-08-09",
+        ])
+        .env_remove("TELEGRAM_BOT_TOKEN")
+        .env_remove("TELEGRAM_CHAT_ID")
+        .output()
+        .expect("run mp-ops telegram-send (no creds)");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "missing creds must fail the job: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"),
+        "failure names the missing vars"
+    );
+}
+
+#[test]
+fn ops_9_mp_ops_telegram_send_rejects_bad_severity() {
+    // An unknown --severity is a hard error, never silently defaulted.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args([
+            "telegram-send",
+            "--id",
+            "daily-pipeline",
+            "--detail",
+            "x",
+            "--severity",
+            "p9",
+        ])
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "12345")
+        .output()
+        .expect("run mp-ops telegram-send (bad severity)");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown --severity"),
+        "{} ",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn ops_9_telegram_flush_failure_keeps_batch_and_never_logs_delivered() {
     // A failed delivery is NEVER recorded in the delivery log: the dispatch
     // stays in the batch ledger (pending — visible in the report's queue)

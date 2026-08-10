@@ -48,6 +48,16 @@
 //!           (fail-closed), never a fabricated verdict. With --telegram, a
 //!           fired P2 is sent immediately (P2 always breaks through quiet
 //!           hours, OPS-9).
+//!   telegram-send --id ID --detail TEXT [--severity p1|p2|p3] [--ts-ns N]
+//!           One-shot Telegram notification for a wrapper verdict (the daily
+//!           promotion-gate verdict in daily_pipeline.ps1): sends --detail
+//!           immediately through the Bot API edge. NO quiet-hours batching —
+//!           a wrapper verdict must land when produced (the daily pipeline
+//!           runs at 00:05 UTC, inside the 22:00–07:00 quiet window; a
+//!           batched P3 would sit in the ledger until the next flush).
+//!           Fail-closed (CONV-8): unset credentials exit 2 ("must be set",
+//!           never a silent drop); a failed send is an error, never a fake
+//!           "sent".
 //!
 //! Usage:
 //!   cargo run --package mp-ops --bin mp-ops -- compact --date 2026-07-15 --venue bybit --symbol BTCUSDT
@@ -55,6 +65,7 @@
 //!   cargo run --package mp-ops --bin mp-ops -- band-accuracy-decay --trend research/band_accuracy/band_accuracy.jsonl --runs-dir runs --telegram
 //!   cargo run --package mp-ops --bin mp-ops -- telegram-flush --wait
 //!   cargo run --package mp-ops --bin mp-ops -- telegram-stale --telegram
+//!   cargo run --package mp-ops --bin mp-ops -- telegram-send --id daily-pipeline --detail 'day 2026-08-09: NOT promotable' --severity p2
 //!   MP_OPS_P1_WEBHOOK=https://hooks.example.com/alert cargo run --package mp-ops --bin mp-ops -- \
 //!     p1-webhook --id recon-diverged --detail 'BTCUSDT position mismatch'
 
@@ -63,7 +74,7 @@ use mp_core::{EventEnvelope, SymbolTable, Venue};
 use mp_ops::{
     append_batch, append_run_record, band_accuracy_decay_alert, flush_batch,
     load_band_accuracy_trend, load_telegram_batch, post_telegram, stale_batch_alert, Alert,
-    AlertRouter, Dispatch, QuietHours, RouteOutcome, Severity, TelegramConfig,
+    AlertRouter, Channel, Dispatch, QuietHours, RouteOutcome, Severity, TelegramConfig,
 };
 use mp_storage::promotion::check_promotion;
 use mp_storage::{audit_raw_log, compactor, AuditConfig, DailyScorecard, RawLogAudit};
@@ -774,6 +785,65 @@ fn cmd_telegram_stale(args: &[String]) -> Result<String, String> {
     }
     serde_json::to_string(&verdict).map_err(|e| e.to_string())
 }
+/// One-shot Telegram notification for a wrapper verdict (the daily
+/// promotion-gate verdict in `daily_pipeline.ps1`): sends `--detail`
+/// immediately through the Bot API edge. Unlike `band-accuracy-decay
+/// --telegram`, there is NO quiet-hours batching — a wrapper verdict must
+/// land when it is produced (the daily pipeline runs at 00:05 UTC, inside
+/// the 22:00–07:00 quiet window; a batched P3 would sit in the ledger until
+/// the next flush, defeating the point of the alert). Fail-closed (CONV-8):
+/// no credentials ⇒ exit 2, never a silent drop; a failed send is an error,
+/// never a fake "sent".
+fn cmd_telegram_send(args: &[String]) -> Result<String, String> {
+    let id = need(args, "--id")?;
+    let detail = need(args, "--detail")?;
+    if id.is_empty() || detail.is_empty() {
+        return Err("telegram-send: --id and --detail must be non-empty".into());
+    }
+    let severity = match flag(args, "--severity").as_deref() {
+        Some("p1") => Severity::P1,
+        Some("p2") => Severity::P2,
+        Some("p3") | None => Severity::P3,
+        Some(other) => return Err(format!("telegram-send: unknown --severity {other} (p1|p2|p3)")),
+    };
+    let (Some(token), Some(chat_id)) = (
+        std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+        std::env::var("TELEGRAM_CHAT_ID").ok(),
+    ) else {
+        return Err("telegram-send: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set".into());
+    };
+    let cfg = TelegramConfig {
+        url: std::env::var("MP_OPS_TELEGRAM_URL")
+            .unwrap_or_else(|_| "https://api.telegram.org".to_string()),
+        token,
+        chat_id,
+    };
+    let ts_ns = match flag(args, "--ts-ns") {
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|_| "telegram-send: --ts-ns must be an integer")?,
+        None => now_ns(),
+    };
+    let dispatch = Dispatch::from_alert(&Alert::new(id.clone(), severity, 0, detail), ts_ns);
+    // No quiet-hours router: a wrapper verdict always sends now (a batched
+    // P3 would wait for the next flush, defeating the point).
+    post_telegram(&dispatch, &cfg).map_err(|e| format!("telegram send failed: {e}"))?;
+    serde_json::to_string(&serde_json::json!({
+        "sent": true,
+        "id": dispatch.id,
+        "severity": dispatch.severity.as_str(),
+        "channel": match dispatch.channel {
+            Channel::TelegramPhone => "telegram_phone",
+            Channel::Telegram => "telegram",
+            Channel::TelegramQuiet => "telegram_quiet",
+        },
+        "detail": dispatch.detail,
+        "runbook": dispatch.runbook,
+        "ts_ns": dispatch.ts_ns,
+    }))
+    .map_err(|e| e.to_string())
+}
+
 /// P1 egress edge (owner decision 2026-08-06, audit 08-04 #3): the shipped
 /// call site for the P1 "phone-call webhook" channel. WIRED but dead until
 /// credentials exist — with `MP_OPS_P1_WEBHOOK` set, a P1 dispatch (built
@@ -877,7 +947,7 @@ fn main() -> ExitCode {
     if args.len() < 2 {
         eprintln!("Usage: mp-ops <subcommand> [options]");
         eprintln!(
-            "Subcommands: compact, audit, scorecard, promote, band-accuracy-decay, telegram-flush, telegram-stale, p1-webhook"
+            "Subcommands: compact, audit, scorecard, promote, band-accuracy-decay, telegram-flush, telegram-stale, telegram-send, p1-webhook"
         );
         return ExitCode::FAILURE;
     }
@@ -890,6 +960,7 @@ fn main() -> ExitCode {
         "band-accuracy-decay" => cmd_band_accuracy_decay(&args[2..]),
         "telegram-flush" => cmd_telegram_flush(&args[2..]),
         "telegram-stale" => cmd_telegram_stale(&args[2..]),
+        "telegram-send" => cmd_telegram_send(&args[2..]),
         "p1-webhook" => cmd_p1_webhook(&args[2..]),
         other => Err(format!("unknown subcommand: {other}")),
     };
@@ -910,7 +981,11 @@ fn main() -> ExitCode {
             // "check failed, see journald" and never fabricates a verdict.
             if matches!(
                 args[1].as_str(),
-                "band-accuracy-decay" | "telegram-flush" | "telegram-stale" | "p1-webhook"
+                "band-accuracy-decay"
+                    | "telegram-flush"
+                    | "telegram-stale"
+                    | "telegram-send"
+                    | "p1-webhook"
             ) {
                 ExitCode::from(2)
             } else {

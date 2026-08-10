@@ -296,6 +296,36 @@ if ($promoteExit -eq 0) {
     Log "Promotion gate: no scorecards yet - streak starts with the first archived scorecard."
 }
 
+# ---- 2.1 Telegram verdict (2026-08-10): a non-promotable day must reach
+#         the owner's phone, not just exit 1 for Task Scheduler. Best-effort
+#         by design: a delivery failure is logged (WARN) and does NOT change
+#         the pipeline's exit code - the scorecard file + pipeline.log remain
+#         the evidence, and a dead alert channel must never mask the gate.
+#         `telegram-send` breaks through quiet hours by construction: the
+#         pipeline runs at 00:05 UTC (inside 22:00-07:00), so a batched P3
+#         would sit in the ledger until the next flush - useless for a
+#         verdict that must land now.
+$tgDetail = "day ${dateDashed}: $($card.recordings.Count) recording(s)"
+if ($null -ne $pv) {
+    $tgDetail += " | streak $($pv.consecutive_clean)/$($pv.required)"
+}
+foreach ($rec in $card.recordings) {
+    $clean = if ($rec.clean) { "clean" } else { "DIRTY" }
+    $block = if ($null -ne $rec.blocking_findings) { $rec.blocking_findings } else { 0 }
+    $tgDetail += "`n  $($rec.venue)/$($rec.symbol): $clean (blocking=$block)"
+}
+$tgSeverity = if ($promotable) { "p3" } else { "p2" }
+$tgArgs = @("telegram-send", "--id", "daily-pipeline", "--detail", $tgDetail, "--severity", $tgSeverity)
+$tgResult = Invoke-Native -FilePath $mpOps -Arguments $tgArgs
+# NOTE: materialize the trimmed output first - inside a PS string,
+# `$($x | Out-String).Trim()` would print the literal text '.Trim()'.
+$tgOut = ($tgResult[0] | Out-String).Trim()
+if ($tgResult[1] -ne 0) {
+    Log "Telegram verdict send failed (exit $($tgResult[1])): $tgOut" "WARN"
+} else {
+    Log "Telegram verdict sent: $tgOut"
+}
+
 if (-not $promotable) {
     foreach ($rec in $card.recordings) {
         $clean = if ($rec.clean) { "clean" } else { "DIRTY" }
