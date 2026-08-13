@@ -7,11 +7,14 @@
 #
 # 2026-08-08: this host's egress is geo-filtered by Binance futures
 # (spec 024 incident) — Binance can never produce promotable days from this
-# network (forceOrder/liquidation has no REST fallback; proven live three
-# ways).  The Phase-0 required venue is now Hyperliquid, whose permissionless
-# API has no geo-blocks and no KYC (verified live 2026-08-08: WS trades +
-# l2Book + activeAssetCtx flow, audit CLEAN coverage 1.0).  Symbols are BARE
-# coin names (BTC, ETH), NOT USDT pairs: the hyperliquid venue derives the
+# network via public paths.  COL-29 (2026-08-13) closed the liquidation gap
+# with a credential-gated REST leg (allForceOrders is USER_DATA) and made
+# Bybit's public WS liquidation topic the credential-free live source; a
+# Binance recording still needs MP_BINANCE_API_KEY/SECRET for a full day.
+# The Phase-0 required venue is Hyperliquid, whose permissionless API has no
+# geo-blocks and no KYC (verified live 2026-08-08: WS trades + l2Book +
+# activeAssetCtx flow, audit CLEAN coverage 1.0).  Symbols are BARE coin
+# names (BTC, ETH), NOT USDT pairs: the hyperliquid venue derives the
 # subscription coin from the symbol (BTCUSDT -> BTC) but the recording's
 # symbol table carries the bare coin, so a `hyperliquid:BTCUSDT` recording
 # would fail the audit's symbol_mismatch check.
@@ -21,6 +24,13 @@
 # separately (data/raw/{date}_hyperliquid_positions.log) and is NOT a required
 # stream of the gate — the gate's required stream set is:
 #   trade book funding mark_price open_interest
+#
+# 2026-08-13 (COL-29): bybit:BTCUSDT is a VPS-gate recording only — it does
+# NOT belong here (this file drives the Windows watchdog + daily_pipeline.ps1,
+# whose collector binary predates the orderbook fix; a bybit recording from
+# the old binary would lack the `book` stream and fail the Windows gate). The
+# VPS promotion gate carries it via daily_maintenance.sh RECORDINGS + the
+# venue-scoped `--require-stream bybit:liquidation` (spec 024 COL-29).
 #
 # Disk cost: keep recorded market data on a dedicated backed-up drive (W-6),
 # NOT under ~/Downloads.

@@ -1077,6 +1077,7 @@ dependencies = [
  "mp-core",
  "proptest",
  "reqwest",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

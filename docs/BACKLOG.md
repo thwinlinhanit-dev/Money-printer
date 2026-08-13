@@ -19,6 +19,17 @@ decision), or **[maybe-never]** (recorded so it stops being re-proposed).
   day produced byte-identical decision logs (hash 6263363002049928352).
   Next: param grid / walk-forward before any promotion — likely a kill or a
   major redesign (add costs-aware entry hysteresis, wider bands).
+- **[v1.x] liq-fade-v1 (IMPLEMENTED, NO DATA YET 2026-08-13)** — fade a
+  liquidation cascade AFTER exhaustion: `liq.vol_*` spike + `liq.dist`
+  stretch + rolling-sum drain vs peak (`strategies/liq-fade-v1/`,
+  hypothesis + impl + 6 `lf_*` tests, registered as
+  `sim backtest --strategy liq-fade-v1`). HONEST DATA GATE (written into the
+  hypothesis BEFORE implementation): `liq.*` only fires on a recording with
+  a liquidation stream — the hyperliquid corpus has none, so the real-day
+  backtest (08-12 BTC, seed 42) is trades=0 by construction, recorded as
+  "no data — not falsifiable yet," never faked. Determinism still proven
+  (two same-seed runs byte-identical, hash 14867537910696322766). The gate
+  opens when a bybit recording day exists (deploy item below).
 - **[v1.x] funding-carry study (DELIVERED 2026-08-13)** —
   `research/funding_carry_study_2026-08-13.md` + `mp-query carry` (spec 003
   §Analytics: OI-weighted funding + mark-vs-oracle basis per hour, units
@@ -66,7 +77,8 @@ requires a byte-identical decision log; the PASS artifact
 (`<date>.determinism.json`) is a promotion-gate condition, wired fail-closed
 into both daily pipelines (VPS cron step 1.5, Windows task), verified
 byte-identical on the real 08-10..08-13 corpus (843k events / 854k decision
-lines per day). Delivered 2026-08-13 (batch 3 — Cryexc/OpenMarket deep-dive
+lines per day).Delivered
+2026-08-13 (batch 3 — Cryexc/OpenMarket deep-dive
 implementation): **read-time analytics transforms** — `mp-query footprint`
 (block-bucketed (interval × price) order-flow grid over cold Parquet, the
 OpenMarket blockSize/heatmap aggregation) and `mp-query oiwa` (OI-weighted
@@ -74,6 +86,20 @@ funding Σ(rateᵢ·oiᵢ)/Σoiᵢ, units never mixed), plus the `book.depth.{pc
 `book.depth_total.{pct}` liquidity-band features (0.5/2/10% of mid) and
 `tape.tps.{tf}` / `tape.bps_delta` tape micro-features — all tested
 (analytics + `om_*` acceptance tests) and live-smoked on the real corpus.
+Delivered 2026-08-13 (batch 4 — bybit liq deploy, staged-on-VPS):
+**bybit:BTCUSDT joined the VPS promotion gate** (COL-29 follow-up). The
+collector's bybit subscribe list gained `orderbook.50.{symbol}` — WITHOUT it
+(the deployed binary's blind spot) a bybit recording would lack the gate's
+required `book` stream and fail every day. Rebuilt both binaries on the VPS
+(mp-collector 8.9 MB, mp-ops 14.3 MB) and verified live: the fresh mp-ops
+venue-scoped `--require-stream bybit:liquidation` is ignored for hyperliquid
+(clean 0 blocking) while a literal bogus stream blocks — the COL-29 gate
+works as spec'd. Bybit WS egress confirmed from the VPS (HTTP 101). The
+install itself (binary → `/opt/money-printer/bin`, unit
+`mp-collector@BTCUSDT`, gate script `RECORDINGS`) is staged at
+`/home/mp-egress/deploy_bybit.sh` awaiting root approval — the last step
+before `liq.*` features and `liq-fade-v1` get their first real data day.
+
 Still on the menu, in priority order:
 - **[v1.x] veracity event study (RES-4)** — DELIVERED 2026-08-13
   (research/veracity_study_2026-08-13.md): detector output on the cold corpus
@@ -97,11 +123,32 @@ Still on the menu, in priority order:
 - **[v1.x] liquidity-band + tape features** — ✅ DELIVERED 2026-08-13 as
   `book.depth.{pct}` / `book.depth_total.{pct}` (0.5/2/10% of mid) and
   `tape.tps.{tf}` / `tape.bps_delta` (spec 004 catalog, `om_*` tests).
-- **[v1.x] liquidations leg** (Cryexc/OpenMarket gap) — Hyperliquid's public
-  WS has NO liquidation feed; Binance Futures `@forceOrder` does. Needs a
-  collector + `Liquidation` event source decision (venue choice, geo/egress
-  check) + audit wiring — own spec before build (PD-6). Currently the
-  `Liquidation` event only ever arrives from synthetic fixtures.
+- **[v1.x] liquidation-flow features** — ✅ DELIVERED 2026-08-13 as
+  `liq.vol_buy`/`liq.vol_sell` (rolling notional by side), `liq.rate`
+  (rolling event rate), `liq.dist` (liq price-distance from mid, bps) +
+  `liq.delta.{a}_{b}` cross-venue pressure divergence — the first features
+  over the COL-29 real liquidation stream (spec 004 §Liquidation flow,
+  `liq_*`/`liq_delta_*` + `mat_6_liq_flow_*` tests). `liq.delta` shipped
+  the engine seam it needed: **`register_global_tick`** (spec 004 FEA-20) —
+  one instance sees every event, because the per-symbol state model can
+  never hold cross-venue state (the reason `px.divergence`/`leadlag`/
+  `cvd.agg` were never implemented — now unblocked). Strategy-visible in
+  the sim; no-op on hyperliquid (no native liq stream) until a bybit
+  recording joins. Natural next: the cross-venue liq-delta divergence as an
+  input to the liq-fade-v1 cascade filter.
+- **[v1.x] liquidations leg** (Cryexc/OpenMarket gap) — ✅ DELIVERED
+  2026-08-13 as COL-29 (spec 024): the `Liquidation` event has a real
+  source. Ground truth verified live: Binance's public liq paths are all
+  dead from this egress (WS `forceOrder` dropped; `allForceOrders` REST is
+  USER_DATA, 404s without creds), so the **live source is Bybit's public
+  `allLiquidation.` WS topic** (normalizer pinned by `col_29_bybit_*` tests,
+  config example shipped). Binance's signed `allForceOrders` leg
+  (`liq_source="rest"`, HMAC, order-id dedup + update-time resume,
+  FILLED-only) is wired and dead-until-creds (`MP_BINANCE_API_KEY`/
+  `MP_BINANCE_API_SECRET`). The audit gate judges provenance via
+  venue-scoped `--require-stream binance:liquidation` / `bybit:liquidation`.
+  Remaining gap: Hyperliquid has no native liq feed — its liquidation data
+  stays on the on-chain whale census (spec 028).
 - **[v1.x] history-server protocol (BYOD)** — serve the corpus over a thin
   `start_ms/end_ms/limit` HTTP protocol (Cryexc history-spec pattern) so the
   determinism replay queries history exactly like the live loop. `mp-query`

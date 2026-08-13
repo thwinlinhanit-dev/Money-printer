@@ -346,3 +346,85 @@ impl Normalizer for BybitNormalizer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// COL-29 (spec 024): the Bybit public `allLiquidation.` WS topic is the
+    /// real live source for the `Liquidation` event (Binance's public liq
+    /// paths are all dead from this egress — spec 024 incident 08-04 — and
+    /// its REST fallback is a USER_DATA endpoint, credential-gated). Pins the
+    /// array-data shape of the v5 topic.
+    #[test]
+    fn col_29_bybit_all_liquidation_topic_parses() {
+        let mut n = BybitNormalizer::new();
+        let mut out = Vec::new();
+        n.normalize(
+            5_000_000,
+            br#"{"topic":"allLiquidation.BTCUSDT","type":"snapshot","ts":1672304486868,
+                 "data":[{"updatedTime":1672304486868,"symbol":"BTCUSDT","side":"Sell",
+                           "size":"0.100","price":"16651.49"}]}"#,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        let MarketEvent::Liquidation { price, qty, side } = out[0].body else {
+            panic!("expected Liquidation");
+        };
+        assert_eq!(price, 16_651.49);
+        assert_eq!(qty, 0.1);
+        assert_eq!(side, Side::Sell);
+        assert_eq!(out[0].venue, Venue::Bybit);
+        assert_eq!(out[0].exch_ts_ns, 1_672_304_486_868_000_000);
+        assert_eq!(out[0].recv_ts_ns, 5_000_000);
+    }
+
+    /// The deprecated-but-still-served `liquidation.` topic delivers a single
+    /// object (not an array); the normalizer handles both shapes.
+    #[test]
+    fn col_29_bybit_legacy_liquidation_topic_single_object() {
+        let mut n = BybitNormalizer::new();
+        let mut out = Vec::new();
+        n.normalize(
+            6_000_000,
+            br#"{"topic":"liquidation.BTCUSDT","type":"snapshot","ts":1672304486868,
+                 "data":{"symbol":"BTCUSDT","side":"Buy","size":"2.000","price":"16700.00"}}"#,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        let MarketEvent::Liquidation { price, qty, side } = out[0].body else {
+            panic!("expected Liquidation");
+        };
+        assert_eq!(price, 16_700.0);
+        assert_eq!(qty, 2.0);
+        assert_eq!(side, Side::Buy);
+    }
+
+    /// A multi-item array yields one event per liquidation, in order.
+    #[test]
+    fn col_29_bybit_multi_liquidation_array_emits_each() {
+        let mut n = BybitNormalizer::new();
+        let mut out = Vec::new();
+        n.normalize(
+            7_000_000,
+            br#"{"topic":"allLiquidation.BTCUSDT","type":"snapshot","ts":1672304486868,
+                 "data":[
+                   {"symbol":"BTCUSDT","side":"Sell","size":"0.100","price":"16651.49"},
+                   {"symbol":"BTCUSDT","side":"Buy","size":"0.200","price":"16652.00"}
+                 ]}"#,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        let MarketEvent::Liquidation { qty, .. } = out[0].body else {
+            panic!("expected Liquidation");
+        };
+        assert_eq!(qty, 0.1);
+        let MarketEvent::Liquidation { qty, .. } = out[1].body else {
+            panic!("expected Liquidation");
+        };
+        assert_eq!(qty, 0.2);
+    }
+}

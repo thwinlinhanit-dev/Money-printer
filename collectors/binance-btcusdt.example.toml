@@ -16,6 +16,17 @@ trade_source = "rest"
 # Independent of trade_source so either stream can be restored without
 # disturbing the other.
 mark_source = "rest"
+# COL-29: "ws" (default) or "rest". REST mode ingests liquidations from
+# fapi/v1/allForceOrders (order-id dedup + update-time resume, ~10s) and
+# suppresses WS forceOrder — closes the last Binance stream with no fallback
+# under the egress filter. NOTE: allForceOrders is a USER_DATA endpoint, NOT
+# public market data (verified 2026-08-13: it 404s without credentials while
+# every public fapi endpoint answers). It requires a read-only futures API
+# key via env: MP_BINANCE_API_KEY + MP_BINANCE_API_SECRET. Without both, the
+# collector refuses to start (dead-until-creds, like p1-webhook). For a
+# credential-free liquidation source from this egress, use the Bybit venue
+# (collectors/bybit-btcusdt.example.toml).
+# liq_source = "rest"
 # Egress proxy for the WS connection (spec 024 incident 08-04): use this when
 # the venue edge geo-filters this network (fstream drops non-book streams from
 # some regions). Supported: "http://host:port" (HTTP CONNECT) and

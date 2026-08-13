@@ -212,9 +212,24 @@ fn audit_config(args: &[String], venue: Venue, symbol: &str) -> Result<AuditConf
         }
         config.max_gap_ns = seconds.saturating_mul(1_000_000_000);
     }
-    config.required_streams = flags(args, "--require-stream")
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    // `--require-stream` accepts either a bare stream name (required for
+    // EVERY recording in the scorecard) or `venue:stream` (required only
+    // for that venue's recordings). Venue-scoped requirements are what
+    // let the gate demand `liquidation` on Binance/Bybit recordings
+    // without breaking venues that have no native liq stream (e.g.
+    // Hyperliquid — spec 024, COL-29).
+    for value in flags(args, "--require-stream") {
+        match value.split_once(':') {
+            Some((venue_str, stream)) if !stream.is_empty() => {
+                if parse_venue(venue_str).ok() == Some(venue) {
+                    config.required_streams.insert(stream.to_owned());
+                }
+            }
+            _ => {
+                config.required_streams.insert(value);
+            }
+        }
+    }
     Ok(config)
 }
 
@@ -2496,5 +2511,38 @@ mod tests {
         .unwrap();
         assert!(manifest["days"]["2026-08-13"]["sources"]["hyperliquid:BTC"]["size"].as_u64().unwrap() > 0);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// COL-29 (spec 024): `--require-stream venue:stream` applies only to that
+    /// venue's recordings — a bare stream applies to all. This is what lets
+    /// the gate demand `liquidation` on Binance/Bybit without breaking
+    /// Hyperliquid, which has no native liq stream by design.
+    #[test]
+    fn require_stream_venue_scoping_applies_per_venue() {
+        let args = vec![
+            "--require-stream".to_string(),
+            "trade".to_string(),
+            "--require-stream".to_string(),
+            "binance:liquidation".to_string(),
+            "--require-stream".to_string(),
+            "bybit:liquidation".to_string(),
+        ];
+        let binance = audit_config(&args, Venue::BinanceFutures, "BTCUSDT").unwrap();
+        assert!(binance.required_streams.contains("trade"));
+        assert!(
+            binance.required_streams.contains("liquidation"),
+            "binance recording must require its liquidation stream"
+        );
+        let bybit = audit_config(&args, Venue::Bybit, "BTCUSDT").unwrap();
+        assert!(bybit.required_streams.contains("liquidation"));
+        let hl = audit_config(&args, Venue::Hyperliquid, "BTC").unwrap();
+        assert!(hl.required_streams.contains("trade"));
+        assert!(
+            !hl.required_streams.contains("liquidation"),
+            "hyperliquid has no native liquidation stream; must not be required"
+        );
+        // An unknown venue name in a scoped flag is ignored, not fatal.
+        let ok = audit_config(&args, Venue::Okx, "BTC-USDT").unwrap();
+        assert!(!ok.required_streams.contains("liquidation"));
     }
 }

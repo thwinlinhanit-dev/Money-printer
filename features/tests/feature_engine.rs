@@ -3,7 +3,7 @@
 use mp_core::{EventEnvelope, MarketEvent, Side, SnapshotReason, SymbolId, Venue};
 use mp_features::catalog::*;
 use mp_features::{
-    Cond, FeatureEngine, FeatureUpdate, Op, Rule, Screener, WhaleNet, WhaleNetDelta,
+    Cond, FeatureEngine, FeatureUpdate, LiqDelta, Op, Rule, Screener, WhaleNet, WhaleNetDelta,
 };
 use smallvec::smallvec;
 
@@ -567,6 +567,165 @@ fn om_4_tape_tps_counts_per_bar() {
     assert_eq!(value(&e, &fin, "tape.tps.1s"), Some(6.0));
 }
 
+// ---- liq.* liquidation flow (COL-29 real liq source, spec 004) -------------
+
+fn liq(recv: i64, price: f64, qty: f64, side: Side) -> EventEnvelope {
+    EventEnvelope::new(
+        Venue::Bybit,
+        SymbolId(0),
+        recv,
+        recv,
+        0,
+        MarketEvent::Liquidation { price, qty, side },
+    )
+}
+
+#[test]
+fn liq_1_vol_by_side_accumulates_and_window_expires() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(LiqVol::new(300 * SEC, Side::Buy)))
+        .register_tick(|| Box::new(LiqVol::new(300 * SEC, Side::Sell)));
+    // Accumulate updates so the persistent per-side readings stay visible
+    // (a feature only re-emits when its own side is touched).
+    let mut all = Vec::new();
+    all.extend(e.on_event(&liq(1, 100.0, 2.0, Side::Buy)));
+    assert_eq!(value(&e, &all, "liq.vol_buy"), Some(200.0));
+    assert!(value(&e, &all, "liq.vol_sell").is_none(), "sell side untouched");
+    all.extend(e.on_event(&liq(2, 101.0, 3.0, Side::Sell)));
+    assert_eq!(value(&e, &all, "liq.vol_sell"), Some(303.0));
+    // Buy sum keeps its own window (not netted against the sell side).
+    all.extend(e.on_event(&liq(200 * SEC, 100.0, 0.5, Side::Buy)));
+    assert_eq!(value(&e, &all, "liq.vol_buy"), Some(250.0));
+    assert_eq!(value(&e, &all, "liq.vol_sell"), Some(303.0));
+    // 305s later the t=1 buy has left the 300s window; the t=200s buy stays.
+    all.extend(e.on_event(&liq(305 * SEC, 100.0, 1.0, Side::Buy)));
+    assert_eq!(value(&e, &all, "liq.vol_buy"), Some(50.0 + 100.0));
+}
+
+#[test]
+fn liq_2_rate_is_events_per_second_in_window() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(LiqRate::new(100 * SEC)));
+    let mut ups = Vec::new();
+    for t in [10, 20, 30, 40] {
+        ups.extend(e.on_event(&liq(t * SEC, 100.0, 1.0, Side::Sell)));
+    }
+    // 4 events in a 100s window = 0.04 /s.
+    assert!((value(&e, &ups, "liq.rate").unwrap() - 0.04).abs() < 1e-9);
+    // At t=150 all four have left the window: 1 / 100s = 0.01 /s.
+    ups.extend(e.on_event(&liq(150 * SEC, 100.0, 1.0, Side::Buy)));
+    assert!((value(&e, &ups, "liq.rate").unwrap() - 0.01).abs() < 1e-9);
+}
+
+#[test]
+fn liq_3_dist_measures_price_gap_from_mid_in_bps() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(LiqDist::default()));
+    // mid = 100.5 (book helper: 100/101 touch).
+    e.on_event(&book(1, &[(100.0, 6.0)], &[(101.0, 2.0)]));
+    let u = e.on_event(&liq(2, 99.0, 1.0, Side::Sell));
+    let d = value(&e, &u, "liq.dist").unwrap();
+    assert!((d - 149.25).abs() < 0.01, "|99-100.5|/100.5 x10000 = {d}");
+    // At mid the distance is zero.
+    let u2 = e.on_event(&liq(3, 100.5, 1.0, Side::Buy));
+    assert_eq!(value(&e, &u2, "liq.dist"), Some(0.0));
+}
+
+#[test]
+fn liq_4_dist_silent_while_book_stale() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(LiqDist::default()));
+    e.on_event(&book(1, &[(100.0, 6.0)], &[(101.0, 2.0)]));
+    let u = e.on_event(&liq(2, 99.0, 1.0, Side::Sell));
+    assert!(value(&e, &u, "liq.dist").is_some());
+    // Gap delta -> stale -> silent (FEA-8, same BookMirror contract).
+    let gap = EventEnvelope::new(
+        Venue::Bybit,
+        SymbolId(0),
+        3,
+        3,
+        105,
+        MarketEvent::BookDelta {
+            bids: smallvec![(100.0, 9.0)],
+            asks: smallvec![],
+            first_seq: 105,
+            last_seq: 105,
+        },
+    );
+    let ups = e.on_event(&gap);
+    assert!(value(&e, &ups, "liq.dist").is_none());
+}
+
+fn liq_at(recv: i64, price: f64, qty: f64, side: Side, venue: Venue) -> EventEnvelope {
+    EventEnvelope::new(
+        venue,
+        SymbolId(0),
+        recv,
+        recv,
+        0,
+        MarketEvent::Liquidation { price, qty, side },
+    )
+}
+
+#[test]
+fn liq_delta_1_divergence_when_venues_disagree() {
+    let mut e = FeatureEngine::new(SEC);
+    // Global registration: the divergence needs ONE instance seeing both venues.
+    e.register_global_tick(|| Box::new(LiqDelta::new(300 * SEC, Venue::Bybit, Venue::Okx)));
+    // Bybit squeezes shorts (buy liqs), Okx dumps longs (sell liqs).
+    let mut all = Vec::new();
+    all.extend(e.on_event(&liq_at(1, 100.0, 5.0, Side::Buy, Venue::Bybit))); // +500
+    all.extend(e.on_event(&liq_at(2, 100.0, 3.0, Side::Sell, Venue::Okx))); //  -300
+    // (500 - 0) - (0 - 300) = 800
+    assert_eq!(value(&e, &all, "liq.delta.bybit_okx"), Some(800.0));
+    // A sell liq on bybit partially cancels venue a's pressure.
+    all.extend(e.on_event(&liq_at(3, 100.0, 1.0, Side::Sell, Venue::Bybit)));
+    // (500 - 100) - (0 - 300) = 700
+    assert_eq!(value(&e, &all, "liq.delta.bybit_okx"), Some(700.0));
+}
+
+#[test]
+fn liq_delta_2_sync_venues_near_zero() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_global_tick(|| Box::new(LiqDelta::new(300 * SEC, Venue::Bybit, Venue::Okx)));
+    // Both venues dump the SAME amount: no divergence (the venues agree).
+    let mut all = Vec::new();
+    all.extend(e.on_event(&liq_at(1, 100.0, 5.0, Side::Sell, Venue::Bybit)));
+    all.extend(e.on_event(&liq_at(2, 100.0, 5.0, Side::Sell, Venue::Okx)));
+    assert_eq!(value(&e, &all, "liq.delta.bybit_okx"), Some(0.0));
+    // One venue louder: the divergence IS the imbalance between them.
+    all.extend(e.on_event(&liq_at(3, 100.0, 2.0, Side::Sell, Venue::Bybit)));
+    // (-700) - (-500) = -200
+    assert_eq!(value(&e, &all, "liq.delta.bybit_okx"), Some(-200.0));
+}
+
+#[test]
+fn liq_delta_3_window_expiry_decays_divergence() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_global_tick(|| Box::new(LiqDelta::new(300 * SEC, Venue::Bybit, Venue::Okx)));
+    let mut all = Vec::new();
+    all.extend(e.on_event(&liq_at(1, 100.0, 5.0, Side::Buy, Venue::Bybit))); // +500
+    all.extend(e.on_event(&liq_at(2, 100.0, 3.0, Side::Sell, Venue::Okx))); // -300
+    assert_eq!(value(&e, &all, "liq.delta.bybit_okx"), Some(800.0));
+    // 305s later both have left the 300s window: divergence is zero again.
+    all.extend(e.on_event(&liq_at(305 * SEC, 100.0, 1.0, Side::Buy, Venue::Bybit)));
+    // (100) - (0) = 100
+    assert_eq!(value(&e, &all, "liq.delta.bybit_okx"), Some(100.0));
+}
+
+#[test]
+fn liq_delta_4_ignores_other_events_and_other_venues() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_global_tick(|| Box::new(LiqDelta::new(300 * SEC, Venue::Bybit, Venue::Okx)));
+    let mut all = Vec::new();
+    // Trades and a third venue's liqs must not move the divergence.
+    all.extend(e.on_event(&trade(1, 100.0, 9.0, Side::Buy)));
+    all.extend(e.on_event(&liq_at(2, 100.0, 4.0, Side::Buy, Venue::Hyperliquid)));
+    assert!(value(&e, &all, "liq.delta.bybit_okx").is_none());
+    let u = e.on_event(&liq_at(3, 100.0, 2.0, Side::Sell, Venue::Bybit));
+    assert_eq!(value(&e, &u, "liq.delta.bybit_okx"), Some(-200.0));
+}
+
 #[test]
 fn fea_10_screener_edge_triggers_with_snapshot() {
     let mut e = FeatureEngine::new(SEC);
@@ -608,7 +767,7 @@ fn fea_10_screener_edge_triggers_with_snapshot() {
 
 #[test]
 fn fea_7_features_toml_parses_and_rejects_unknown_keys() {
-    use mp_features::FeaturesConfig;
+    use mp_features::{FeaturesConfig, LiqDeltaParams};
     let toml = r#"
         bar_tf_ns = 60000000000
         [cvd]
@@ -634,6 +793,7 @@ fn fea_7_features_toml_parses_and_rejects_unknown_keys() {
         .unwrap_or_else(|e| panic!("production features.toml must parse: {e}"));
     assert!(!prod_cfg.book_depth.bands.is_empty());
     assert!(prod_cfg.tape.min_bps_delta > 0.0);
+    assert_eq!(prod_cfg.liq_flow.window_ns, 300_000_000_000);
     assert_eq!(cfg.whale_print.min_notional, 300000.0);
     assert_eq!(cfg.whale_net.venues, vec!["hyperliquid", "bybit"]);
     assert_eq!(cfg.whale_net.stale_after_ns, 300_000_000_000);
@@ -649,6 +809,33 @@ fn fea_7_features_toml_parses_and_rejects_unknown_keys() {
         min_notionl = 300000.0
     "#;
     assert!(FeaturesConfig::from_toml(bad).is_err());
+
+    // Cross-venue pair validation (CONV-8 fail-closed): an unknown venue slug
+    // or an identical pair is an engine_from_config error, never a silent
+    // skip or a nonsense self-divergence.
+    use mp_features::engine_from_config;
+    let bad_slug = FeaturesConfig {
+        liq_delta: LiqDeltaParams {
+            pairs: vec![["bybit".into(), "not-a-venue".into()]],
+            ..LiqDeltaParams::default()
+        },
+        ..FeaturesConfig::default()
+    };
+    assert!(engine_from_config(&bad_slug).is_err());
+    let same_pair = FeaturesConfig {
+        liq_delta: LiqDeltaParams {
+            pairs: vec![["bybit".into(), "bybit".into()]],
+            ..LiqDeltaParams::default()
+        },
+        ..FeaturesConfig::default()
+    };
+    assert!(engine_from_config(&same_pair).is_err());
+    // The production pair (bybit x binance) registers cleanly.
+    let prod_cfg_engine = engine_from_config(&prod_cfg).unwrap();
+    assert!(
+        prod_cfg_engine.name_to_id("liq.delta.bybit_binance").is_some(),
+        "production [liq_delta] pair must register"
+    );
 }
 
 #[test]

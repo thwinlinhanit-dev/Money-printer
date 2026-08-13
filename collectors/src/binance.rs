@@ -38,6 +38,14 @@ pub struct BinanceNormalizer {
     /// when a proxy later restores it, suppression keeps the recording
     /// single-source instead of double-recording mark/funding events.
     suppress_ws_mark_price: bool,
+    /// COL-29: when true, WS `forceOrder` frames are dropped here (liquidations
+    /// come exclusively from the REST allForceOrders poller). Same rationale as
+    /// `suppress_ws_trades`/`suppress_ws_mark_price`: fstream silently drops
+    /// the forceOrder stream from this egress (spec 024 incident 2026-08-04)
+    /// and has no REST fallback — this flag closes that gap, and when a proxy
+    /// later restores the WS stream, suppression keeps the recording
+    /// single-source instead of double-recording liquidation events.
+    suppress_ws_liquidations: bool,
 }
 
 impl BinanceNormalizer {
@@ -94,6 +102,12 @@ impl BinanceNormalizer {
     /// normal path).
     pub fn set_suppress_ws_mark_price(&mut self, on: bool) {
         self.suppress_ws_mark_price = on;
+    }
+    /// COL-29: switch liquidation ingestion between the WS `forceOrder` stream
+    /// and the REST allForceOrders poller. Off by default (WS is the normal
+    /// path).
+    pub fn set_suppress_ws_liquidations(&mut self, on: bool) {
+        self.suppress_ws_liquidations = on;
     }
 }
 
@@ -523,6 +537,194 @@ pub fn apply_premium_index(
     ));
 }
 
+/// One Binance futures liquidation as returned by `GET /fapi/v1/allForceOrders`
+/// (COL-29). `order_id` is the venue's order id, which is monotonically
+/// increasing per symbol and shared with regular orders — so it is a valid
+/// dedup key across polls but NOT a density signal (unlike `AggTrade::id`,
+/// gaps carry no meaning and are never reported). `exch_ts_ns` is the order's
+/// update time, used as the resume point for the next poll's `startTime`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForceOrder {
+    pub order_id: u64,
+    pub price: f64,
+    pub qty: f64,
+    pub side: Side,
+    pub exch_ts_ns: i64,
+}
+
+/// Parse the `GET /fapi/v1/allForceOrders` response body (an array of force
+/// orders). Pure, so the dedup logic and event mapping are unit-testable
+/// without HTTP. Only `FILLED` orders are kept: an unfilled/cancelled force
+/// order never closed a position, and the WS `forceOrder` stream is a live
+/// sample while this endpoint is the historical record — FILLED is the common
+/// ground that means "a liquidation actually happened at this price/qty".
+/// Entries are sorted by `time` ascending so the caller's update-time
+/// watermark advances monotonically regardless of venue ordering.
+pub fn parse_force_orders(raw: &serde_json::Value) -> Result<Vec<ForceOrder>, NormError> {
+    let arr = raw
+        .as_array()
+        .ok_or(NormError::Parse("allForceOrders: not an array".into()))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        if str_field(v, "status") != Some("FILLED") {
+            continue;
+        }
+        let order_id = u64_field(v, "orderId").ok_or(NormError::Parse("forceOrder orderId".into()))?;
+        let price = f64_field(v, "avgPrice")
+            .filter(|p| *p > 0.0)
+            .or_else(|| f64_field(v, "price"))
+            .ok_or(NormError::Parse("forceOrder price".into()))?;
+        let qty = f64_field(v, "executedQty")
+            .filter(|q| *q > 0.0)
+            .or_else(|| f64_field(v, "origQty"))
+            .ok_or(NormError::Parse("forceOrder qty".into()))?;
+        let side = match str_field(v, "side") {
+            Some("BUY") => Side::Buy,
+            _ => Side::Sell,
+        };
+        let exch_ts_ns = i64_field(v, "updateTime").map(ms_to_ns).unwrap_or(0);
+        out.push(ForceOrder {
+            order_id,
+            price,
+            qty,
+            side,
+            exch_ts_ns,
+        });
+    }
+    out.sort_by_key(|f| f.exch_ts_ns);
+    Ok(out)
+}
+
+/// Advance the liquidation watermark over a fresh REST batch and return the
+/// new orders plus the count of duplicate order ids skipped (COL-29).
+/// Dedup is by `order_id` (monotonic per symbol); `exch_ts_ns` only advances
+/// the resume point for the next poll's `startTime`. Unlike
+/// [`advance_trade_watermark`] there is deliberately NO gap counter: force
+/// order ids are shared with regular orders, so a jump in ids is not a loss
+/// signal, and the venue guarantees nothing denser than update-time resume.
+pub fn advance_force_order_watermark(
+    watermark: &mut u64,
+    orders: Vec<ForceOrder>,
+) -> (Vec<ForceOrder>, u64) {
+    let mut skipped = 0u64;
+    let mut fresh = Vec::new();
+    for o in orders {
+        if o.order_id <= *watermark {
+            skipped += 1;
+            continue;
+        }
+        *watermark = o.order_id;
+        fresh.push(o);
+    }
+    (fresh, skipped)
+}
+
+/// Binance signed-request signature (COL-29): HMAC-SHA256 of the query
+/// string, hex-encoded lowercase, as required by USER_DATA endpoints. Pure —
+/// pinned by an RFC 4231 test vector so the signed path is verifiable
+/// offline (the live call itself is credential-gated).
+#[cfg(feature = "live-http")]
+pub fn sign_binance_query(query: &str, secret: &str) -> String {
+    use std::fmt::Write as _;
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    let mac = ring::hmac::sign(&key, query.as_bytes());
+    let mut hex = String::with_capacity(mac.as_ref().len() * 2);
+    for byte in mac.as_ref() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Fetch the latest futures liquidations via REST (COL-29):
+/// `GET /fapi/v1/allForceOrders` — the force-order history endpoint that
+/// closes the fstream `forceOrder` WS gap (spec 024 incident 2026-08-04).
+/// This is a USER_DATA endpoint (verified live 2026-08-13: it 404s without
+/// credentials while every public fapi market-data endpoint answers), so it
+/// needs a read-only API key + secret (env `MP_BINANCE_API_KEY` /
+/// `MP_BINANCE_API_SECRET`; the collector refuses to start with
+/// `liq_source=rest` and no credentials — dead-until-creds, like p1-webhook).
+/// With `start_time_ns` the response contains only orders updated at/after
+/// that instant (inclusive) — the caller's update-time watermark resumes
+/// loss-free. `None` fetches the recent window only (a bounded first poll,
+/// not a week of backfill). Shares the 429 => RetryAfter convention (COL-21)
+/// and the REST timeout client, so a sick network bounds the stall instead of
+/// hanging the collector loop.
+#[cfg(feature = "live-http")]
+pub fn fetch_force_orders_blocking(
+    symbol: &str,
+    start_time_ns: Option<i64>,
+    api_key: &str,
+    api_secret: &str,
+) -> Result<Vec<ForceOrder>, Box<dyn std::error::Error + Send + Sync>> {
+    let now_ms = wall_now_ns() / 1_000_000;
+    let mut query = format!("symbol={symbol}&limit=1000&timestamp={now_ms}&recvWindow=5000");
+    if let Some(start_ns) = start_time_ns {
+        query.push_str(&format!("&startTime={}", start_ns / 1_000_000));
+    }
+    let signature = sign_binance_query(&query, api_secret);
+    let url =
+        format!("https://fapi.binance.com/fapi/v1/allForceOrders?{query}&signature={signature}");
+    let resp = rest_client()
+        .get(&url)
+        .header(reqwest::header::HeaderName::from_static("x-mbx-apikey"), api_key)
+        .send()?;
+    let status = resp.status();
+    if status.as_u16() == 429 {
+        let wait = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        tracing::warn!(
+            symbol,
+            retry_after_s = wait,
+            "binance allForceOrders 429 — RetryAfter"
+        );
+        return Err(format!("Binance allForceOrders rate-limited (429); Retry-After {wait}s").into());
+    }
+    if !status.is_success() {
+        // USER_DATA errors are JSON bodies; surface the venue's message so a
+        // bad key/whitelist is diagnosable, never a silent parse failure.
+        let text = resp.text().unwrap_or_default();
+        return Err(format!("Binance allForceOrders HTTP {status}: {text}").into());
+    }
+    let raw: serde_json::Value = resp.json()?;
+    parse_force_orders(&raw).map_err(|e| e.to_string().into())
+}
+
+/// Map REST force orders into `Liquidation` events through the normalizer
+/// (COL-29). The mapping is byte-identical to the WS `forceOrder` branch —
+/// same side rule (`S`), same price/qty — so a REST-fed recording and a
+/// WS-fed recording of the same liquidations grade identically. `recv_ts_ns`
+/// is the poll time (REST-injected stragglers are handled by `monotonicize`).
+pub fn apply_force_orders(
+    normalizer: &mut BinanceNormalizer,
+    symbol: &str,
+    orders: &[ForceOrder],
+    recv_ts_ns: i64,
+    out: &mut Vec<mp_core::EventEnvelope>,
+) {
+    let id = normalizer
+        .symbols_mut()
+        .intern_default(mp_core::Venue::BinanceFutures, symbol);
+    for o in orders {
+        let seq = normalizer.seq();
+        out.push(mp_core::EventEnvelope::new(
+            mp_core::Venue::BinanceFutures,
+            id,
+            o.exch_ts_ns,
+            recv_ts_ns,
+            seq,
+            MarketEvent::Liquidation {
+                price: o.price,
+                qty: o.qty,
+                side: o.side,
+            },
+        ));
+    }
+}
+
 /// Map REST aggTrades into `Trade` events through the normalizer (COL-25).
 /// The mapping is byte-identical to the WS `aggTrade` branch — same side rule
 /// (`m`), same id, same exchange timestamp — so a REST-fed recording and a
@@ -812,6 +1014,12 @@ impl Normalizer for BinanceNormalizer {
                 }
             }
             "forceOrder" => {
+                if self.suppress_ws_liquidations {
+                    tracing::debug!(
+                        "forceOrder frame dropped: REST allForceOrders source active"
+                    );
+                    return Ok(());
+                }
                 let o = d
                     .get("o")
                     .ok_or_else(|| NormError::Parse("bn forceOrder o".into()))?;
@@ -1326,5 +1534,206 @@ mod tests {
         assert_eq!(out2.len(), 2);
         assert!(matches!(out2[0].body, MarketEvent::MarkPrice { .. }));
         assert!(matches!(out2[1].body, MarketEvent::Funding { .. }));
+    }
+
+    #[cfg(feature = "live-http")]
+    #[test]
+    fn col_29_signature_matches_rfc4231_vector() {
+        // RFC 4231 test case 1: key = 0x0b x20, data = "Hi There".
+        // The signature is the exact hex a USER_DATA request would append.
+        let key = "\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}\u{0b}";
+        assert_eq!(
+            sign_binance_query("Hi There", key),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+    }
+
+    #[test]
+    fn col_29_parse_force_orders_from_rest_json() {
+        // Real /fapi/v1/allForceOrders response shape: string prices/qtys, ms
+        // numbers for times, orderId shared with regular orders.
+        let raw: serde_json::Value = serde_json::from_str(
+            r#"[
+              {"orderId":4075018,"symbol":"BTCUSDT","status":"FILLED","clientOrderId":"autoclose-...",
+               "price":"8100.0","avgPrice":"8100.0","origQty":"1.000","executedQty":"1.000",
+               "cumQuote":"8100.0","timeInForce":"IOC","type":"LIMIT","reduceOnly":true,
+               "closePosition":false,"side":"SELL","stopPrice":"0","workingType":"CONTRACT_PRICE",
+               "priceProtect":false,"origType":"LIMIT","time":1587582000000,"updateTime":1587582000000},
+              {"orderId":4075019,"symbol":"BTCUSDT","status":"FILLED","clientOrderId":"autoclose-...",
+               "price":"8120.0","avgPrice":"0","origQty":"0.500","executedQty":"0.500",
+               "cumQuote":"4060.0","timeInForce":"IOC","type":"LIMIT","reduceOnly":true,
+               "closePosition":false,"side":"BUY","stopPrice":"0","workingType":"CONTRACT_PRICE",
+               "priceProtect":false,"origType":"LIMIT","time":1587582060000,"updateTime":1587582060000}
+            ]"#,
+        )
+        .unwrap();
+        let orders = parse_force_orders(&raw).unwrap();
+        assert_eq!(orders.len(), 2);
+        // avgPrice=0 falls back to price; side maps BUY/SELL.
+        assert_eq!(orders[0].order_id, 4075018);
+        assert_eq!(orders[0].price, 8100.0);
+        assert_eq!(orders[0].qty, 1.0);
+        assert_eq!(orders[0].side, Side::Sell);
+        assert_eq!(orders[0].exch_ts_ns, 1_587_582_000_000_000_000);
+        assert_eq!(orders[1].price, 8120.0);
+        assert_eq!(orders[1].side, Side::Buy);
+        // Sorted ascending by update time regardless of venue order.
+        assert!(orders[0].exch_ts_ns <= orders[1].exch_ts_ns);
+    }
+
+    #[test]
+    fn col_29_parse_force_orders_skips_non_filled_and_rejects_non_array() {
+        // CANCELED/NEW force orders never closed a position — filtered out so
+        // the recording only ever sees realized liquidations.
+        let raw: serde_json::Value = serde_json::from_str(
+            r#"[
+              {"orderId":1,"status":"FILLED","price":"8100","avgPrice":"8100","origQty":"1","executedQty":"1","side":"SELL","updateTime":1587582000000},
+              {"orderId":2,"status":"CANCELED","price":"8200","avgPrice":"8200","origQty":"1","executedQty":"0","side":"SELL","updateTime":1587582060000},
+              {"orderId":3,"status":"NEW","price":"8300","avgPrice":"8300","origQty":"1","executedQty":"0","side":"BUY","updateTime":1587582120000}
+            ]"#,
+        )
+        .unwrap();
+        let orders = parse_force_orders(&raw).unwrap();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].order_id, 1);
+
+        let not_array: serde_json::Value = serde_json::from_str(r#"{"msg":"bad"}"#).unwrap();
+        assert!(parse_force_orders(&not_array).is_err());
+    }
+
+    #[test]
+    fn col_29_watermark_dedup_across_polls() {
+        // orderId is monotonic per symbol but shared with regular orders, so
+        // dedup by id only — no gap counting (unlike trades).
+        let mut watermark = 0u64;
+        let batch1 = vec![
+            ForceOrder {
+                order_id: 10,
+                price: 8100.0,
+                qty: 1.0,
+                side: Side::Sell,
+                exch_ts_ns: 1_000_000_000,
+            },
+            ForceOrder {
+                order_id: 11,
+                price: 8120.0,
+                qty: 0.5,
+                side: Side::Buy,
+                exch_ts_ns: 2_000_000_000,
+            },
+        ];
+        let (fresh, skipped) = advance_force_order_watermark(&mut watermark, batch1);
+        assert_eq!(fresh.len(), 2);
+        assert_eq!(skipped, 0);
+        assert_eq!(watermark, 11);
+
+        // Next poll returns the overlap (updateTime >= resume) plus one new.
+        let batch2 = vec![
+            ForceOrder {
+                order_id: 11,
+                price: 8120.0,
+                qty: 0.5,
+                side: Side::Buy,
+                exch_ts_ns: 2_000_000_000,
+            },
+            ForceOrder {
+                order_id: 12,
+                price: 8150.0,
+                qty: 2.0,
+                side: Side::Sell,
+                exch_ts_ns: 3_000_000_000,
+            },
+        ];
+        let (fresh2, skipped2) = advance_force_order_watermark(&mut watermark, batch2);
+        assert_eq!(fresh2.len(), 1);
+        assert_eq!(fresh2[0].order_id, 12);
+        assert_eq!(skipped2, 1, "overlap duplicate skipped");
+        assert_eq!(watermark, 12);
+    }
+
+    #[test]
+    fn col_29_rest_force_orders_match_ws_normalization() {
+        // The same liquidation through the WS forceOrder branch and through
+        // apply_force_orders must produce identical event bodies — a mixed or
+        // migrated recording grades the same either way.
+        let mut n = BinanceNormalizer::new();
+        let mut out = Vec::new();
+        n.normalize(
+            1,
+            br#"{"e":"forceOrder","E":2,"o":{"s":"BTCUSDT","S":"SELL","o":"LIMIT","f":"IOC","q":"1.000","p":"8100.0","ap":"8100.0","X":"FILLED","l":"1.000","z":"1.000","T":1587582000000}}"#,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        let MarketEvent::Liquidation {
+            price,
+            qty,
+            side,
+        } = out[0].body
+        else {
+            panic!("expected Liquidation");
+        };
+        let ws = (price, qty, side);
+
+        let mut n2 = BinanceNormalizer::new();
+        let mut out2 = Vec::new();
+        apply_force_orders(
+            &mut n2,
+            "BTCUSDT",
+            &[ForceOrder {
+                order_id: 4075018,
+                price: 8100.0,
+                qty: 1.0,
+                side: Side::Sell,
+                exch_ts_ns: 1_587_582_000_000_000_000,
+            }],
+            7_000_000,
+            &mut out2,
+        );
+        assert_eq!(out2.len(), 1);
+        let MarketEvent::Liquidation {
+            price,
+            qty,
+            side,
+        } = out2[0].body
+        else {
+            panic!("expected Liquidation");
+        };
+        assert_eq!(ws, (price, qty, side));
+        // Envelope: exchange time = order update time, recv = poll time.
+        assert_eq!(out2[0].exch_ts_ns, 1_587_582_000_000_000_000);
+        assert_eq!(out2[0].recv_ts_ns, 7_000_000);
+    }
+
+    #[test]
+    fn col_29_suppress_ws_liquidations_drops_frames_but_rest_path_flows() {
+        let mut n = BinanceNormalizer::new();
+        n.set_suppress_ws_liquidations(true);
+        let mut out = Vec::new();
+        n.normalize(
+            1,
+            br#"{"e":"forceOrder","E":2,"o":{"s":"BTCUSDT","S":"SELL","o":"LIMIT","f":"IOC","q":"1.000","p":"8100.0","ap":"8100.0","X":"FILLED","l":"1.000","z":"1.000","T":1587582000000}}"#,
+            &mut out,
+        )
+        .unwrap();
+        assert!(out.is_empty(), "WS forceOrder suppressed in rest mode");
+
+        // The REST path still emits the same Liquidation.
+        let mut out2 = Vec::new();
+        apply_force_orders(
+            &mut n,
+            "BTCUSDT",
+            &[ForceOrder {
+                order_id: 4075018,
+                price: 8100.0,
+                qty: 1.0,
+                side: Side::Sell,
+                exch_ts_ns: 1_587_582_000_000_000_000,
+            }],
+            7_000_000,
+            &mut out2,
+        );
+        assert_eq!(out2.len(), 1);
+        assert!(matches!(out2[0].body, MarketEvent::Liquidation { .. }));
     }
 }

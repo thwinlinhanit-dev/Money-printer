@@ -24,13 +24,15 @@ pub mod whale;
 use mp_core::Venue;
 
 pub use bar::{Bar, BarBuilder};
-pub use catalog::{BookDepth, BookDepthKind, TapeBpsDelta, TapeTps};
-pub use config::{BookDepthParams, ConfigError, FeaturesConfig, TapeParams};
+pub use catalog::{BookDepth, BookDepthKind, LiqDist, LiqRate, LiqVol, TapeBpsDelta, TapeTps};
+pub use config::{
+    BookDepthParams, ConfigError, FeaturesConfig, LiqDeltaParams, LiqFlowParams, TapeParams,
+};
 pub use engine::{BarFeature, FeatureEngine, FeatureUpdate, Locality, TickFeature};
 pub use hit_journal::{HitJournal, HitRecord};
 pub use leverage::{calibrate_leverage_weights, tier_leverages, LeverageTierCalibration};
 pub use liquidation::{
-    band_accuracy, BandAccuracy, BandObservation, LiqAgg, LiqEstBands, WhaleBandStudy,
+    band_accuracy, BandAccuracy, BandObservation, LiqAgg, LiqDelta, LiqEstBands, WhaleBandStudy,
 };
 pub use screener::{Cond, Op, Rule, Screener, ScreenerHit};
 pub use whale::{WhaleNet, WhaleNetDelta};
@@ -100,6 +102,33 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
     for &pct in &cfg.book_depth.bands {
         e.register_tick(move || Box::new(BookDepth::new(pct, BookDepthKind::Gauge)));
         e.register_tick(move || Box::new(BookDepth::new(pct, BookDepthKind::Total)));
+    }
+    // Liquidation flow (COL-29 real liq source): rolling notional by side +
+    // rolling event rate over the shared window, plus liq price-distance
+    // from mid. No-op on venues without a liquidation stream (hyperliquid
+    // today) until one with a native liq source joins the required set.
+    let liq_w = cfg.liq_flow.window_ns;
+    e.register_tick(move || Box::new(LiqVol::new(liq_w, mp_core::Side::Buy)));
+    e.register_tick(move || Box::new(LiqVol::new(liq_w, mp_core::Side::Sell)));
+    e.register_tick(move || Box::new(LiqRate::new(liq_w)));
+    e.register_tick(|| Box::new(LiqDist::default()));
+    // Cross-venue liquidation-pressure divergence: one instance per pair.
+    for pair in &cfg.liq_delta.pairs {
+        let a = Venue::from_slug(&pair[0]).ok_or_else(|| {
+            ConfigError::Parse(format!("liq_delta.pairs: unknown venue slug '{}'", pair[0]))
+        })?;
+        let b = Venue::from_slug(&pair[1]).ok_or_else(|| {
+            ConfigError::Parse(format!("liq_delta.pairs: unknown venue slug '{}'", pair[1]))
+        })?;
+        if a == b {
+            return Err(ConfigError::Parse(format!(
+                "liq_delta.pairs: identical venues {a:?} — a divergence needs two distinct venues"
+            )));
+        }
+        let w = cfg.liq_delta.window_ns;
+        // Global: ONE instance must see both venues (spec 004 FEA-20 — the
+        // per-symbol model cannot hold cross-venue state).
+        e.register_global_tick(move || Box::new(LiqDelta::new(w, a, b)));
     }
     // Tape micro-stats: per-trade bps delta (tick) + per-bar TPS (bar).
     let min_bps = cfg.tape.min_bps_delta;

@@ -94,6 +94,127 @@ impl TickFeature for LiqAgg {
         Some(self.sum)
     }
 }
+/// One rolling window per (venue, side) — the per-venue liquidation sums the
+/// cross-venue divergence reads. Venue-level by design: the merged event
+/// stream re-interns symbols per `(venue, venue_symbol)` (EVT-8), so a
+/// feature cannot match "the same coin" across venues by `SymbolId` — the
+/// honest v1 aggregates all symbols per venue (same convention as `liq.agg`).
+/// Per-symbol cross-venue identity needs name-keyed events (engine change,
+/// spec 004 decision note) and is v2.
+#[derive(Default)]
+struct SideWindow {
+    buf: VecDeque<(i64, f64)>,
+    sum: f64,
+}
+impl SideWindow {
+    /// Evict entries older than `window_ns` relative to `ts`. Called at BOTH
+    /// push and read: a (venue, side) window with no new events must still
+    /// decay, or the divergence would serve stale sums forever (liq_delta_3
+    /// regression — the cross-venue feature reads ALL four windows at every
+    /// event, including ones the event did not touch).
+    fn prune(&mut self, ts: i64, window_ns: i64) {
+        while let Some(&(t, x)) = self.buf.front() {
+            if ts - t > window_ns {
+                self.sum -= x;
+                self.buf.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+    /// Push (ts, notional) after pruning; returns the new rolling sum.
+    fn push(&mut self, ts: i64, v: f64, window_ns: i64) -> f64 {
+        self.prune(ts, window_ns);
+        self.buf.push_back((ts, v));
+        self.sum += v;
+        self.sum
+    }
+    /// Prune to `ts` and return the as-of rolling sum.
+    fn sum_at(&mut self, ts: i64, window_ns: i64) -> f64 {
+        self.prune(ts, window_ns);
+        self.sum
+    }
+}
+
+/// `liq.delta.{a}_{b}` — cross-venue liquidation-pressure divergence
+/// (COL-29 cascade detection, spec 004 §Liquidation flow):
+/// `(Σbuy_a − Σsell_a) − (Σbuy_b − Σsell_b)` over the rolling window, all
+/// symbols per venue. Large |delta| = the two venues DISAGREE on who is being
+/// forced out — venue a squeezing shorts while venue b dumps longs (positive)
+/// or the mirror (negative). Near zero = the venues are in sync (both dumping
+/// longs, or both quiet) — no divergence to trade. The "buy-side on one venue
+/// vs sell-side on another" reading the user asked for is the special case
+/// where each venue is one-sided. Emits on every liquidation event from
+/// either venue of the pair.
+pub struct LiqDelta {
+    window_ns: i64,
+    a: Venue,
+    b: Venue,
+    buy: BTreeMap<Venue, SideWindow>,
+    sell: BTreeMap<Venue, SideWindow>,
+}
+impl LiqDelta {
+    pub fn new(window_ns: i64, a: Venue, b: Venue) -> Self {
+        Self {
+            window_ns,
+            a,
+            b,
+            buy: BTreeMap::new(),
+            sell: BTreeMap::new(),
+        }
+    }
+}
+impl TickFeature for LiqDelta {
+    fn id(&self) -> String {
+        // Underscore between venues — matches the spec's pairwise convention
+        // (`px.divergence.{a}_{b}`, `basis.{a}_{b}`, `leadlag.{a}_{b}.{w}`)
+        // so downstream prefix matching is uniform.
+        format!("liq.delta.{}_{}", self.a.slug(), self.b.slug())
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        let MarketEvent::Liquidation { price, qty, side } = ev.body else {
+            return None;
+        };
+        if ev.venue != self.a && ev.venue != self.b {
+            return None;
+        }
+        let notional = price * qty;
+        let w = self.window_ns;
+        let ts = ev.recv_ts_ns;
+        match side {
+            Side::Buy => {
+                self.buy.entry(ev.venue).or_default().push(ts, notional, w);
+            }
+            Side::Sell => {
+                self.sell.entry(ev.venue).or_default().push(ts, notional, w);
+            }
+        }
+        // As-of divergence: prune EVERY window to this event's time so a
+        // (venue, side) with no new events decays too (liq_delta_3).
+        let (ba, sa) = (
+            self.buy
+                .get_mut(&self.a)
+                .map(|sw| sw.sum_at(ts, w))
+                .unwrap_or(0.0),
+            self.sell
+                .get_mut(&self.a)
+                .map(|sw| sw.sum_at(ts, w))
+                .unwrap_or(0.0),
+        );
+        let (bb, sb) = (
+            self.buy
+                .get_mut(&self.b)
+                .map(|sw| sw.sum_at(ts, w))
+                .unwrap_or(0.0),
+            self.sell
+                .get_mut(&self.b)
+                .map(|sw| sw.sum_at(ts, w))
+                .unwrap_or(0.0),
+        );
+        Some((ba - sa) - (bb - sb))
+    }
+}
+
 /// `liq.est_bands` — estimated liquidation cascade bands (LIQ-2, LIQ-6).
 pub struct LiqEstBands {
     maintenance_buffer: f64,

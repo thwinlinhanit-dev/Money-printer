@@ -25,15 +25,18 @@
 
 use mp_core::log::LogReader;
 use mp_core::{EventEnvelope, Venue};
-use mp_features::catalog::{BookDepth, BookDepthKind, Cvd, FundingRate, TapeBpsDelta};
+use mp_features::catalog::{
+    BookDepth, BookDepthKind, Cvd, FundingRate, LiqDist, LiqRate, LiqVol, TapeBpsDelta,
+};
+use mp_features::LiqDelta;
 use mp_features::FeatureEngine;
 use mp_sim::{
     monte_carlo, plateau_ok, Backtester, MetricsSummary, PaperSession, RunRecord, SimConfig,
     WalkForwardParams, WindowResult,
 };
 use mp_strategies::{
-    CarryConfig, CarryV1, CoinFlipStrategy, NullStrategy, OrderflowConfig, OrderflowV1, Strategy,
-    Universe,
+    CarryConfig, CarryV1, CoinFlipStrategy, LiqFadeConfig, LiqFadeV1, NullStrategy,
+    OrderflowConfig, OrderflowV1, Strategy, Universe,
 };
 use std::io::Write;
 use std::process::ExitCode;
@@ -116,8 +119,26 @@ fn strategy_named(
                 cfg,
             )))
         }
+        // liq-fade-v1: fade a liquidation cascade after exhaustion (liq.*
+        // features). entry/exit thresholds map to entry_dist_bps (stretch
+        // floor) and exit_dist_bps (reversion target).
+        "liq-fade-v1" => {
+            let uni = universe_from_events(events);
+            let mut cfg = LiqFadeConfig::default();
+            if let Some(et) = entry_threshold {
+                cfg.entry_dist_bps = et;
+            }
+            if let Some(xt) = exit_threshold {
+                cfg.exit_dist_bps = xt;
+            }
+            Ok(Box::new(LiqFadeV1::new(
+                mp_core::StrategyId::new("liq-fade-v1"),
+                uni,
+                cfg,
+            )))
+        }
         other => Err(format!(
-            "unknown strategy: {other} (coinflip|null|carry-v1|orderflow-v1)"
+            "unknown strategy: {other} (coinflip|null|carry-v1|orderflow-v1|liq-fade-v1)"
         )),
     }
 }
@@ -139,6 +160,22 @@ fn engine() -> FeatureEngine {
         e.register_tick(move || Box::new(BookDepth::new(pct, BookDepthKind::Total)));
     }
     e.register_tick(|| Box::new(TapeBpsDelta::default()));
+    // Liquidation flow (COL-29 real liq source, spec 004 §Liquidation flow):
+    // rolling notional by side + rolling event rate over a 5-minute window,
+    // plus liq price-distance from mid. No-op while no recording carries a
+    // liquidation stream (hyperliquid today) — they light up when a bybit
+    // recording joins.
+    e.register_tick(|| Box::new(LiqVol::new(300_000_000_000, mp_core::Side::Buy)));
+    e.register_tick(|| Box::new(LiqVol::new(300_000_000_000, mp_core::Side::Sell)));
+    e.register_tick(|| Box::new(LiqRate::new(300_000_000_000)));
+    e.register_tick(|| Box::new(LiqDist::default()));
+    // Cross-venue liquidation-pressure divergence (spec 004 §Liquidation
+    // flow): bybit vs binance — the two COL-29 liq-capable venues. No-op
+    // until both legs record. Global registration: one instance must see
+    // both venues (spec 023 FEA-20).
+    e.register_global_tick(|| {
+        Box::new(LiqDelta::new(300_000_000_000, Venue::Bybit, Venue::BinanceFutures))
+    });
     e
 }
 

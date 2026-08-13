@@ -18,7 +18,7 @@ path = "src/lib.rs"
 live-ws = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:url", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 # Live HTTP client for REST snapshot fetches (spec 020). Separate from live-ws
 # so snapshot fetch can be added independently.
-live-http = ["dep:reqwest"]
+live-http = ["dep:reqwest", "dep:ring"]
 
 [dependencies]
 mp-core = { path = "../core" }
@@ -36,6 +36,10 @@ webpki-roots = { version = "0.26", optional = true }
 futures-util = { version = "0.3", optional = true }
 url = { version = "2", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"], optional = true }
+# HMAC-SHA256 for Binance USER_DATA signed requests (COL-29 allForceOrders
+# liquidation fetch). Same crate family the TLS stack already vendors; kept
+# optional behind live-http since only the signed REST path needs it.
+ring = { version = "0.17", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]

@@ -299,6 +299,133 @@ impl TickFeature for LiqCluster {
     }
 }
 
+// ---- liquidation flow (COL-29 real liq source, spec 004 §Liquidation flow) -
+
+/// `liq.vol_buy` / `liq.vol_sell` — rolling Σ liquidation notional for one
+/// side within `window_ns`. Emits the rolling sum each time a liquidation of
+/// that side arrives (a buy-side liquidation is the venue buying back the
+/// liquidated short — volume flow into the book; sell-side is longs being
+/// dumped). Mirrors the `LiqCluster` window mechanics but per-side and
+/// absolute, so the two sides can diverge instead of netting.
+pub struct LiqVol {
+    window_ns: i64,
+    side: Side,
+    buf: VecDeque<(i64, f64)>,
+    sum: f64,
+}
+impl LiqVol {
+    pub fn new(window_ns: i64, side: Side) -> Self {
+        Self {
+            window_ns,
+            side,
+            buf: VecDeque::new(),
+            sum: 0.0,
+        }
+    }
+}
+impl TickFeature for LiqVol {
+    fn id(&self) -> String {
+        match self.side {
+            Side::Buy => "liq.vol_buy".into(),
+            Side::Sell => "liq.vol_sell".into(),
+        }
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if let MarketEvent::Liquidation { price, qty, side } = ev.body {
+            if side == self.side {
+                let notional = price * qty;
+                self.buf.push_back((ev.recv_ts_ns, notional));
+                self.sum += notional;
+                while let Some(&(ts, v)) = self.buf.front() {
+                    if ev.recv_ts_ns - ts > self.window_ns {
+                        self.sum -= v;
+                        self.buf.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                return Some(self.sum);
+            }
+        }
+        None
+    }
+}
+
+/// `liq.rate` — rolling liquidation event rate (liquidations/second) within
+/// `window_ns`. Emits on each liquidation; the intensity reading complementing
+/// the notional sums (`liq.vol_*`) — many small liquidations vs few big ones.
+pub struct LiqRate {
+    window_ns: i64,
+    ts: VecDeque<i64>,
+}
+impl LiqRate {
+    pub fn new(window_ns: i64) -> Self {
+        Self {
+            window_ns,
+            ts: VecDeque::new(),
+        }
+    }
+}
+impl TickFeature for LiqRate {
+    fn id(&self) -> String {
+        "liq.rate".into()
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if matches!(ev.body, MarketEvent::Liquidation { .. }) {
+            self.ts.push_back(ev.recv_ts_ns);
+            while let Some(&t) = self.ts.front() {
+                if ev.recv_ts_ns - t > self.window_ns {
+                    self.ts.pop_front();
+                } else {
+                    break;
+                }
+            }
+            let secs = self.window_ns as f64 / 1_000_000_000.0;
+            return Some(self.ts.len() as f64 / secs);
+        }
+        None
+    }
+}
+
+/// `liq.dist` — liquidation price-distance from mid, in bps, at the moment
+/// the liquidation prints: `|liq_price − mid| / mid × 10_000`. How far from
+/// fair value the cascade is hitting (a wide gap = the book got pushed, or
+/// the venue's marking is far from the touch). Silent while the book is stale
+/// or one-sided (FEA-8).
+pub struct LiqDist {
+    book: BookMirror,
+}
+impl LiqDist {
+    pub fn new() -> Self {
+        Self {
+            book: BookMirror::new(),
+        }
+    }
+}
+impl Default for LiqDist {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl TickFeature for LiqDist {
+    fn id(&self) -> String {
+        "liq.dist".into()
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        self.book.apply(&ev.body);
+        if let MarketEvent::Liquidation { price, .. } = ev.body {
+            if self.book.is_stale() {
+                return None; // FEA-8: never read a gapped book
+            }
+            let mid = self.book.mid()?;
+            if mid > 0.0 {
+                return Some((price - mid).abs() / mid * 10_000.0);
+            }
+        }
+        None
+    }
+}
+
 // ---- derivatives passthrough ------------------------------------------------
 
 /// `funding.{venue}` — passthrough of the funding rate.

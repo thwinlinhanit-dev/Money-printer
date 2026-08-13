@@ -15,11 +15,20 @@ use std::path::{Path, PathBuf};
 const DAY0: i64 = 1_783_728_000_000_000_000; // 2026-07-11T00:00:00Z
 
 fn write_log(path: &Path, table: &SymbolTable, events: &[(i64, SymbolId, MarketEvent)]) {
+    write_log_at(path, table, events, Venue::Bybit);
+}
+
+fn write_log_at(
+    path: &Path,
+    table: &SymbolTable,
+    events: &[(i64, SymbolId, MarketEvent)],
+    venue: Venue,
+) {
     let (mut w, _) = EventLogWriter::open(path).unwrap();
     w.write_symbols(table.metas()).unwrap();
     for (i, (ts, sym, body)) in events.iter().enumerate() {
         w.append(&EventEnvelope::new(
-            Venue::Bybit,
+            venue,
             *sym,
             *ts - 1,
             *ts,
@@ -156,6 +165,145 @@ fn mat_6_materialize_writes_layout_and_roundtrips() {
     assert_eq!(meta.engine_git_sha, "abc123");
     assert_eq!(meta.feature_ver, 1, "default cvd feature ver");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// COL-29 (spec 024): a recording that carries Liquidation events must
+/// materialize the liq.* flow features end-to-end — per-side rolling
+/// notional, event rate, and price-distance from mid — proving the
+/// feature-store path, not just unit-level emission.
+#[test]
+fn mat_6_liq_flow_features_materialize_from_liquidation_log() {
+    let dir = tmpdir("liqflow");
+    let log = dir.join("day.log");
+    let table = bybit_btc_table();
+    let mut evs: Vec<(i64, SymbolId, MarketEvent)> = vec![(
+        DAY0,
+        SymbolId(0),
+        MarketEvent::BookSnapshot {
+            bids: vec![(100.0, 6.0)].into(),
+            asks: vec![(101.0, 2.0)].into(),
+            seq: 100,
+            depth: 2,
+            reason: mp_core::SnapshotReason::Init,
+        },
+    )];
+    for (i, (price, qty, side)) in
+        [(100.0, 2.0, Side::Buy), (101.0, 3.0, Side::Sell), (99.0, 1.0, Side::Buy)]
+            .into_iter()
+            .enumerate()
+    {
+        evs.push((
+            DAY0 + (i as i64 + 1) * 1_000_000_000,
+            SymbolId(0),
+            MarketEvent::Liquidation { price, qty, side },
+        ));
+    }
+    write_log(&log, &table, &evs);
+
+    let out = dir.join("features");
+    let mut cfg = FeaturesConfig::default();
+    cfg.liq_flow.window_ns = 300_000_000_000;
+    let stats = materialize_logs(&out, &cfg, std::slice::from_ref(&log), "abc123").unwrap();
+    assert!(stats.nan_suppressed == 0);
+
+    for feat in ["liq.vol_buy", "liq.vol_sell", "liq.rate", "liq.dist"] {
+        let parquet = out
+            .join(feat)
+            .join("ver=0")
+            .join("venue=bybit")
+            .join("symbol=0")
+            .join("2026-07-11.parquet");
+        assert!(parquet.exists(), "{feat} file missing");
+        assert!(
+            !read_features(&parquet).unwrap().is_empty(),
+            "{feat} must have materialized rows"
+        );
+    }
+    // vol_buy rolls 100x2 + 99x1 = 299; the sell-side 101x3 = 303 is separate.
+    let buy = read_features(
+        &out.join("liq.vol_buy")
+            .join("ver=0")
+            .join("venue=bybit")
+            .join("symbol=0")
+            .join("2026-07-11.parquet"),
+    )
+    .unwrap();
+    assert_eq!(buy.last().unwrap().value, 299.0);
+    let rate = read_features(
+        &out.join("liq.rate")
+            .join("ver=0")
+            .join("venue=bybit")
+            .join("symbol=0")
+            .join("2026-07-11.parquet"),
+    )
+    .unwrap();
+    assert_eq!(rate.last().unwrap().value, 3.0 / 300.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// COL-29 (spec 004 §Liquidation flow): the cross-venue `liq.delta.{a}_{b}`
+/// divergence materializes from TWO venue logs — proving the global feature
+/// seam (spec 023 FEA-20) works through the real merge path, not just the
+/// unit-level engine. Bybit squeezes shorts, Okx dumps longs → positive
+/// divergence on the merged day.
+#[test]
+fn mat_6_cross_venue_liq_delta_materializes_from_two_logs() {
+    let dir = tmpdir("liqdelta");
+    let bybit_log = dir.join("bybit.log");
+    let okx_log = dir.join("okx.log");
+    let mut bybit_t = SymbolTable::new();
+    bybit_t.intern_default(Venue::Bybit, "BTCUSDT");
+    let mut okx_t = SymbolTable::new();
+    okx_t.intern_default(Venue::Okx, "BTC-USDT");
+    // Bybit: buy (shorts squeezed) 100x5 = 500. Okx: sell (longs dumped)
+    // 100x3 = 300. Same recv clock so the windows overlap.
+    let bybit_evs: Vec<(i64, SymbolId, MarketEvent)> = vec![(
+        DAY0 + 1_000_000_000,
+        SymbolId(0),
+        MarketEvent::Liquidation {
+            price: 100.0,
+            qty: 5.0,
+            side: Side::Buy,
+        },
+    )];
+    let okx_evs: Vec<(i64, SymbolId, MarketEvent)> = vec![(
+        DAY0 + 2_000_000_000,
+        SymbolId(0),
+        MarketEvent::Liquidation {
+            price: 100.0,
+            qty: 3.0,
+            side: Side::Sell,
+        },
+    )];
+    write_log_at(&bybit_log, &bybit_t, &bybit_evs, Venue::Bybit);
+    write_log_at(&okx_log, &okx_t, &okx_evs, Venue::Okx);
+
+    let out = dir.join("features");
+    let mut cfg = FeaturesConfig::default();
+    cfg.liq_delta.pairs = vec![["bybit".into(), "okx".into()]];
+    let logs = [bybit_log.clone(), okx_log.clone()];
+    let stats = materialize_logs(&out, &cfg, &logs, "abc123").unwrap();
+    assert!(stats.nan_suppressed == 0);
+    let feat = "liq.delta.bybit_okx";
+    let files = walk_parquet(&out);
+    assert!(
+        files.iter().any(|p| p.to_string_lossy().contains(feat)),
+        "{feat} parquet missing: {files:?}"
+    );
+// One row per venue's liquidation, each stamped with the divergence AS OF
+    // that event: bybit buy (t+1s, okx hasn't sold yet) → (500-0)-(0-0) =
+    // 500; okx sell (t+2s) → (500-0)-(0-300) = 800. The cross-venue state
+    // lives in ONE global instance across both symbols — the FEA-20 seam.
+    let mut rows_all = Vec::new();
+    for f in &files {
+        if f.to_string_lossy().contains(feat) {
+            rows_all.extend(read_features(f).unwrap());
+        }
+    }
+    rows_all.sort_by_key(|r| r.ts_ns);
+    let values: Vec<f64> = rows_all.iter().map(|r| r.value).collect();
+    assert_eq!(values, vec![500.0, 800.0], "as-of divergence per event");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -9,10 +9,12 @@
 pub mod carry_v1;
 pub mod examples;
 pub mod funnel;
+pub mod liq_fade_v1;
 pub mod orderflow_v1;
 pub mod strategy;
 
 pub use carry_v1::{CarryConfig, CarryV1};
+pub use liq_fade_v1::{LiqFadeConfig, LiqFadeV1};
 pub use orderflow_v1::{OrderflowConfig, OrderflowV1};
 pub use examples::{CoinFlipStrategy, NullStrategy};
 pub use funnel::{

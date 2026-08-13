@@ -10,6 +10,8 @@ Trading strategy trait and concrete strategy implementations. Each strategy has 
 - `src/carry_v1.rs` — carry strategy implementation
 - `src/orderflow_v1.rs` — order-flow imbalance strategy (book.depth gauge +
   tape.bps_delta alignment, spec 004/006)
+- `src/liq_fade_v1.rs` — liquidation-fade strategy (liq.vol_*/liq.dist
+  cascade exhaustion fade, spec 004/006; data gate: needs a bybit recording)
 - `src/funnel.rs` — funnel aggregator
 - `src/examples.rs` — example strategies
 - `src/bin/funnel.rs` — funnel CLI binary

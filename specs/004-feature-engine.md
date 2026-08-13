@@ -121,6 +121,27 @@ update (no intra-bar repaint — repainting features are banned).
   `cluster_window_s` (default 10s) ≥ `cluster_min_notional`; value = notional,
   sign = side being liquidated (− for longs liquidated).
 
+**Liquidation flow** (COL-29 real liq source, spec 024; require a venue with
+a liquidation stream — bybit today, binance credential-gated)
+- `liq.vol_buy` / `liq.vol_sell` — rolling Σ liquidation notional for one
+  side within `liq_flow.window_ns` (default 5 min). Per-side and absolute, so
+  the two sides diverge instead of netting; buy-side = the venue buying back
+  liquidated shorts, sell-side = longs being dumped.
+- `liq.rate` — rolling liquidation event rate (events/second) over the same
+  window — intensity, complementing the notional sums (many small vs few big).
+- `liq.dist` — liquidation price-distance from mid in bps,
+  |liq_price − mid|/mid × 10_000 at the moment the liquidation prints; how
+  far from fair value the cascade hits. Silent while the book is stale (FEA-8).
+- `liq.delta.{a}_{b}` — cross-venue liquidation-pressure divergence
+  `(Σbuy_a − Σsell_a) − (Σbuy_b − Σsell_b)` over the rolling window, all
+  symbols per venue (GLOBAL feature, FEA-20). Large |delta| = the venues
+  DISAGREE on who is being forced out (venue a squeezing shorts while venue
+  b dumps longs → positive; mirror → negative); near zero = in sync. The
+  "buy-side on one venue vs sell-side on another" reading is the special
+  case where each venue is one-sided. Venue-level because the merged stream
+  has no cross-venue symbol identity (EVT-8); per-symbol cross-venue needs
+  name-keyed events — v2.
+
 **Cross-venue**
 - `px.divergence.{a}_{b}` — (mid_a − mid_b)/mid_b, 1s samples.
 - `leadlag.{a}_{b}.{w}` — argmax cross-correlation lag of 1s returns over
@@ -146,6 +167,13 @@ update (no intra-bar repaint — repainting features are banned).
 - **FEA-6** Materialization MUST write the feature store layout with footer
   metadata {feature ver, engine git sha, params hash}; changed params/version
   ⇒ new directory (`ver=N`), never overwrite (W-6).
+- **FEA-20** Cross-venue/symbol features MUST register as GLOBAL tick
+  features (`register_global_tick`): ONE instance receives every event,
+  because the per-symbol state model keys by `SymbolId` and cross-venue
+  symbols are distinct ids (EVT-8 re-intern per (venue, name)) — a
+  per-symbol instance can never see both venues. Global outputs are stamped
+  with the triggering event's venue/symbol and run after per-symbol ticks in
+  registration order (deterministic update order, spec 018).
 - **FEA-7** All catalog params (windows, thresholds) MUST live in one
   `features.toml` (deny_unknown_fields), hashed into materialization metadata.
 - **FEA-8** Book-derived features MUST refuse to emit while BookMirror is
@@ -174,6 +202,27 @@ update (no intra-bar repaint — repainting features are banned).
   `om_4_tape_tps_counts_per_bar`. Book bands use resting NOTIONAL (p·q), not
   raw qty — the gauge is unit-consistent across assets (OpenMarket USD
   normalization).
+- 2026-08-13 (impl): `liq.vol_buy`/`liq.vol_sell`, `liq.rate`, `liq.dist`
+  added to the catalog (liquidation flow over the COL-29 real liq source).
+  `[liq_flow]` config section (shared rolling window); registered in
+  `engine_from_config` and strategy-visible in the sim (`sim/src/bin/sim.rs`
+  `engine()`). No-op on venues without a liquidation stream (hyperliquid
+  today) — the features light up when a bybit recording joins. Tested:
+  `liq_1_vol_by_side_*`, `liq_2_rate_*`, `liq_3_dist_*`, `liq_4_dist_silent
+  _while_book_stale`, and the end-to-end materialize path
+  `mat_6_liq_flow_features_materialize_from_liquidation_log`.
+- 2026-08-13 (impl): `liq.delta.{a}_{b}` cross-venue liquidation-pressure
+  divergence + the engine seam it needed — `register_global_tick` (FEA-20),
+  because the per-symbol state model cannot hold cross-venue state (this is
+  why `px.divergence`/`leadlag`/`cvd.agg` were never implemented). Two real
+  bugs caught by tests: (1) the id format `liq.delta.{a}.{b}` used dots
+  where the pairwise convention is underscores (`liq.delta.bybit_okx`); (2)
+  windows only pruned on push, so a venue with no new events served stale
+  sums forever — now prune-at-read (`sum_at`). `[liq_delta]` config section
+  (window + pairs, fail-closed on unknown/identical slugs); registered
+  global in `engine_from_config` + sim. Tested: `liq_delta_1..4`,
+  `mat_6_cross_venue_liq_delta_materializes_from_two_logs` (two venue logs
+  through the real merge path: 500 as-of at bybit's event, 800 after okx).
 - 2026-07-10: features output scalar f64 only in v1 (categoricals encoded as
   small ints); vector-valued features deferred.
 - 2026-07-10 (impl): implemented spec 004 BEFORE 005 (deviating from the

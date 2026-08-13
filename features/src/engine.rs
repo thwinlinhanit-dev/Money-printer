@@ -97,6 +97,16 @@ pub struct FeatureEngine {
     bar_factories: Vec<BarFactory>,
     bar_tf_ns: i64,
     per_symbol: BTreeMap<SymbolId, SymbolState>,
+    /// Global tick feature factories: ONE instance total, fed EVERY event
+    /// (any symbol/venue). The per-symbol model keys state by `SymbolId`, and
+    /// cross-venue symbols are distinct ids (EVT-8 re-intern per (venue,
+    /// name)) — so any feature that must compare state ACROSS venues or
+    /// symbols (liq.delta.{a}_{b}, px.divergence, leadlag, cvd.agg) cannot
+    /// live in per-symbol state; it registers here instead (spec 004 FEA-20).
+    global_factories: Vec<TickFactory>,
+    globals: Vec<Box<dyn TickFeature>>,
+    global_ids: Vec<SymbolId>,
+    global_names: Vec<String>,
     /// FEA-5: non-finite outputs suppressed (never emitted downstream).
     nan_suppressed: u64,
     /// Feature name intern table (spec 023 FEA-17): name → SymbolId.
@@ -115,6 +125,10 @@ impl FeatureEngine {
             bar_factories: Vec::new(),
             bar_tf_ns,
             per_symbol: BTreeMap::new(),
+            global_factories: Vec::new(),
+            globals: Vec::new(),
+            global_ids: Vec::new(),
+            global_names: Vec::new(),
             nan_suppressed: 0,
             name_to_id: BTreeMap::new(),
             id_to_name: BTreeMap::new(),
@@ -166,12 +180,21 @@ impl FeatureEngine {
     /// process MUST treat as a startup error (offline features never run
     /// live). Empty ⇒ safe to go live. Offline/backtest runners skip this.
     pub fn offline_only_features(&self) -> Vec<String> {
-        self.tick_factories
+        let mut out: Vec<String> = self
+            .tick_factories
             .iter()
             .map(|f| f())
             .filter(|f| f.locality() == Locality::Offline)
             .map(|f| f.id())
-            .collect()
+            .collect();
+        out.extend(
+            self.global_factories
+                .iter()
+                .map(|f| f())
+                .filter(|f| f.locality() == Locality::Offline)
+                .map(|f| f.id()),
+        );
+        out
     }
 
     /// Register a tick-feature factory (one instance is built per symbol).
@@ -184,6 +207,37 @@ impl FeatureEngine {
         self.intern(&name);
         self.tick_factories.push(Box::new(f));
         self
+    }
+
+    /// Register a GLOBAL tick-feature factory: ONE instance receives every
+    /// event regardless of symbol/venue (spec 004 FEA-20 — the cross-venue
+    /// seam). Same name interning at setup as `register_tick`. A global
+    /// feature must be venue/symbol-agnostic in its *state* (it may still
+    /// key its own internal maps by venue/symbol); its output is stamped
+    /// with the triggering event's venue/symbol.
+    pub fn register_global_tick(
+        &mut self,
+        f: impl Fn() -> Box<dyn TickFeature> + 'static,
+    ) -> &mut Self {
+        let sample = f();
+        let name = sample.id();
+        self.intern(&name);
+        self.global_factories.push(Box::new(f));
+        self
+    }
+
+    /// Lazily materialize the global feature instances on first event (they
+    /// are built ONCE, not per symbol).
+    fn ensure_globals(&mut self) {
+        if !self.globals.is_empty() || self.global_factories.is_empty() {
+            return;
+        }
+        let names: Vec<String> = self.global_factories.iter().map(|f| f().id()).collect();
+        let ids: Vec<SymbolId> = names.iter().map(|n| self.intern(n)).collect();
+        let globals: Vec<Box<dyn TickFeature>> = self.global_factories.iter().map(|f| f()).collect();
+        self.global_names = names;
+        self.global_ids = ids;
+        self.globals = globals;
     }
 
     /// Register a bar-feature factory.
@@ -283,6 +337,36 @@ impl FeatureEngine {
                             ver: st.bars[i].ver(),
                         });
                     }
+                }
+            }
+        }
+        // Global (cross-venue) tick features: ONE instance, fed every event.
+        // Runs after the per-symbol ticks in registration order (deterministic
+        // update order — spec 018). Outputs are stamped with THIS event's
+        // venue/symbol so downstream rows are per-symbol as usual (FEA-20).
+        self.ensure_globals();
+        for i in 0..self.globals.len() {
+            let fid = self.global_ids[i];
+            if let Some(v) = self.globals[i].on_event(ev) {
+                if !v.is_finite() {
+                    suppressed += 1;
+                    tracing::warn!(
+                        feature = %self.global_names[i],
+                        symbol = sym.0,
+                        "non-finite global feature output suppressed (FEA-5)"
+                    );
+                    continue;
+                }
+                if self.globals[i].warm() {
+                    out.push(FeatureUpdate {
+                        feature: fid,
+                        name: self.global_names[i].clone(),
+                        venue,
+                        symbol: sym,
+                        ts_ns: ts,
+                        value: v,
+                        ver: self.globals[i].ver(),
+                    });
                 }
             }
         }

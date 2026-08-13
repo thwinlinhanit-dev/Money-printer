@@ -229,3 +229,38 @@ authenticated trading, strategy changes, and long-running hosting policy.
   flow again. Fix remains the egress proxy (`MP_WS_PROXY` / config `proxy`,
   transport shipped 08-04); runbook: `ops/runbooks/ws-egress-filter.md`,
   probe: `ops/scripts/ws_probe.mjs`.
+- 2026-08-13 (COL-29): the `Liquidation` event gets a REAL source, and the
+  audit gate judges its provenance.  Ground truth verified live on this
+  egress: Binance's public liquidation paths are ALL dead — the WS
+  `forceOrder` stream is dropped (2026-08-06 probe) AND `GET
+  /fapi/v1/allForceOrders` is a USER_DATA endpoint, not public market data:
+  it 404s without credentials while every public fapi endpoint
+  (aggTrades/premiumIndex/openInterest) answers.  The credential-free live
+  source is **Bybit's public `allLiquidation.`/`liquidation.` WS topics**
+  (egress-compatible per 08-08 probe; normalizer + collector subscription
+  already existed per spec 002 — now pinned by `col_29_bybit_*` tests and
+  documented in `collectors/bybit-btcusdt.example.toml`).  For Binance
+  specifically, `liq_source = "rest"` (config or `--liq-source`;
+  independent of `trade_source`/`mark_source`) polls the USER_DATA endpoint
+  every 10s with an update-time `startTime` resume point and order-id dedup,
+  emitting `Liquidation` envelopes byte-identical to the WS `forceOrder`
+  branch (avgPrice-or-price, executedQty-or-origQty, `S` side, `updateTime`
+  as the exchange timestamp); only `FILLED` orders are kept (an
+  unfilled/cancelled force order never closed a position).  The leg is
+  signed (HMAC-SHA256, `sign_binance_query`, RFC 4231-vector-pinned) and
+  **dead-until-creds**: without `MP_BINANCE_API_KEY`/`MP_BINANCE_API_SECRET`
+  the collector refuses to start — never a silent 404 loop (p1-webhook
+  idiom).  WS forceOrder frames are suppressed at the normalizer when REST
+  is the source (same single-source rule as COL-27/28).  Unlike `aggTrades`,
+  `orderId` is shared with regular orders, so gaps carry NO meaning: the
+  poller dedups by id and never invents a `sequence_gap` (the endpoint's
+  honest loss signal is simply an empty page, which is normal between
+  liquidations).  The audit gate now accepts venue-scoped requirements —
+  `--require-stream binance:liquidation` (also `bybit:liquidation`) — so a
+  Binance/Bybit recording must show the `liquidation` stream every recorded
+  day without imposing it on venues that have no native liq stream
+  (Hyperliquid; its liquidation data comes from the on-chain whale census,
+  spec 028).  Verified: 9 `col_29_*` unit tests (parse, FILLED filter,
+  watermark dedup, REST==WS body-equality, suppression, Bybit topic shapes,
+  signature vector) + mp-ops venue-scoping test; gate wiring in
+  `daily_pipeline.ps1` and `daily_maintenance.sh`.

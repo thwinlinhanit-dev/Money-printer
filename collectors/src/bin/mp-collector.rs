@@ -56,6 +56,15 @@ mod inner {
         /// restored without disturbing the other.
         #[serde(default)]
         mark_source: Option<String>,
+        /// COL-29: `"ws"` (default) or `"rest"`. REST mode ingests
+        /// liquidations from `GET /fapi/v1/allForceOrders` (order-id dedup +
+        /// update-time resume) and drops WS forceOrder frames at the
+        /// normalizer — the recovery path when fstream silently drops the
+        /// forceOrder stream (spec 024 incident 2026-08-04; forceOrder had NO
+        /// REST fallback before this). Independent of `trade_source`/
+        /// `mark_source` so each stream can be restored separately.
+        #[serde(default)]
+        liq_source: Option<String>,
         /// Egress proxy for the WS connection (spec 024 2026-08-04):
         /// `http://host:port` (HTTP CONNECT) or `socks5://host:port`.  The
         /// `MP_WS_PROXY` env var overrides this when set.  The proxy only
@@ -140,6 +149,7 @@ mod inner {
             backpressure: None,
             trade_source: binutil::flag(args, "--trade-source"),
             mark_source: binutil::flag(args, "--mark-source"),
+            liq_source: binutil::flag(args, "--liq-source"),
             proxy: std::env::var("MP_WS_PROXY").ok(),
             currency: binutil::flag(args, "--currency"),
             record_ticker: None,
@@ -218,8 +228,14 @@ mod inner {
 
     fn subscribe_for(venue: &str, symbol: &str, hip3_symbols: &[String]) -> Vec<String> {
         match venue {
+            // Bybit v5 linear perp topics (public, no credentials):
+            //   publicTrade.{symbol}  trades
+            //   orderbook.50.{symbol}  book (depth 50; the audit gate requires
+            //     the `book` stream on every recording — spec 024)
+            //   tickers.{symbol}  funding/mark_price/open_interest
+            //   liquidation.{symbol}  liquidation (COL-29, the real liq source)
             "bybit" => vec![format!(
-                r#"{{"op":"subscribe","args":["publicTrade.{symbol}","tickers.{symbol}","liquidation.{symbol}"]}}"#
+                r#"{{"op":"subscribe","args":["publicTrade.{symbol}","orderbook.50.{symbol}","tickers.{symbol}","liquidation.{symbol}"]}}"#
             )],
             // Binance uses combined-stream URL (streams baked into path) — no
             // SUBSCRIBE frame needed. Empty here on purpose.
@@ -752,10 +768,20 @@ mod inner {
                 .into())
             }
         };
+        let liq_source = match config.liq_source.as_deref() {
+            None | Some("ws") => "ws",
+            Some("rest") => "rest",
+            Some(other) => {
+                return Err(format!(
+                    "invalid liq_source {other:?}: expected \"ws\" or \"rest\" (COL-29)"
+                )
+                .into())
+            }
+        };
         #[cfg(not(feature = "live-http"))]
-        if trade_source == "rest" || mark_source == "rest" {
+        if trade_source == "rest" || mark_source == "rest" || liq_source == "rest" {
             return Err(
-                "trade_source=rest/mark_source=rest requires the live-http feature (COL-25/28)"
+                "trade_source=rest/mark_source=rest/liq_source=rest requires the live-http feature (COL-25/28/29)"
                     .into(),
             );
         }
@@ -848,6 +874,56 @@ mod inner {
             tracing::info!(symbol = %symbol, "mark source: REST premiumIndex (WS markPriceUpdate suppressed)");
         }
 
+        // COL-29: Binance allForceOrders is a USER_DATA endpoint, so the REST
+        // liq leg is credential-gated. Read the credentials once here; the
+        // gate below validates them and the poll loop reuses the bindings
+        // (env never changes mid-run — PD-3 reads only at the edge). Plain
+        // env reads, so they compile in every feature set; only the poll loop
+        // that uses them is live-http-gated.
+        let binance_liq_api_key: Option<String> = std::env::var("MP_BINANCE_API_KEY").ok();
+        let binance_liq_api_secret: Option<String> = std::env::var("MP_BINANCE_API_SECRET").ok();
+        if liq_source == "rest" {
+            // COL-29: liquidations come exclusively from the REST allForceOrders
+            // poller below; WS forceOrder frames are dropped at the normalizer
+            // (same rationale as COL-27/28 — a degraded or restored WS liq
+            // stream must never double-record). allForceOrders is a USER_DATA
+            // endpoint (404s without credentials while every public fapi
+            // endpoint answers — verified 2026-08-13), so the leg is
+            // dead-until-creds, never a silent 404 loop: without both env vars
+            // the collector refuses to start.
+            let Some(api_key) = &binance_liq_api_key else {
+                return Err(
+                    "liq_source=rest requires MP_BINANCE_API_KEY + MP_BINANCE_API_SECRET: \
+                     GET /fapi/v1/allForceOrders is a USER_DATA endpoint, not public market \
+                     data (spec 024 COL-29). Wired but dead until credentials exist — \
+                     create a read-only futures API key and set both env vars."
+                        .into(),
+                );
+            };
+            let Some(api_secret) = &binance_liq_api_secret else {
+                return Err(
+                    "liq_source=rest requires MP_BINANCE_API_KEY + MP_BINANCE_API_SECRET: \
+                     GET /fapi/v1/allForceOrders is a USER_DATA endpoint, not public market \
+                     data (spec 024 COL-29). Wired but dead until credentials exist."
+                        .into(),
+                );
+            };
+            let norm = streams[0].collector.normalizer_mut();
+            if let Some(bn) = norm
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<BinanceNormalizer>())
+            {
+                bn.set_suppress_ws_liquidations(true);
+            } else {
+                return Err("liq_source=rest requires a Binance normalizer (COL-29)".into());
+            }
+            tracing::info!(
+                symbol = %symbol,
+                "liq source: REST allForceOrders (signed USER_DATA; WS forceOrder suppressed)"
+            );
+            let _ = (api_key, api_secret);
+        }
+
         let raw_dir = Path::new(&config.data_dir).join("raw");
         std::fs::create_dir_all(&raw_dir)?;
         // Held for process lifetime — prevents dual-writer log corruption.
@@ -888,6 +964,18 @@ mod inner {
         let mut last_mark_poll = std::time::Instant::now();
         #[cfg(feature = "live-http")]
         let mark_poll_interval = Duration::from_secs(15);
+        // COL-29: REST allForceOrders poll cadence. Liquidations are sparse
+        // (dozens/hour at most on BTC), so 10s is a faithful cadence; the
+        // update-time watermark resumes loss-free across polls and dedups by
+        // order id. Weight 20 per request (symbol-scoped endpoint).
+        #[cfg(feature = "live-http")]
+        let mut last_liq_poll = std::time::Instant::now();
+        #[cfg(feature = "live-http")]
+        let liq_poll_interval = Duration::from_secs(10);
+        #[cfg(feature = "live-http")]
+        let mut last_liq_order_id: u64 = 0;
+        #[cfg(feature = "live-http")]
+        let mut last_liq_time_ns: i64 = 0;
 
         let heartbeat_path = raw_dir.join(format!("mp-collector-{venue}-{symbol}.heartbeat"));
         let mut last_heartbeat = std::time::Instant::now();
@@ -1051,6 +1139,72 @@ mod inner {
                         );
                         streams[0].stamp(&mut event_buffer[before..], SnapshotSource::None);
                         any = true;
+                    }
+                }
+            }
+
+            // COL-29: REST allForceOrders as the liquidation source (fstream
+            // silently drops the forceOrder WS stream from this egress — spec
+            // 024 incident 2026-08-04; previously the one Binance stream with
+            // NO fallback). Emits the same Liquidation bodies the WS branch
+            // would, stamped at poll time. The update-time watermark resumes
+            // loss-free; order-id dedup skips the overlap window.
+            #[cfg(feature = "live-http")]
+            if venue == "binance"
+                && liq_source == "rest"
+                && (last_liq_poll.elapsed() >= liq_poll_interval || current_date.is_empty())
+            {
+                last_liq_poll = std::time::Instant::now();
+                if !streams[0].rest_budget.try_take(binutil::now_ns(), 20.0) {
+                    tracing::debug!("liq poll skipped: REST rate budget empty (COL-21)");
+                } else if let (Some(api_key), Some(api_secret)) =
+                    (&binance_liq_api_key, &binance_liq_api_secret)
+                {
+                    if let Ok(batch) = mp_collectors::binance::fetch_force_orders_blocking(
+                        &symbol,
+                        // Resume at the last update time seen; the first poll takes
+                        // only the recent window (the endpoint defaults to a 7-day
+                        // lookback — a live leg should not backfill weeks).
+                        if last_liq_time_ns > 0 {
+                            Some(last_liq_time_ns)
+                        } else {
+                            Some(binutil::now_ns() - 3_600_000_000_000)
+                        },
+                        api_key,
+                        api_secret,
+                    ) {
+                        let recv_ns = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos() as i64;
+                        let (fresh, skipped) = mp_collectors::binance::advance_force_order_watermark(
+                            &mut last_liq_order_id,
+                            batch,
+                        );
+                        if let Some(last) = fresh.last() {
+                            last_liq_time_ns = last.exch_ts_ns;
+                        }
+                        if skipped > 0 {
+                            tracing::debug!(symbol = %symbol, skipped, "allForceOrders overlap dedup");
+                        }
+                        if !fresh.is_empty() {
+                            let before = event_buffer.len();
+                            let norm = streams[0].collector.normalizer_mut();
+                            if let Some(bn) = norm
+                                .as_any_mut()
+                                .and_then(|a| a.downcast_mut::<BinanceNormalizer>())
+                            {
+                                mp_collectors::binance::apply_force_orders(
+                                    bn,
+                                    &symbol,
+                                    &fresh,
+                                    recv_ns,
+                                    &mut event_buffer,
+                                );
+                                streams[0].stamp(&mut event_buffer[before..], SnapshotSource::None);
+                                any = true;
+                            }
+                        }
                     }
                 }
             }

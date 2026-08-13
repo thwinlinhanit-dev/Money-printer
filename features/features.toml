@@ -106,3 +106,19 @@ bands = [0.005, 0.02, 0.1]
 # Tape micro-stats (OpenMarket tape, spec 004 §Order flow): tape.bps_delta
 # (per-trade price change, bps) + tape.tps.{tf} (trades/sec per bar).
 min_bps_delta = 0.5
+
+[liq_flow]
+# Liquidation-flow family (COL-29 real liq source, spec 004 §Liquidation
+# flow): liq.vol_buy/liq.vol_sell (rolling notional by side), liq.rate
+# (rolling event rate), liq.dist (liq price distance from mid, bps). No-op
+# on Hyperliquid (no native liq stream) until a venue with one (bybit)
+# joins the required set.
+window_ns = 300000000000
+
+[liq_delta]
+# Cross-venue liquidation-pressure divergence (spec 004 §Liquidation flow):
+# (buy_a - sell_a) - (buy_b - sell_b) over the window, venue-level. The two
+# liq-capable venues from COL-29 (bybit live, binance credential-gated);
+# no-op until both legs record. Unknown slugs are a hard error.
+window_ns = 300000000000
+pairs = [["bybit", "binance"]]

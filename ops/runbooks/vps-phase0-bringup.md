@@ -4,7 +4,14 @@ Minimal VPS recorder setup whose only goal is the ROADMAP Phase-0 gate: **7
 consecutive clean days, coverage ≥ 0.995, zero `stale_bursts` across the
 qualifying window (spec 024, amendment 2026-08-12 — enforced in `mp-ops
 promote`), required streams `trade book funding mark_price open_interest`,
-recordings `hyperliquid:BTC` + `hyperliquid:ETH`** (ops/core_symbols.txt).
+recordings `hyperliquid:BTC` + `hyperliquid:ETH` + `bybit:BTCUSDT`**
+(daily_maintenance.sh RECORDINGS — the VPS gate's source of truth; the
+Windows-side `ops/core_symbols.txt` deliberately stays hyperliquid-only until
+the Windows collector binary carries the orderbook fix). The bybit leg
+(COL-29, 2026-08-13) is the real live
+source for the `Liquidation` event — its recording must also show the
+`liquidation` stream each day (`--require-stream bybit:liquidation`, venue-
+scoped so hyperliquid — which has no native liq stream — is unaffected).
 
 This is a *host move*, not new software. Everything needed already exists
 in-tree and is green: the collector self-heals WS stalls (COL-2), systemd
@@ -68,15 +75,23 @@ install -m 0600 /dev/null /etc/money-printer/ops.env   # only if Telegram alerts
 
 ## 2. Run — the minimal set
 
-One templated unit per core symbol — the concrete file ships in-tree at
-`ops/systemd/mp-hyperliquid@.service` (venue hardcoded to hyperliquid):
+One templated unit per core symbol — the concrete files ship in-tree at
+`ops/systemd/mp-hyperliquid@.service` (venue hardcoded to hyperliquid) and
+`ops/systemd/mp-collector@.service` (venue hardcoded to bybit, COL-29):
 
 ```sh
-install -m 0644 ops/systemd/mp-hyperliquid@.service /etc/systemd/system/
+install -m 0644 ops/systemd/mp-hyperliquid@.service ops/systemd/mp-collector@.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now mp-hyperliquid@BTC mp-hyperliquid@ETH
-systemctl status 'mp-hyperliquid@*'   # both active, log growing
+systemctl enable --now mp-hyperliquid@BTC mp-hyperliquid@ETH mp-collector@BTCUSDT
+systemctl status 'mp-*@*'   # all three active, log growing
 ```
+
+The bybit unit is what makes the `Liquidation` event real (COL-29, spec 024):
+Bybit's public WS `liquidation.BTCUSDT` topic flows from this egress where
+Binance's liq paths are dead, and its recording carries the full required
+stream set — `publicTrade.` + `orderbook.50.` (the gate's `book` stream; a
+bybit recording from a pre-orderbook-fix binary would fail the gate on the
+missing `book` stream) + `tickers.` (funding/mark/OI) + `liquidation.`.
 
 Optional (not gate-required): `mp-whale` census collector
 (`collectors/whale_positions.toml`) if the whale-study research edge is

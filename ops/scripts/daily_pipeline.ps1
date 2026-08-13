@@ -37,8 +37,9 @@ param(
     # no WS liquidation stream by design - liquidation data comes from the
     # on-chain whale census (`mp-whale`, spec 028, recorded separately) and
     # feeds the liq-est band research edge (spec 029), it is not a required
-    # gate stream.  Re-add "liquidation" when a venue with a native liq
-    # stream (e.g. Bybit, Phase 2) joins the required set.
+    # gate stream.  Venues WITH a liquidation source are required to show it
+    # via venue-scoped requirements below (COL-29: binance/bybit must carry
+    # the `liquidation` stream on every recorded day).
     [string[]]$RequiredStreams = @("trade", "book", "funding", "mark_price", "open_interest")
 )
 
@@ -280,6 +281,20 @@ if (-not (Test-Path $mpOps)) {
 # ---- 1. scorecard (silence tracing: env-filter respects RUST_LOG=off) ------
 $requireArgs = @()
 foreach ($stream in $RequiredStreams) { $requireArgs += "--require-stream"; $requireArgs += $stream }
+# COL-29 (spec 024): venues with a liquidation source must also show the
+# `liquidation` stream on every recorded day. Venue-scoped so Hyperliquid
+# (no native liq stream by design) is unaffected. Bybit delivers it via its
+# public WS liquidation topic (the live leg). Binance's REST allForceOrders
+# leg is USER_DATA — only delivers once MP_BINANCE_API_KEY/SECRET exist
+# (dead-until-creds); the requirement is still correct either way: a Binance
+# recording without liquidations is not promotable.
+$liquidationVenues = @("binance", "bybit")
+foreach ($rec in $Recordings) {
+    $venue = ($rec -split ':')[0]
+    if ($venue -in $liquidationVenues) {
+        $requireArgs += "--require-stream"; $requireArgs += "$venue`:liquidation"
+    }
+}
 $required = @()
 foreach ($rec in $Recordings) { $required += "--required"; $required += $rec }
 

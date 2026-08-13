@@ -300,6 +300,60 @@ impl Default for TapeParams {
     }
 }
 
+/// Params for the `liq.*` liquidation-flow family (COL-29 real liq source,
+/// spec 004 §Liquidation flow): `liq.vol_buy`/`liq.vol_sell` (rolling
+/// notional by side), `liq.rate` (rolling event rate) share one rolling
+/// window; `liq.dist` (liq price distance from mid, bps) needs no params.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiqFlowParams {
+    /// Rolling window (ns) for `liq.vol_*` and `liq.rate`.
+    #[serde(default = "default_liq_flow_window_ns")]
+    pub window_ns: i64,
+}
+
+fn default_liq_flow_window_ns() -> i64 {
+    300_000_000_000 // 5 minutes
+}
+
+impl Default for LiqFlowParams {
+    fn default() -> Self {
+        Self {
+            window_ns: default_liq_flow_window_ns(),
+        }
+    }
+}
+
+/// Params for `liq.delta.{a}_{b}` — cross-venue liquidation-pressure
+/// divergence (spec 004 §Liquidation flow, COL-29 cascade detection):
+/// `(Σbuy_a − Σsell_a) − (Σbuy_b − Σsell_b)` over a rolling window, one
+/// feature instance per configured venue pair. Venue-level (all symbols per
+/// venue) — the merged stream has no cross-venue symbol identity (EVT-8).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiqDeltaParams {
+    /// Rolling window (ns) for the per-venue buy/sell sums.
+    #[serde(default = "default_liq_delta_window_ns")]
+    pub window_ns: i64,
+    /// Venue pairs, e.g. [["bybit", "okx"], ["binance", "bybit"]]. Empty =
+    /// no `liq.delta.*` features registered (fail-closed on unknown slugs).
+    #[serde(default)]
+    pub pairs: Vec<[String; 2]>,
+}
+
+fn default_liq_delta_window_ns() -> i64 {
+    300_000_000_000 // 5 minutes
+}
+
+impl Default for LiqDeltaParams {
+    fn default() -> Self {
+        Self {
+            window_ns: default_liq_delta_window_ns(),
+            pairs: Vec::new(),
+        }
+    }
+}
+
 /// The whole catalog config (FEA-7). One file, all params, no unknown keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -325,6 +379,10 @@ pub struct FeaturesConfig {
     pub book_depth: BookDepthParams,
     #[serde(default)]
     pub tape: TapeParams,
+    #[serde(default)]
+    pub liq_flow: LiqFlowParams,
+    #[serde(default)]
+    pub liq_delta: LiqDeltaParams,
 }
 
 fn default_bar_tf() -> i64 {
@@ -344,6 +402,8 @@ impl Default for FeaturesConfig {
             liq_est_bands: LiqEstBandsParams::default(),
             book_depth: BookDepthParams::default(),
             tape: TapeParams::default(),
+            liq_flow: LiqFlowParams::default(),
+            liq_delta: LiqDeltaParams::default(),
         }
     }
 }

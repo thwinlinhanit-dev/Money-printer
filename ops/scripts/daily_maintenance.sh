@@ -14,7 +14,11 @@ VENV_DIR="/opt/money-printer/.venv"
 # 2026-08-08: Phase-0 venue is hyperliquid (egress is geo-filtered by Binance
 # futures, spec 024). Symbols are bare coin names. Liquidation data comes from
 # the on-chain whale census (spec 028) and is not a required gate stream.
-RECORDINGS="${RECORDINGS:-hyperliquid:BTC hyperliquid:ETH}"
+# 2026-08-13 (COL-29): bybit:BTCUSDT joined the gate set — Bybit's public WS
+# liquidation topic is the real live source for the `Liquidation` event from
+# this egress, and its recording carries the full required stream set (trade
+# book funding mark_price open_interest + liquidation).
+RECORDINGS="${RECORDINGS:-hyperliquid:BTC hyperliquid:ETH bybit:BTCUSDT}"
 REQUIRED_STREAMS="${REQUIRED_STREAMS:-trade book funding mark_price open_interest}"
 
 cd "/opt/money-printer"
@@ -22,6 +26,20 @@ cd "/opt/money-printer"
 require_args=()
 for stream in ${REQUIRED_STREAMS}; do
     require_args+=(--require-stream "$stream")
+done
+# COL-29 (spec 024): venues with a liquidation source must also show the
+# `liquidation` stream every recorded day. Venue-scoped (--require-stream
+# venue:stream) so hyperliquid — which has no native liq stream by design —
+# is unaffected. Bybit delivers it via its public WS liquidation topic (the
+# live leg). Binance's REST allForceOrders leg is USER_DATA — only delivers
+# once MP_BINANCE_API_KEY/SECRET exist (dead-until-creds); the requirement
+# is still correct either way: a Binance recording without liquidations is
+# not promotable.
+for recording in ${RECORDINGS}; do
+    venue="${recording%%:*}"
+    case "$venue" in
+        binance|bybit) require_args+=(--require-stream "${venue}:liquidation") ;;
+    esac
 done
 
 # --- 1. Audit the whole recording matrix before writing any cold data ---

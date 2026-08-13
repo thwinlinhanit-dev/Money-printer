@@ -1,0 +1,22 @@
+# One public-market-data collector owns exactly this venue/symbol recording.
+# Start with:
+# cargo run -p mp-collectors --features live-ws --bin mp-collector -- --config collectors/bybit-btcusdt.example.toml
+#
+# COL-29 (spec 024): Bybit is the real live source for the `Liquidation`
+# event from this egress. Binance's public liq paths are all dead here —
+# the WS `forceOrder` stream is egress-dropped and the REST allForceOrders
+# endpoint is USER_DATA (needs API credentials). Bybit's `liquidation.` /
+# `allLiquidation.` WS topics are PUBLIC and flow from this network (spec
+# 024: Bybit/OKX are the egress-compatible venues). The normalizer maps
+# them to MarketEvent::Liquidation (pinned by col_29 tests); the audit gate
+# requires the stream via `--require-stream bybit:liquidation` when this
+# recording is in the gate set.
+venue = "bybit"
+symbol = "BTCUSDT"
+data_dir = "data"
+channel_capacity = 10000
+backpressure = "drop_oldest"
+# Bybit linear perp topics: publicTrade + orderbook.50 (the gate's `book`
+# stream) + tickers (funding/mark/OI) + liquidation. All public, no
+# credentials.
+#   publicTrade.BTCUSDT  orderbook.50.BTCUSDT  tickers.BTCUSDT  liquidation.BTCUSDT
