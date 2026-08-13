@@ -459,6 +459,114 @@ fn fea_8_book_feature_silent_while_stale() {
     assert!(value(&e, &ups, "imbalance.top").is_none());
 }
 
+// ---- book.depth.* / tape.* (Cryexc/OpenMarket additions, spec 004) ----------
+
+fn book(recv: i64, bids: &[(f64, f64)], asks: &[(f64, f64)]) -> EventEnvelope {
+    let mut b: smallvec::SmallVec<[_; 8]> = smallvec::SmallVec::new();
+    for &(p, q) in bids {
+        b.push((p, q));
+    }
+    let mut a: smallvec::SmallVec<[_; 8]> = smallvec::SmallVec::new();
+    for &(p, q) in asks {
+        a.push((p, q));
+    }
+    EventEnvelope::new(
+        Venue::Bybit,
+        SymbolId(0),
+        recv,
+        recv,
+        100,
+        MarketEvent::BookSnapshot {
+            bids: b,
+            asks: a,
+            seq: 100,
+            depth: 4,
+            reason: SnapshotReason::Init,
+        },
+    )
+}
+
+#[test]
+fn om_1_book_depth_bands_gauge_and_total() {
+    // mid = (100 + 101)/2 = 100.5.
+    // 1% band: bids >= 99.495 → 100×6 only; asks <= 101.505 → 101×2 only.
+    //   gauge = (600-202)/(802) ≈ 0.4963, total = 802.
+    // 10% band: bids >= 90.45 → 100×6 + 95×4 = 980; asks <= 110.55 → 101×2 + 106×3 = 520.
+    //   gauge = (980-520)/(1500) ≈ 0.3067, total = 1500.
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(BookDepth::new(0.01, BookDepthKind::Gauge)))
+        .register_tick(|| Box::new(BookDepth::new(0.01, BookDepthKind::Total)))
+        .register_tick(|| Box::new(BookDepth::new(0.1, BookDepthKind::Gauge)))
+        .register_tick(|| Box::new(BookDepth::new(0.1, BookDepthKind::Total)));
+    let u = e.on_event(&book(
+        1,
+        &[(90.0, 10.0), (95.0, 4.0), (100.0, 6.0)],
+        &[(101.0, 2.0), (106.0, 3.0), (111.0, 5.0)],
+    ));
+    assert!((value(&e, &u, "book.depth.1").unwrap() - 0.496259).abs() < 1e-4);
+    assert!((value(&e, &u, "book.depth_total.1").unwrap() - 802.0).abs() < 1e-9);
+    assert!((value(&e, &u, "book.depth.10").unwrap() - 0.306667).abs() < 1e-4);
+    assert!((value(&e, &u, "book.depth_total.10").unwrap() - 1500.0).abs() < 1e-9);
+}
+
+#[test]
+fn om_2_book_depth_silent_while_stale() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(BookDepth::new(0.01, BookDepthKind::Gauge)));
+    let u = e.on_event(&book(1, &[(100.0, 6.0)], &[(101.0, 2.0)]));
+    assert!(value(&e, &u, "book.depth.1").is_some());
+    // Gap delta → stale → silent (FEA-8, same BookMirror contract).
+    let gap = EventEnvelope::new(
+        Venue::Bybit,
+        SymbolId(0),
+        2,
+        2,
+        105,
+        MarketEvent::BookDelta {
+            bids: smallvec![(100.0, 9.0)],
+            asks: smallvec![],
+            first_seq: 105,
+            last_seq: 105,
+        },
+    );
+    let ups = e.on_event(&gap);
+    assert!(value(&e, &ups, "book.depth.1").is_none());
+}
+
+#[test]
+fn om_3_tape_bps_delta_hides_sub_floor_noise() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(TapeBpsDelta::new(0.5)));
+    let mut ups = e.on_event(&trade(1, 100.0, 1.0, Side::Buy));
+    assert!(value(&e, &ups, "tape.bps_delta").is_none(), "first trade: no prior");
+    ups = e.on_event(&trade(2, 100.0001, 1.0, Side::Buy));
+    assert!(value(&e, &ups, "tape.bps_delta").is_none(), "0.01 bps < 0.5 floor");
+    ups = e.on_event(&trade(3, 100.01, 1.0, Side::Buy));
+    let d = value(&e, &ups, "tape.bps_delta").unwrap();
+    // (100.01-100.0001)/100.0001 × 10000 ≈ 0.99 bps
+    assert!((d - 0.99).abs() < 0.02, "got {d}");
+}
+
+#[test]
+fn om_4_tape_tps_counts_per_bar() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_bar(|| Box::new(TapeTps::new("1s", 1.0)));
+    let mut all = Vec::new();
+    for _ in 0..3 {
+        all.extend(e.on_event(&trade(SEC, 100.0, 1.0, Side::Buy)));
+    }
+    assert!(value(&e, &all, "tape.tps.1s").is_none(), "bar not closed yet");
+    // First trade of the next second closes the 1s bar holding 3 trades.
+    all.extend(e.on_event(&trade(2 * SEC, 100.0, 1.0, Side::Buy)));
+    assert_eq!(value(&e, &all, "tape.tps.1s"), Some(3.0));
+    // End-of-stream finish closes the final partial bar (5 more trades).
+    for _ in 0..5 {
+        all.extend(e.on_event(&trade(2 * SEC, 100.0, 1.0, Side::Buy)));
+    }
+    let fin = e.finish(3 * SEC);
+    assert_eq!(value(&e, &fin, "tape.tps.1s"), Some(6.0));
+}
+
 #[test]
 fn fea_10_screener_edge_triggers_with_snapshot() {
     let mut e = FeatureEngine::new(SEC);
@@ -516,6 +624,16 @@ fn fea_7_features_toml_parses_and_rejects_unknown_keys() {
     "#;
     let cfg = FeaturesConfig::from_toml(toml).unwrap();
     assert_eq!(cfg.cvd.venues, vec!["bybit", "okx"]);
+
+    // The PRODUCTION config must keep parsing as the catalog grows (FEA-7
+    // deny_unknown_fields would otherwise reject a section the struct doesn't
+    // know — this test catches a drift between features.toml and the parser).
+    let prod = std::fs::read_to_string("features.toml")
+        .expect("features/features.toml should exist relative to the crate dir");
+    let prod_cfg = FeaturesConfig::from_toml(&prod)
+        .unwrap_or_else(|e| panic!("production features.toml must parse: {e}"));
+    assert!(!prod_cfg.book_depth.bands.is_empty());
+    assert!(prod_cfg.tape.min_bps_delta > 0.0);
     assert_eq!(cfg.whale_print.min_notional, 300000.0);
     assert_eq!(cfg.whale_net.venues, vec!["hyperliquid", "bybit"]);
     assert_eq!(cfg.whale_net.stale_after_ns, 300_000_000_000);

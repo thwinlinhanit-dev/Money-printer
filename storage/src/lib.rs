@@ -10,6 +10,7 @@
 //! in spec 003 Decisions.
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod analytics;
 pub mod audit;
 pub mod compactor;
 pub mod cross_venue;

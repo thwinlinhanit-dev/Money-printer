@@ -89,7 +89,19 @@ update (no intra-bar repaint — repainting features are banned).
   event and a leaderboard drop-off stops polling, so dead positions must not
   linger.
 
+- `tape.bps_delta` — per-trade price change vs the previous trade on the
+  symbol, in basis points (OpenMarket tape). Emitted only when |Δ| ≥
+  `[tape] min_bps_delta` (default 0.5 bps — sub-half-bps ticks are noise); the
+  first trade of a symbol emits nothing (no prior price).
+- `tape.tps.{tf}` — trades per second for a closed bar (OpenMarket TPS).
+
 **Liquidity / book** (require BookMirror, EVT-9)
+- `book.depth.{pct}` — depth gauge `(Σ bid − Σ ask)/(Σ bid + Σ ask)` over
+  resting notional within `pct` of mid; pct ∈ {0.5%, 2%, 10%} by default
+  (Cryexc/OpenMarket liquidity bands). Silent while the book is stale (FEA-8)
+  or one-sided.
+- `book.depth_total.{pct}` — Σ bid + Σ ask notional within `pct` of mid —
+  the liquidity thickness behind the gauge.
 - `depth.{bps}.{side}` — resting qty within ±bps of mid (bps ∈ {10,25,50}),
   sampled on a 1s timer aligned to event stream (SimClock-driven).
 - `imbalance.{bps}` — (bid_depth − ask_depth)/(bid_depth + ask_depth).
@@ -155,6 +167,13 @@ update (no intra-bar repaint — repainting features are banned).
 - [x] Aggregate whale net positioning + deltas from the spec 028 census (FEA-1): hand-computed net/replace semantics, delta vs previous, venue scoping, NaN fail-closed, address-order independence, stale-refresh eviction. `fea_1_whale_net_*`, `fea_1_whale_delta_changes_since_previous_net`.
 
 ## Decisions
+- 2026-08-13 (impl): `book.depth.*` / `book.depth_total.*` and `tape.*` added
+  to the catalog from the Cryexc/OpenMarket deep-dive (liquidity-band depth
+  stats, TPS, bps-delta tape). Implemented + tested: `om_1_book_depth_bands_*
+  `, `om_2_book_depth_silent_while_stale`, `om_3_tape_bps_delta_*`,
+  `om_4_tape_tps_counts_per_bar`. Book bands use resting NOTIONAL (p·q), not
+  raw qty — the gauge is unit-consistent across assets (OpenMarket USD
+  normalization).
 - 2026-07-10: features output scalar f64 only in v1 (categoricals encoded as
   small ints); vector-valued features deferred.
 - 2026-07-10 (impl): implemented spec 004 BEFORE 005 (deviating from the

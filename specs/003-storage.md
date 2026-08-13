@@ -41,6 +41,31 @@ column names exactly matching spec 001 field names.
 `coverage` = fraction of the UTC day not inside a gap. **Every research/sim
 read path MUST consult manifests** (SIM-6 depends on this).
 
+### Analytics: read-time transforms (`mp-query`)
+Compute-on-read aggregation (the Cryexc/OpenMarket pattern): raw points are
+stored once and research views are DERIVED on demand. `mp-query` (storage
+bin, spec 003 §Analytics) reads only cold Parquet + raw logs, never writes:
+
+- `footprint --cold <root> --venue <v> --symbol <s> --date <d>
+  [--interval-secs N] [--bucket-usd B] [--json]` — per-interval bars with the
+  order-flow split (open/high/low/close, vwap, buy_vol, sell_vol, n_trades)
+  from the Dataset reader (STO-4); with `--bucket-usd`, the block-bucketed
+  (interval × price) footprint grid — price blocks at
+  `floor(price / bucket_usd) × bucket_usd` (OpenMarket blockSize/heatmap
+  aggregation, Cryexc footprint per level).
+- `oiwa --logs <a.log> … [--interval-secs N] [--json]` — OI-weighted funding
+  `Σ(rateᵢ·oiᵢ)/Σoiᵢ` over raw logs, merged exactly like the materializer
+  (`load_logs_merged`, MAT-5). Funding rate per interval = the LAST rate seen
+  in it; OI = as-of the interval end. Weights are NEVER mixed across units:
+  USD-notional venues and contracts-only venues (Hyperliquid reports
+  `oi_notional = NaN`) are OIWA'd separately, choosing the unit class with
+  the larger aggregate OI ("usd" on a tie).
+
+Alignment discipline (OpenMarket): every time bucketing uses floor division
+`ts.div_euclid(interval) × interval`, so candle-based views line up across
+queries. Deterministic (PD-3): pure aggregation over the given inputs, no
+wall clock, no I/O beyond the inputs.
+
 ## Requirements
 - **STO-1** Compactor MUST convert closed (previous-UTC-day) event logs to the
   Parquet layout above, idempotently: re-running produces byte-identical

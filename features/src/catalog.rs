@@ -378,6 +378,143 @@ impl TickFeature for BookImbalance {
     }
 }
 
+/// Which [`BookDepth`] statistic a band computes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BookDepthKind {
+    /// `(Σbids − Σasks)/(Σbids + Σasks)` within the band — the depth gauge.
+    Gauge,
+    /// `Σbids + Σasks` within the band — the liquidity thickness.
+    Total,
+}
+
+/// `book.depth.{pct}` / `book.depth_total.{pct}` — liquidity within `pct` of
+/// mid (Cryexc/OpenMarket liquidity-band stats, spec 004 §Liquidity). Sums
+/// resting notional on each side for levels within `mid × pct`; Gauge emits
+/// the signed imbalance, Total emits the combined thickness. Silent while the
+/// book is stale or one-sided (FEA-8).
+pub struct BookDepth {
+    book: BookMirror,
+    pct: f64,
+    kind: BookDepthKind,
+}
+impl BookDepth {
+    pub fn new(pct: f64, kind: BookDepthKind) -> Self {
+        Self {
+            book: BookMirror::new(),
+            pct,
+            kind,
+        }
+    }
+
+    /// Band label in percent (0.005 → "0.5", 0.02 → "2", 0.1 → "10").
+    fn label(pct: f64) -> String {
+        format!("{}", pct * 100.0)
+    }
+}
+impl TickFeature for BookDepth {
+    fn id(&self) -> String {
+        let p = Self::label(self.pct);
+        match self.kind {
+            BookDepthKind::Gauge => format!("book.depth.{p}"),
+            BookDepthKind::Total => format!("book.depth_total.{p}"),
+        }
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if !self.book.apply(&ev.body) {
+            return None;
+        }
+        if self.book.is_stale() {
+            return None; // FEA-8: never read a gapped book
+        }
+        let mid = self.book.mid()?;
+        let band = mid * self.pct;
+        let (mut bsum, mut asum) = (0.0, 0.0);
+        for (p, q) in self.book.bids() {
+            if p >= mid - band {
+                bsum += p * q;
+            }
+        }
+        for (p, q) in self.book.asks() {
+            if p <= mid + band {
+                asum += p * q;
+            }
+        }
+        match self.kind {
+            BookDepthKind::Gauge => {
+                let t = bsum + asum;
+                if t > 0.0 {
+                    Some((bsum - asum) / t)
+                } else {
+                    None
+                }
+            }
+            BookDepthKind::Total => Some(bsum + asum),
+        }
+    }
+}
+
+/// `tape.bps_delta` — per-trade price change vs the previous trade on the
+/// symbol, in basis points. Emitted only when |Δ| ≥ `min_bps` (default 0.5) —
+/// OpenMarket's tape hides sub-half-bps ticks as noise; first trade of a
+/// symbol emits nothing (no prior price).
+pub struct TapeBpsDelta {
+    last: Option<f64>,
+    min_bps: f64,
+}
+impl TapeBpsDelta {
+    pub fn new(min_bps: f64) -> Self {
+        Self { last: None, min_bps }
+    }
+}
+impl Default for TapeBpsDelta {
+    fn default() -> Self {
+        Self::new(0.5)
+    }
+}
+impl TickFeature for TapeBpsDelta {
+    fn id(&self) -> String {
+        "tape.bps_delta".into()
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if let MarketEvent::Trade { price, .. } = ev.body {
+            let d = match self.last {
+                Some(p) if p > 0.0 => (price - p) / p * 10_000.0,
+                _ => 0.0,
+            };
+            self.last = Some(price);
+            if d.abs() >= self.min_bps {
+                Some(d)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+}
+
+/// `tape.tps.{tf}` — trades per second for a closed bar (OpenMarket TPS).
+pub struct TapeTps {
+    tf: String,
+    tf_secs: f64,
+}
+impl TapeTps {
+    pub fn new(tf: &str, tf_secs: f64) -> Self {
+        Self {
+            tf: tf.to_owned(),
+            tf_secs,
+        }
+    }
+}
+impl BarFeature for TapeTps {
+    fn id(&self) -> String {
+        format!("tape.tps.{}", self.tf)
+    }
+    fn on_bar(&mut self, bar: &Bar) -> Option<f64> {
+        Some(bar.n_trades as f64 / self.tf_secs.max(1e-9))
+    }
+}
+
 // ---- bar features -----------------------------------------------------------
 
 /// `delta.bar.{tf}` — per-bar buy_vol − sell_vol.

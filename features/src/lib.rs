@@ -24,7 +24,8 @@ pub mod whale;
 use mp_core::Venue;
 
 pub use bar::{Bar, BarBuilder};
-pub use config::{ConfigError, FeaturesConfig};
+pub use catalog::{BookDepth, BookDepthKind, TapeBpsDelta, TapeTps};
+pub use config::{BookDepthParams, ConfigError, FeaturesConfig, TapeParams};
 pub use engine::{BarFeature, FeatureEngine, FeatureUpdate, Locality, TickFeature};
 pub use hit_journal::{HitJournal, HitRecord};
 pub use leverage::{calibrate_leverage_weights, tier_leverages, LeverageTierCalibration};
@@ -94,5 +95,18 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
     e.register_tick(|| Box::new(crate::catalog::FundingRate::new()));
     e.register_tick(|| Box::new(crate::catalog::OiDelta::new()));
     e.register_tick(|| Box::new(crate::catalog::BookImbalance::new()));
+    // Liquidity-band depth stats (Cryexc/OpenMarket): one gauge + one total
+    // feature per configured band.
+    for &pct in &cfg.book_depth.bands {
+        e.register_tick(move || Box::new(BookDepth::new(pct, BookDepthKind::Gauge)));
+        e.register_tick(move || Box::new(BookDepth::new(pct, BookDepthKind::Total)));
+    }
+    // Tape micro-stats: per-trade bps delta (tick) + per-bar TPS (bar).
+    let min_bps = cfg.tape.min_bps_delta;
+    e.register_tick(move || Box::new(TapeBpsDelta::new(min_bps)));
+    let (tf_secs, tf) = (cfg.bar_tf_ns / 1_000_000_000, cfg.bar_tf_ns / 1_000_000_000);
+    let tf_secs = tf_secs as f64;
+    let tf = format!("{tf}s");
+    e.register_bar(move || Box::new(TapeTps::new(&tf, tf_secs)));
     Ok(e)
 }

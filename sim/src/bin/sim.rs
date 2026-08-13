@@ -25,13 +25,16 @@
 
 use mp_core::log::LogReader;
 use mp_core::{EventEnvelope, Venue};
-use mp_features::catalog::{Cvd, FundingRate};
+use mp_features::catalog::{BookDepth, BookDepthKind, Cvd, FundingRate, TapeBpsDelta};
 use mp_features::FeatureEngine;
 use mp_sim::{
     monte_carlo, plateau_ok, Backtester, MetricsSummary, PaperSession, RunRecord, SimConfig,
     WalkForwardParams, WindowResult,
 };
-use mp_strategies::{CarryConfig, CarryV1, CoinFlipStrategy, NullStrategy, Strategy, Universe};
+use mp_strategies::{
+    CarryConfig, CarryV1, CoinFlipStrategy, NullStrategy, OrderflowConfig, OrderflowV1, Strategy,
+    Universe,
+};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -98,16 +101,44 @@ fn strategy_named(
                 cfg,
             )))
         }
+        "orderflow-v1" => {
+            let uni = universe_from_events(events);
+            let mut cfg = OrderflowConfig::default();
+            if let Some(et) = entry_threshold {
+                cfg.entry_gauge = et;
+            }
+            if let Some(xt) = exit_threshold {
+                cfg.exit_gauge = xt;
+            }
+            Ok(Box::new(OrderflowV1::new(
+                mp_core::StrategyId::new("orderflow-v1"),
+                uni,
+                cfg,
+            )))
+        }
         other => Err(format!(
-            "unknown strategy: {other} (coinflip|null|carry-v1)"
+            "unknown strategy: {other} (coinflip|null|carry-v1|orderflow-v1)"
         )),
     }
 }
 
+/// The sim-side strategy-visible feature set (spec 004/006): every feature a
+/// strategy can subscribe to in a backtest. The order-flow family is the
+/// `book.depth.*` liquidity bands + the `tape.bps_delta` aggressive-tape
+/// print (Cryexc/OpenMarket additions, 2026-08-13); `cvd.{venue}` and
+/// `funding.rate` serve the earlier strategies. `tape.tps.{tf}` is a BAR
+/// feature and is deliberately not registered here — the sim's `bar_tf_ns`
+/// is 1ms, which would make a "trades-per-<1ms>" reading meaningless.
 fn engine() -> FeatureEngine {
     let mut e = FeatureEngine::new(1_000_000_000);
-    e.register_tick(|| Box::new(Cvd::new(Venue::Bybit)));
+    e.register_tick(|| Box::new(Cvd::new(Venue::Hyperliquid)));
     e.register_tick(|| Box::new(FundingRate::new()));
+    // Liquidity-band depth (default bands 0.5% / 2% / 10% of mid).
+    for &pct in &[0.005, 0.02, 0.1] {
+        e.register_tick(move || Box::new(BookDepth::new(pct, BookDepthKind::Gauge)));
+        e.register_tick(move || Box::new(BookDepth::new(pct, BookDepthKind::Total)));
+    }
+    e.register_tick(|| Box::new(TapeBpsDelta::default()));
     e
 }
 

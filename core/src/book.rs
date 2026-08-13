@@ -165,6 +165,18 @@ impl BookMirror {
         Some((self.bids.len(), self.asks.len()))
     }
 
+    /// Iterate resting bid levels `(price, qty)`, best (highest) price first.
+    /// Empty when stale — callers must respect [`Self::is_stale`] (FEA-8).
+    pub fn bids(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        self.bids.iter().rev().map(|(p, q)| (p.0, *q))
+    }
+
+    /// Iterate resting ask levels `(price, qty)`, best (lowest) price first.
+    /// Empty when stale — callers must respect [`Self::is_stale`] (FEA-8).
+    pub fn asks(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        self.asks.iter().map(|(p, q)| (p.0, *q))
+    }
+
     /// Walk the ask side consuming up to `qty`, best price first, removing
     /// displayed size as it is taken (a market buy paying impact — SIM-2 L2).
     /// The book recovers naturally from subsequent deltas. Returns

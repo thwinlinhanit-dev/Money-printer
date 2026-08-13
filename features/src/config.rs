@@ -254,6 +254,52 @@ impl Default for FootprintParams {
     }
 }
 
+/// Params for the `book.depth.*` feature family — liquidity within `pct` of
+/// mid (Cryexc/OpenMarket depth stats, spec 004 §Liquidity). Each band
+/// registers `book.depth.{pct}` (gauge) + `book.depth_total.{pct}` (Σ).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BookDepthParams {
+    /// Fraction-of-mid bands, e.g. 0.005/0.02/0.1 = 0.5%/2%/10%.
+    #[serde(default = "default_book_depth_bands")]
+    pub bands: Vec<f64>,
+}
+
+fn default_book_depth_bands() -> Vec<f64> {
+    vec![0.005, 0.02, 0.1]
+}
+
+impl Default for BookDepthParams {
+    fn default() -> Self {
+        Self {
+            bands: default_book_depth_bands(),
+        }
+    }
+}
+
+/// Params for the `tape.*` feature family (OpenMarket tape stats, spec 004
+/// §Order flow).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TapeParams {
+    /// `tape.bps_delta` only emits when |Δ| ≥ this many bps (noise floor;
+    /// OpenMarket hides sub-half-bps ticks).
+    #[serde(default = "default_tape_min_bps")]
+    pub min_bps_delta: f64,
+}
+
+fn default_tape_min_bps() -> f64 {
+    0.5
+}
+
+impl Default for TapeParams {
+    fn default() -> Self {
+        Self {
+            min_bps_delta: default_tape_min_bps(),
+        }
+    }
+}
+
 /// The whole catalog config (FEA-7). One file, all params, no unknown keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -275,6 +321,10 @@ pub struct FeaturesConfig {
     pub liq_agg: LiqAggParams,
     #[serde(default)]
     pub liq_est_bands: LiqEstBandsParams,
+    #[serde(default)]
+    pub book_depth: BookDepthParams,
+    #[serde(default)]
+    pub tape: TapeParams,
 }
 
 fn default_bar_tf() -> i64 {
@@ -292,6 +342,8 @@ impl Default for FeaturesConfig {
             footprint: FootprintParams::default(),
             liq_agg: LiqAggParams::default(),
             liq_est_bands: LiqEstBandsParams::default(),
+            book_depth: BookDepthParams::default(),
+            tape: TapeParams::default(),
         }
     }
 }

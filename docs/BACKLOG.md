@@ -7,6 +7,27 @@ tagged **[v1.x]** (fits current architecture), **[v2]** (needs a design
 decision), or **[maybe-never]** (recorded so it stops being re-proposed).
 
 ## Strategies & alpha (each needs hypothesis.md first — spec 006)
+- **[v1.x] orderflow-v1 (FIRST BACKTEST 2026-08-13)** — depth-gauge +
+  tape-bps_delta alignment continuation trade (`strategies/orderflow-v1/`,
+  hypothesis + impl + 7 `of_*` tests). Registered in the sim
+  (`sim backtest --strategy orderflow-v1`); the `book.depth.*` / `tape.*`
+  features are now strategy-visible in the sim engine (spec 004/006). First
+  real-day results (08-12, hyperliquid, seed 42, 2x costs): BTC 262 trades
+  expectancy -165, ETH 57 trades -238 — the naive v1 LOSES both legs, which
+  is the honest first verdict (costs dominate at this horizon; falsification
+  criterion #1 engages). Determinism proven: two same-seed runs over the BTC
+  day produced byte-identical decision logs (hash 6263363002049928352).
+  Next: param grid / walk-forward before any promotion — likely a kill or a
+  major redesign (add costs-aware entry hysteresis, wider bands).
+- **[v1.x] funding-carry study (DELIVERED 2026-08-13)** —
+  `research/funding_carry_study_2026-08-13.md` + `mp-query carry` (spec 003
+  §Analytics: OI-weighted funding + mark-vs-oracle basis per hour, units
+  never mixed). Findings: 232 real hours over 7 days; funding positive ~2/3
+  of BTC hours and 85% of ETH hours (mean +6.2%/+8.7% annualized) while the
+  perp trades at a persistent mark-vs-oracle DISCOUNT (~-4 bps) — funding
+  and basis diverge (BTC corr 0.72, ETH 0.40), i.e. the perp is cheap vs
+  spot but longs still pay. Basis here is venue-oracle, not tradable spot
+  (needs the spot leg item below).
 - **[v1.x] funding-arb-v1** — cross-venue funding spread (long perp on
   negative-funding venue, short on positive) — carry-v1's sibling, needs two
   trading venues live.
@@ -45,7 +66,15 @@ requires a byte-identical decision log; the PASS artifact
 (`<date>.determinism.json`) is a promotion-gate condition, wired fail-closed
 into both daily pipelines (VPS cron step 1.5, Windows task), verified
 byte-identical on the real 08-10..08-13 corpus (843k events / 854k decision
-lines per day). Still on the menu, in priority order:
+lines per day). Delivered 2026-08-13 (batch 3 — Cryexc/OpenMarket deep-dive
+implementation): **read-time analytics transforms** — `mp-query footprint`
+(block-bucketed (interval × price) order-flow grid over cold Parquet, the
+OpenMarket blockSize/heatmap aggregation) and `mp-query oiwa` (OI-weighted
+funding Σ(rateᵢ·oiᵢ)/Σoiᵢ, units never mixed), plus the `book.depth.{pct}` /
+`book.depth_total.{pct}` liquidity-band features (0.5/2/10% of mid) and
+`tape.tps.{tf}` / `tape.bps_delta` tape micro-features — all tested
+(analytics + `om_*` acceptance tests) and live-smoked on the real corpus.
+Still on the menu, in priority order:
 - **[v1.x] veracity event study (RES-4)** — DELIVERED 2026-08-13
   (research/veracity_study_2026-08-13.md): detector output on the cold corpus
   is 0+0 (no cohort); the only real overlap day (08-08) shows 0/15
@@ -60,6 +89,24 @@ lines per day). Still on the menu, in priority order:
   true off-host tier.
 
 ## Data & features
+- **[v1.x] read-time analytics transforms** — ✅ DELIVERED 2026-08-13 as
+  `mp-query` (spec 003 §Analytics): `footprint` (block-bucketed (interval ×
+  price) order-flow grid over cold Parquet) and `oiwa` (OI-weighted funding,
+  units never mixed). Compute-on-read (Cryexc/OpenMarket pattern) — raw
+  points stored once, research views derived on demand.
+- **[v1.x] liquidity-band + tape features** — ✅ DELIVERED 2026-08-13 as
+  `book.depth.{pct}` / `book.depth_total.{pct}` (0.5/2/10% of mid) and
+  `tape.tps.{tf}` / `tape.bps_delta` (spec 004 catalog, `om_*` tests).
+- **[v1.x] liquidations leg** (Cryexc/OpenMarket gap) — Hyperliquid's public
+  WS has NO liquidation feed; Binance Futures `@forceOrder` does. Needs a
+  collector + `Liquidation` event source decision (venue choice, geo/egress
+  check) + audit wiring — own spec before build (PD-6). Currently the
+  `Liquidation` event only ever arrives from synthetic fixtures.
+- **[v1.x] history-server protocol (BYOD)** — serve the corpus over a thin
+  `start_ms/end_ms/limit` HTTP protocol (Cryexc history-spec pattern) so the
+  determinism replay queries history exactly like the live loop. `mp-query`
+  covers the data path; an HTTP layer needs a server dep — deferred until the
+  replay seam needs it.
 - **[v1.x] more venues** (add-venue skill): OKX (checksummed books), Coinbase
   + Kraken (spot cross-check), Hyperliquid (complete liq visibility).
 - **[v1.x] spot venues for basis truth** — perp-vs-spot features need spot legs.

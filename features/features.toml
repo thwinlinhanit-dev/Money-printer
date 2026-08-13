@@ -95,3 +95,14 @@ max_usd = 100000.0
 name = "whale"
 min_usd = 100000.0
 max_usd = 1.7976931348623157e308
+
+[book_depth]
+# Liquidity within % of mid (Cryexc/OpenMarket depth stats, spec 004
+# §Liquidity). Each band registers book.depth.{pct} (gauge) and
+# book.depth_total.{pct} (Σ) — fed by the Hyperliquid l2Book snapshots.
+bands = [0.005, 0.02, 0.1]
+
+[tape]
+# Tape micro-stats (OpenMarket tape, spec 004 §Order flow): tape.bps_delta
+# (per-trade price change, bps) + tape.tps.{tf} (trades/sec per bar).
+min_bps_delta = 0.5

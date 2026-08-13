@@ -8,10 +8,13 @@ Trading strategy trait and concrete strategy implementations. Each strategy has 
 
 - `src/strategy.rs` — `Strategy` trait definition
 - `src/carry_v1.rs` — carry strategy implementation
+- `src/orderflow_v1.rs` — order-flow imbalance strategy (book.depth gauge +
+  tape.bps_delta alignment, spec 004/006)
 - `src/funnel.rs` — funnel aggregator
 - `src/examples.rs` — example strategies
 - `src/bin/funnel.rs` — funnel CLI binary
 - `carry-v1/hypothesis.md` — carry strategy hypothesis
+- `orderflow-v1/hypothesis.md` — order-flow imbalance hypothesis
 - `liq-fade-v1/hypothesis.md` — liquidation fade hypothesis
 - `trend-breadth-v1/hypothesis.md` — trend breadth hypothesis
 
