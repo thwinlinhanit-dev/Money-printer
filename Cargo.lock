@@ -1178,9 +1178,12 @@ dependencies = [
  "mp-core",
  "mp-features",
  "mp-risk",
+ "mp-storage",
  "mp-strategies",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
+ "toml",
  "tracing",
 ]
 

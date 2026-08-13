@@ -32,6 +32,16 @@ pub struct WsEndpoint {
     /// Frame/message caps so a venue cannot memory-exhaust the process.
     /// Defaults: 1 MiB frames / 4 MiB messages (public market data is byte-sized).
     pub limits: WsLimits,
+    /// Client-initiated keepalive ping interval (2026-08-12).  This transport
+    /// previously only *answered* the venue's pings and never sent its own;
+    /// a NAT/firewall/venue idle timer can drop a connection whose
+    /// client-originated traffic is silent, and the ~3h20m-periodic data
+    /// stalls observed on the Windows host are the signature of such a
+    /// connection-lifetime mechanism.  Pinging periodically keeps the path
+    /// warm AND makes the 20s read timeout a real half-open detector: a venue
+    /// that stops answering stops ponging our pings, so it is reconnected
+    /// within the timeout even though the socket never sends a FIN.
+    pub ping_interval: Duration,
     /// Optional egress proxy for the WebSocket connection (spec 024
     /// 2026-08-04 incident: some networks are geo-filtered at the venue edge
     /// — Binance futures silently drops non-book streams — so a proxy/VPN in
@@ -41,12 +51,14 @@ pub struct WsEndpoint {
 }
 
 impl WsEndpoint {
-    /// Convenience constructor with the default frame limits and no proxy.
+    /// Convenience constructor with the default frame limits, a 10s keepalive
+    /// ping, and no proxy.
     pub fn new(url: impl Into<String>, subscribe: Vec<String>) -> Self {
         Self {
             url: url.into(),
             subscribe,
             limits: WsLimits::default(),
+            ping_interval: Duration::from_secs(10),
             proxy: None,
         }
     }
@@ -260,46 +272,75 @@ async fn run(
     }
 
     // Read timeout (COL-2 defense): a half-open TCP socket can hold
-    // `read.next()` forever (no FIN, no data, no keepalive). depth@100ms +
-    // markPrice@1s mean any real subscription delivers within seconds, so a
-    // 20s silence is a dead connection — end the task so the collector sees
+    // `read.next()` forever (no FIN, no data). depth@100ms + markPrice@1s
+    // mean any real subscription delivers within seconds, so a 20s silence
+    // is a dead connection — end the task so the collector sees
     // `Disconnected` and reconnects instead of freezing silently.
     const READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+    // Keepalive (2026-08-12): send client-initiated pings every
+    // `endpoint.ping_interval`.  tungstenite 0.24 auto-queues pong replies
+    // to the venue's pings (so we no longer reply manually) but has no
+    // auto-ping — the client must drive its own.  The 20s read timeout above
+    // now doubles as a half-open detector: it resets on every read (pongs
+    // included), so a venue that stops answering our pings is reconnected
+    // within the timeout even though the socket never sends a FIN.
+    let mut ping_tick = tokio::time::interval(endpoint.ping_interval);
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let next = tokio::time::timeout(READ_TIMEOUT, read.next()).await;
-        let msg = match next {
-            Err(_) => {
-                tracing::warn!(
-                    "ws read timed out after {}s of silence; reconnecting",
-                    READ_TIMEOUT.as_secs()
+        tokio::select! {
+            biased;
+            next = tokio::time::timeout(READ_TIMEOUT, read.next()) => {
+                let msg = match next {
+                    Err(_) => {
+                        tracing::warn!(
+                            "ws read timed out after {}s of silence; reconnecting",
+                            READ_TIMEOUT.as_secs()
+                        );
+                        break;
+                    }
+                    Ok(None) => break, // stream closed by the peer
+                    Ok(Some(msg)) => msg,
+                };
+                let payload = match msg? {
+                    Message::Text(t) => t.into_bytes(),
+                    Message::Binary(b) => b,
+                    // Ping/Pong are handled by tungstenite (auto-pong) and
+                    // carry no market data — ignore them here.
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+
+                let ev = TransportEvent::Frame {
+                    recv_ts_ns: now_ns(),
+                    payload,
+                };
+
+                match queue.push(ev) {
+                    PushResult::Queued => {}
+                    PushResult::Dropped => {
+                        tracing::warn!("ws frame dropped by backpressure policy")
+                    }
+                    PushResult::TimedOut => {
+                        tracing::warn!("ws block policy timed out; forcing reconnect");
+                        break;
+                    }
+                }
+            }
+            _ = ping_tick.tick() => {
+                // tungstenite 0.24: `Message::Ping` carries a `Vec<u8>`
+                // payload directly (no Bytes conversion).
+                if let Err(e) = write.send(Message::Ping(Vec::new())).await {
+                    tracing::warn!(error = %e, "ws keepalive ping failed");
+                    break;
+                }
+                // Debug-only: visible with RUST_LOG=mp_collectors=debug so a
+                // live run can prove client-initiated pings are flowing
+                // (2026-08-12 keepalive; vps-phase0-bringup.md sec 6 A-B).
+                tracing::debug!(
+                    interval_s = endpoint.ping_interval.as_secs(),
+                    "ws keepalive ping sent"
                 );
-                break;
-            }
-            Ok(None) => break, // stream closed by the peer
-            Ok(Some(msg)) => msg,
-        };
-        let payload = match msg? {
-            Message::Text(t) => t.into_bytes(),
-            Message::Binary(b) => b,
-            Message::Ping(p) => {
-                write.send(Message::Pong(p)).await?;
-                continue;
-            }
-            Message::Close(_) => break,
-            _ => continue,
-        };
-
-        let ev = TransportEvent::Frame {
-            recv_ts_ns: now_ns(),
-            payload,
-        };
-
-        match queue.push(ev) {
-            PushResult::Queued => {}
-            PushResult::Dropped => tracing::warn!("ws frame dropped by backpressure policy"),
-            PushResult::TimedOut => {
-                tracing::warn!("ws block policy timed out; forcing reconnect");
-                break;
             }
         }
     }
@@ -585,6 +626,47 @@ mod tests {
         let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         let err = http_connect_tunnel(tcp, "example.com", 443).await;
         assert!(err.is_err(), "403 CONNECT must be refused");
+    }
+
+    /// Keepalive (2026-08-12): the transport must initiate pings on its own
+    /// cadence — tungstenite 0.24 has no auto-ping, and a venue/NAT idle timer
+    /// only sees *client-originated* traffic. In-process mock WS server: the
+    /// client connects, then the first frame it sends (empty subscribe list)
+    /// must be a Ping well within the injected short interval.
+    #[tokio::test]
+    async fn ws_keepalive_sends_client_pings_periodically() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut server = tokio_tungstenite::accept_async(sock)
+                .await
+                .expect("client handshake must complete");
+            let deadline = tokio::time::sleep(Duration::from_secs(5));
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    _ = &mut deadline => panic!("client never sent a keepalive ping"),
+                    msg = server.next() => match msg {
+                        Some(Ok(Message::Ping(_))) => return, // observed: done
+                        Some(Ok(_)) => continue,
+                        Some(Err(e)) => panic!("server read error: {e}"),
+                        None => panic!("client closed before pinging"),
+                    },
+                }
+            }
+        });
+
+        let mut endpoint = WsEndpoint::new(format!("ws://127.0.0.1:{port}"), vec![]);
+        endpoint.ping_interval = Duration::from_millis(100);
+        let queue = FrameQueue::new(4, BackpressurePolicy::Unbounded);
+        let producer = queue.clone();
+        let handle = tokio::spawn(async move {
+            // The server task returns after observing a ping and drops the
+            // socket, which ends `run` via stream close.
+            let _ = run(endpoint, producer).await;
+        });
+        handle.await.unwrap();
     }
 
     /// SOCKS5 tunnel: greeting + CONNECT handshake against a mock server that

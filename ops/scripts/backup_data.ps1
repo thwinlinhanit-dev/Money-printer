@@ -66,6 +66,32 @@ function Log {
     Write-Host $line -ForegroundColor $col
 }
 
+# Same-physical-volume guard (audit 08-10): a mirror on the SAME drive as the
+# source protects against accidental deletion but NOT against a dead disk -
+# the whole corpus dies with the one drive. Compare the volume root of source
+# vs destination and WARN loudly when they match, so a same-drive destination
+# is never mistaken for disaster recovery. The warning is advisory: the task
+# still runs (a same-drive mirror beats no mirror at all).
+function Get-VolumeRoot {
+    param([string]$Path)
+    try {
+        $leaf = Get-Item $Path -ErrorAction Stop
+        return [System.IO.Path]::GetPathRoot($leaf.FullName)
+    } catch {
+        # Destination may not exist yet; resolve from the closest existing ancestor.
+        $p = $Path
+        while (-not (Test-Path $p) -and $p -ne [System.IO.Path]::GetPathRoot($p)) { $p = Split-Path $p -Parent }
+        try { return [System.IO.Path]::GetPathRoot((Get-Item $p).FullName) } catch { return "?" }
+    }
+}
+$srcVol = Get-VolumeRoot $srcRoot
+$dstVol = Get-VolumeRoot $Destination
+if ($srcVol -ne "?" -and $srcVol -eq $dstVol) {
+    $warnBody = "destination {0} is on the SAME volume ({1}) as the source - likely the same physical disk, so a dead drive takes both. " +
+        "Move -Destination to a separate physical drive or network share for real disaster recovery (W-6)."
+    Log ("WARNING: " + ($warnBody -f $Destination, $dstVol)) "WARN"
+}
+
 if (-not (Test-Path $srcRoot)) { Log "source data dir missing: $srcRoot" "ERROR"; Exit 3 }
 
 # ---- scheduled-task registration (mirrors daily_pipeline.ps1) ----------------

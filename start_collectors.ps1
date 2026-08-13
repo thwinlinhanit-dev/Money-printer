@@ -9,11 +9,35 @@
 # disabled, or cannot be started, it falls back to the legacy detached
 # PowerShell watchdog. Register the task with:
 #   .\ops\watchdog_collectors.ps1 -RegisterTask
+#
+# The supervised set is derived from ops/core_symbols.txt (venue:SYMBOL lines,
+# one per line) - the SAME single source of truth the collector watchdog and
+# the daily pipeline use - so the heartbeat names polled here can never drift
+# from what the watchdog actually spawns. (audit 08-10: this script used to
+# hardcode `mp-collector-binance-BTCUSDT.heartbeat` / `ETHUSDT`, but the live
+# recordings moved to hyperliquid:BTC/ETH on 08-08, so it reported 0/2 healthy
+# even while both collectors were running.)
 
 $root = $PSScriptRoot
 if (-not $root) { $root = (Get-Location).Path }
 $watchdogScript = Join-Path $root "ops\watchdog_collectors.ps1"
 $TaskName = "MoneyPrinterCollectorsWatchdog"
+
+# ---- Resolve the recording set from the single source of truth --------------
+# Single shared parser: ops/scripts/recordings.ps1 is dot-sourced here, by
+# ops/watchdog_collectors.ps1, and by ops/scripts/daily_pipeline.ps1 so the
+# venue->symbol parse and the default set can never drift between the three
+# (audit 08-10: this script used to hardcode binance heartbeats after the
+# live recordings moved to hyperliquid:BTC/ETH on 08-08). A venue:SYMBOL pair
+# maps 1:1 to the heartbeat name `mp-collector-{venue}-{symbol}.heartbeat`.
+. (Join-Path $root "ops\scripts\recordings.ps1")
+try {
+    $recordings = @(Resolve-Recordings -CoreFile (Join-Path $root "ops\core_symbols.txt"))
+} catch {
+    Write-Host "[!!] $_" -ForegroundColor Red
+    Exit 1
+}
+$heartbeats = @($recordings | ForEach-Object { "mp-collector-$($_.venue)-$($_.symbol).heartbeat" })
 
 # ---- Reset collection state: kill collectors, drop stale locks/heartbeats ----
 # Heartbeat files are removed too so the (re)started watchdog sees "down" and
@@ -21,7 +45,9 @@ $TaskName = "MoneyPrinterCollectorsWatchdog"
 Stop-Process -Name "mp-collector" -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 Remove-Item -Path (Join-Path $root "data\raw\.lock_*") -Force -ErrorAction SilentlyContinue
-Remove-Item -Path (Join-Path $root "data\raw\mp-collector-binance-*.heartbeat") -Force -ErrorAction SilentlyContinue
+foreach ($hb in $heartbeats) {
+    Remove-Item -Path (Join-Path $root "data\raw\$hb") -Force -ErrorAction SilentlyContinue
+}
 
 # ---- Supervisor: prefer the registered Scheduled Task; fall back to manual ----
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -55,17 +81,17 @@ if ($supervisor -eq "manual") {
 # ---- Wait for collectors to come back (bounded poll, up to ~90s) ----
 $hbDir = Join-Path $root "data\raw"
 $fresh = @{}
-foreach ($sym in @("BTCUSDT", "ETHUSDT")) { $fresh[$sym] = $false }
+foreach ($hb in $heartbeats) { $fresh[$hb] = $false }
 for ($i = 0; $i -lt 18; $i++) {
     $all = $true
-    foreach ($sym in @("BTCUSDT", "ETHUSDT")) {
-        if ($fresh[$sym]) { continue }
-        $hbFile = Join-Path $hbDir "mp-collector-binance-$sym.heartbeat"
+    foreach ($hb in $heartbeats) {
+        if ($fresh[$hb]) { continue }
+        $hbFile = Join-Path $hbDir $hb
         if (Test-Path $hbFile) {
             $hbAge = ((Get-Date) - (Get-Item $hbFile).LastWriteTime).TotalSeconds
-            if ($hbAge -le 90) { $fresh[$sym] = $true }
+            if ($hbAge -le 90) { $fresh[$hb] = $true }
         }
-        if (-not $fresh[$sym]) { $all = $false }
+        if (-not $fresh[$hb]) { $all = $false }
     }
     if ($all) { break }
     Start-Sleep -Seconds 5
@@ -73,12 +99,14 @@ for ($i = 0; $i -lt 18; $i++) {
 
 # ---- Status (heartbeat files only - never process enumeration; see docs/AUDIT-2026-08-03.md) ----
 $running = 0
-foreach ($sym in @("BTCUSDT", "ETHUSDT")) { if ($fresh[$sym]) { $running++ } }
+foreach ($hb in $heartbeats) { if ($fresh[$hb]) { $running++ } }
+$recLabel = @($recordings | ForEach-Object { "$($_.venue):$($_.symbol)" }) -join ", "
 
 Write-Host ""
 Write-Host "=== Collector Status ===" -ForegroundColor Cyan
 Write-Host ("Supervisor: {0}" -f $(if ($supervisor -eq "task") { "Scheduled Task ($TaskName)" } else { "manual watchdog" })) -ForegroundColor Gray
-Write-Host ("Healthy: {0} / 2 collectors" -f $running) -ForegroundColor $(if ($running -ge 2) { "Green" } else { "Yellow" })
+Write-Host ("Recordings: {0}" -f $recLabel) -ForegroundColor Gray
+Write-Host ("Healthy: {0} / {1} collectors" -f $running, $heartbeats.Count) -ForegroundColor $(if ($running -ge $heartbeats.Count) { "Green" } else { "Yellow" })
 Write-Host ("Data dir: {0}\data\raw\" -f $root) -ForegroundColor Gray
 Write-Host ""
 Write-Host "Monitor:  Get-ChildItem data\raw\*.heartbeat"

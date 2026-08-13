@@ -27,6 +27,7 @@
 param(
     [string]$Date,                 # YYYY-MM-DD or YYYYMMDD (default: yesterday UTC)
     [switch]$RegisterTask,         # register the MoneyPrinterDailyPipeline task
+    [switch]$RegisterStaleTask,    # register the MoneyPrinterPipelineStale dead-man
     [switch]$SkipCompact,          # audit + scorecard + verdict, no cold writes
     [switch]$SkipMaterialize,      # audit + scorecard + verdict, no feature-store writes
     [string[]]$Recordings  = @(),  # venue:symbol pairs to require; empty = core list
@@ -63,23 +64,21 @@ $scoreDir   = Join-Path $root "data\scorecards"
 $logFile    = Join-Path $scoreDir "pipeline.log"
 $mpOps      = Join-Path $root "target\release\mp-ops.exe"
 
-# Recordings default: empty = load the single source of truth (ops/core_symbols.txt)
-# as `venue:symbol` lines (a plain SYMBOL line means binance:<sym>) - so the
-# scorecard's required set ALWAYS matches what the watchdog records (no silent
-# under-scoping of the promotion gate). Falls back to hyperliquid:BTC+ETH when absent.
+# Recordings default: empty = load the single source of truth through the
+# shared parser (ops/scripts/recordings.ps1, dot-sourced below - the SAME
+# resolver start_collectors.ps1 and ops/watchdog_collectors.ps1 use, so the
+# scorecard's required set ALWAYS matches what the watchdog records - no
+# silent under-scoping, and an invalid line fails the pipeline loudly instead
+# of narrowing the gate). Falls back to hyperliquid:BTC+ETH when absent.
+. (Join-Path $root "ops\scripts\recordings.ps1")
 if ($Recordings.Count -eq 0) {
-    $coreFile = Join-Path $root "ops\core_symbols.txt"
-    if (Test-Path $coreFile) {
-        # Trim BEFORE filtering so a line with leading whitespace is not
-        # silently dropped (audit 08-08).
-        $coreLines = @(Get-Content $coreFile | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9]' -and $_ -notmatch '^\s*#' } | Where-Object { $_ -ne '' })
-        $Recordings = @()
-        foreach ($line in $coreLines) {
-            if ($line -match '^([a-z][a-z0-9]*):([A-Z0-9]{2,20})$') { $Recordings += "$($Matches[1]):$($Matches[2])" }
-            elseif ($line -match '^[A-Z0-9]{2,20}$') { $Recordings += "binance:$line" }
-        }
+    try {
+        $recPairs = @(Resolve-Recordings -CoreFile (Join-Path $root "ops\core_symbols.txt"))
+    } catch {
+        Log "core_symbols.txt parse failed: $_" "ERROR"
+        Exit 1
     }
-    if ($Recordings.Count -eq 0) { $Recordings = @("hyperliquid:BTC", "hyperliquid:ETH") }
+    $Recordings = @($recPairs | ForEach-Object { "$($_.venue):$($_.symbol)" })
 }
 
 function Log {
@@ -156,6 +155,34 @@ if ($RegisterTask) {
     Exit 0
 }
 
+# ---- dead-man for the gate itself (OPS-17, runbook pipeline-stale) ----------
+# The 00:05 gate is one scheduled task; if THAT job silently dies, the streak
+# goes blind (blueprint failure-mode #6). Register a separate 00:15 UTC task
+# running `mp-ops pipeline-stale` — a P1 when yesterday's scorecard has not
+# landed. It is deliberately NOT part of this script: a watchdog must be
+# independent of the thing it watches.
+if ($RegisterStaleTask) {
+    $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddMinutes(15), [DateTimeKind]::Utc)
+    $localAt = $utcTarget.ToLocalTime()
+    $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
+    $staleArgs = "-ExecutionPolicy Bypass -WindowStyle Hidden -Command & `"$mpOps`" pipeline-stale --telegram --webhook *>> `"$logFile`""
+    $action  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $staleArgs
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    try {
+        Register-ScheduledTask -TaskName "MoneyPrinterPipelineStale" -Action $action -Trigger $trigger `
+            -Settings $settings -User $env:USERNAME -Force -ErrorAction Stop | Out-Null
+        Write-Host "[OK] Registered MoneyPrinterPipelineStale daily at $($localAt.ToString('HH:mm')) local (=$($utcTarget.ToString('HH:mm')) UTC)." -ForegroundColor Green
+        Write-Host "     Fires a P1 (pipeline-stale) when yesterday's scorecard is missing by the deadline." -ForegroundColor Gray
+    } catch {
+        Write-Host "[!!] Register-ScheduledTask failed: $($_.Exception.Message)" -ForegroundColor Red
+        Exit 1
+    }
+    Exit 0
+}
+
 # ---- DST / clock-drift guard ------------------------------------------------
 # The daily trigger fires at a fixed local wall-clock; after a DST shift that
 # can land an hour away from 00:05 UTC. Only audit when we're within the UTC
@@ -209,6 +236,20 @@ function Invoke-Build-Materialize {
         if ($s -match "error|warning: unused|Finished") { Log $s "WARN" }
     }
     if ($res[1] -ne 0) { Log "mp-materialize build failed (exit $($res[1]))" "ERROR"; Exit 1 }
+}
+
+function Invoke-Build-Determinism {
+    # Same native-stderr discipline as Invoke-Build (audit 08-08).  mp-sim
+    # depends on mp-storage, so this also exercises the shared log loader
+    # (spec 018 MOD-9..11: replay inputs == materializer inputs).
+    Push-Location $root
+    $res = Invoke-Native -FilePath "cargo" -Arguments @("build", "-p", "mp-sim", "--release", "--bin", "mp-determinism")
+    Pop-Location
+    foreach ($line in @($res[0])) {
+        $s = ($line | Out-String).Trim()
+        if ($s -match "error|warning: unused|Finished") { Log $s "WARN" }
+    }
+    if ($res[1] -ne 0) { Log "mp-determinism build failed (exit $($res[1]))" "ERROR"; Exit 1 }
 }
 if (-not (Test-Path $mpOps)) {
     Log "mp-ops.exe not found - building release binary" "WARN"
@@ -268,6 +309,45 @@ Log "Scorecard archived: $cardPath (promotable=$($card.promotable))"
 
 $promotable = $card.promotable
 
+# ---- 1.5 decision determinism check (spec 018 MOD-9..11) ---------------------
+# Replay yesterday's recorded session through the PRODUCTION runtime (features
+# -> strategy -> risk, SIM-5) and require the decision log to be byte-identical
+# across two fresh runs. The promotion gate reads the artifact this writes
+# (data/scorecards/<date>.determinism.json): a window day without a PASSING
+# artifact does not promote, and a divergence is determinism-diff (P2,
+# ops/runbooks/determinism-diff.md). Fail-closed: on divergence the run exits 1
+# BEFORE any cold writes. Same build/staleness discipline as mp-ops above.
+$detBin = Join-Path $root "target\release\mp-determinism.exe"
+if (-not (Test-Path $detBin)) {
+    Log "mp-determinism.exe not found - building release binary" "WARN"
+    Invoke-Build-Determinism
+} else {
+    $newestRaw = Get-ChildItem (Join-Path $root "data\raw") -Filter "*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($newestRaw -and (Get-Item $detBin).LastWriteTime -lt $newestRaw.LastWriteTime) {
+        Log "mp-determinism.exe predates the newest raw recording - rebuilding (schema staleness guard)" "WARN"
+        Invoke-Build-Determinism
+    }
+}
+Log "Running mp-determinism --date $dateDashed ..."
+# Pin the replay config (sim/determinism.toml) so the artifact's strategy +
+# seed are the reviewed values, not an implicit default (MOD-10).
+$detCfg = Join-Path $root "sim\determinism.toml"
+$detArgs = @("--date", $dateDashed) + $required + @("--config", $detCfg, "--write")
+$env:RUST_LOG = "off"
+Push-Location $root
+try {
+    $detResult = Invoke-Native -FilePath $detBin -Arguments $detArgs
+} finally {
+    Pop-Location
+    Remove-Item Env:RUST_LOG -ErrorAction SilentlyContinue
+}
+$detOut = $detResult[0]; $detExit = $detResult[1]
+if ($detExit -ne 0) {
+    Log "Determinism check FAILED for $dateDashed (exit $detExit) - determinism-diff, promotion blocked. $detOut" "ERROR"
+    Exit 1
+}
+Log "Determinism check: passed for $dateDashed"
+
 # ---- 2. promotion streak verdict (before any exit, so the daily N/7 line
 #         prints even on dirty days - which is when it matters most) ---------
 # The verdict comes from the Rust gate (`mp-ops promote` reads
@@ -288,7 +368,17 @@ if ($promoteExit -eq 0) {
     if ($pv.promoted) {
         Log "PROMOTION GATE: PASSED - $($pv.consecutive_clean) consecutive clean days (required $($pv.required)). Window $($pv.window_start)..$($pv.window_end)!" "WARN"
     } else {
-        $why = if ($null -ne $pv.first_failure) { "first break $($pv.first_failure)" } else { "no clean days yet" }
+        # The `why` (2026-08-12): a full streak can be held back by the
+        # Phase-0 window condition even with no clean-day break - name the
+        # burst days from the verdict's burst_days field when that is the case.
+        $burstDates = @($pv.burst_days) | ForEach-Object { $_.date }
+        if ($burstDates.Count -gt 0) {
+            $why = "window carries stale bursts on $($burstDates -join ', ')"
+        } elseif ($null -ne $pv.first_failure) {
+            $why = "first break $($pv.first_failure)"
+        } else {
+            $why = "no clean days yet"
+        }
         Log "Promotion gate: $($pv.consecutive_clean) consecutive clean day(s), required $($pv.required) ($why)"
     }
 } else {
@@ -309,10 +399,20 @@ $tgDetail = "day ${dateDashed}: $($card.recordings.Count) recording(s)"
 if ($null -ne $pv) {
     $tgDetail += " | streak $($pv.consecutive_clean)/$($pv.required)"
 }
+# Per-recording margin line (2026-08-12): the numeric gate facts that make
+# a DIRTY day self-explaining - blocking count, coverage vs the 0.995 bar,
+# stale burst count, and the worst single gap in seconds.  `coverage`,
+# `stale_bursts` and `worst_gap_ns` are margin fields, never vetoes.
+function Get-RecordingLine {
+    param($Rec)
+    $clean = if ($Rec.clean) { "clean" } else { "DIRTY" }
+    $block = if ($null -ne $Rec.blocking_findings) { $Rec.blocking_findings } else { 0 }
+    $sb = if ($null -ne $Rec.stale_bursts) { $Rec.stale_bursts } else { 0 }
+    $wg = if ($null -ne $Rec.worst_gap_ns) { [Math]::Round($Rec.worst_gap_ns / 1e9) } else { 0 }
+    return ("  {0}/{1}: {2} (blocking={3} coverage={4} stale_bursts={5} worst_gap_s={6})" -f $Rec.venue, $Rec.symbol, $clean, $block, $Rec.coverage, $sb, $wg)
+}
 foreach ($rec in $card.recordings) {
-    $clean = if ($rec.clean) { "clean" } else { "DIRTY" }
-    $block = if ($null -ne $rec.blocking_findings) { $rec.blocking_findings } else { 0 }
-    $tgDetail += "`n  $($rec.venue)/$($rec.symbol): $clean (blocking=$block)"
+    $tgDetail += "`n" + (Get-RecordingLine $rec)
 }
 $tgSeverity = if ($promotable) { "p3" } else { "p2" }
 $tgArgs = @("telegram-send", "--id", "daily-pipeline", "--detail", $tgDetail, "--severity", $tgSeverity)
@@ -328,9 +428,7 @@ if ($tgResult[1] -ne 0) {
 
 if (-not $promotable) {
     foreach ($rec in $card.recordings) {
-        $clean = if ($rec.clean) { "clean" } else { "DIRTY" }
-        $block = if ($null -ne $rec.blocking_findings) { $rec.blocking_findings } else { 0 }
-        Log ("  {0}/{1}: {2} (blocking={3})" -f $rec.venue, $rec.symbol, $clean, $block)
+        Log (Get-RecordingLine $rec)
     }
     Log "NOT promotable - day $dateDashed fails the INT-4 gate. No cold writes." "WARN"
     # Exit 1 so Task Scheduler records a failed run (the outage is worth a flag).

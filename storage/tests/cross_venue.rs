@@ -104,6 +104,9 @@ fn cfg() -> CrossVenueConfig {
         min_trades: 1,
         cohort_gap_overlap: 0.5,
         max_price_band_pct: 5.0,
+        veracity_window_min: 60,
+        veracity_min_trades: 50,
+        veracity_trade_ratio: 0.5,
         symbol_cohorts: vec![SymbolCohort {
             underlying: "BTC".into(),
             members,
@@ -398,10 +401,12 @@ fn cvg_7_promotion_gate_unchanged() {
         event_count: 4,
         first_recv_ts_ns: Some(100),
         last_recv_ts_ns: Some(2100),
-        coverage: 0.5, // gapped ⇒ < 1.0
+        coverage: 0.5, // gapped ⇒ < MIN_COVERAGE (2026-08-12: the numeric bar)
         streams: Default::default(),
         gaps: vec![],
         stale_periods: vec![],
+        stale_bursts: vec![],
+        worst_gap_ns: 0,
         findings: vec![mp_storage::audit::AuditFinding {
             code: "coverage_gap".into(),
             detail: "gap".into(),
@@ -577,4 +582,132 @@ fn cvg_10_nan_fails_closed() {
     let json = serde_json::to_string_pretty(&f).unwrap();
     let _: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert!(bf[0].cohort.iter().all(|m| m.vwp.is_none()));
+}
+
+/// `n` trades spaced `spacing_s` seconds apart starting at `start_ns`, all at
+/// `price` with qty 1 — a dense enough stream for the veracity windows.
+fn dense(venue: Venue, sym: SymbolId, start_ns: i64, n: u64, price: f64, spacing_s: i64) -> Vec<EventEnvelope> {
+    (0..n)
+        .map(|i| trade(venue, sym, start_ns + (i as i64) * spacing_s * 1_000_000_000, i + 1, price))
+        .collect()
+}
+
+/// cvg_13: whole-day veracity — a member whose window VWP leaves the cohort
+/// median beyond `max_price_band_pct` is flagged `price_divergence`, even
+/// though its manifest shows NO gap (presence is fine; the value is not).
+#[test]
+fn cvg_13_veracity_flags_price_divergence_with_no_gap() {
+    let root = tmp("cvg13");
+    let (syms, bin, byb, okx) = table();
+    // Window 1 [0, 1h): all three venues at 100. Window 2 [1h, 2h): bybit
+    // drifts to 150 (50% outlier); binance/okx stay at 100 ⇒ cohort median 100
+    // ⇒ bybit deviates 50%, the healthy venues 0%.
+    let mut be = dense(Venue::BinanceFutures, bin, 100_000_000_000, 60, 100.0, 40);
+    be.extend(dense(Venue::BinanceFutures, bin, 3_700_000_000_000, 60, 100.0, 40));
+    compact(&root, Venue::BinanceFutures, "2026-08-04", be, &syms, "hB");
+    let mut ye = dense(Venue::Bybit, byb, 100_000_000_000, 60, 100.0, 40);
+    ye.extend(dense(Venue::Bybit, byb, 3_700_000_000_000, 60, 150.0, 40));
+    compact(&root, Venue::Bybit, "2026-08-04", ye, &syms, "hY");
+    let mut oe = dense(Venue::Okx, okx, 100_000_000_000, 60, 100.0, 40);
+    oe.extend(dense(Venue::Okx, okx, 3_700_000_000_000, 60, 100.0, 40));
+    compact(&root, Venue::Okx, "2026-08-04", oe, &syms, "hO");
+
+    let f = detect(&root, "2026-08-04", &cfg(), "s", "h").unwrap();
+    // Schema v2 carries the veracity section.
+    assert_eq!(f.schema_ver, 2);
+    let divs: Vec<&mp_storage::VeracityFinding> = f
+        .veracity
+        .iter()
+        .filter(|v| v.kind == "price_divergence")
+        .collect();
+    assert_eq!(divs.len(), 1, "exactly one price divergence: {:?}", f.veracity);
+    assert_eq!(divs[0].venue, "bybit", "the outlier is bybit");
+    assert_eq!(divs[0].window_from_ns, 3_600_000_000_000, "window 2");
+    assert_eq!(divs[0].trade_count, 60);
+    assert_eq!(divs[0].vwp, Some(150.0));
+    // No manifest gap on bybit that day (presence fine) — the divergence is a
+    // value finding, not a gap finding: the gap detector must have found 0
+    // bybit gaps.
+    assert!(f.findings.iter().all(|g| g.venue != "bybit"));
+}
+
+/// cvg_14: a member whose trade count collapses below `veracity_trade_ratio`
+/// of the liquid cohort median — with no manifest gap — is flagged
+/// `trade_drought`: dropped frames the aggregate coverage cannot see.
+#[test]
+fn cvg_14_veracity_flags_trade_drought_with_no_gap() {
+    let root = tmp("cvg14");
+    let (syms, bin, byb, okx) = table();
+    // Window 1: all liquid (60 trades). Window 2: binance/okx stay at 60,
+    // bybit collapses to 5 (frames dropped, presence still fine).
+    let mut be = dense(Venue::BinanceFutures, bin, 100_000_000_000, 60, 100.0, 40);
+    be.extend(dense(Venue::BinanceFutures, bin, 3_700_000_000_000, 60, 100.0, 40));
+    compact(&root, Venue::BinanceFutures, "2026-08-04", be, &syms, "hB");
+    let mut ye = dense(Venue::Bybit, byb, 100_000_000_000, 60, 100.0, 40);
+    ye.extend(dense(Venue::Bybit, byb, 3_700_000_000_000, 5, 100.0, 40));
+    compact(&root, Venue::Bybit, "2026-08-04", ye, &syms, "hY");
+    let mut oe = dense(Venue::Okx, okx, 100_000_000_000, 60, 100.0, 40);
+    oe.extend(dense(Venue::Okx, okx, 3_700_000_000_000, 60, 100.0, 40));
+    compact(&root, Venue::Okx, "2026-08-04", oe, &syms, "hO");
+
+    let f = detect(&root, "2026-08-04", &cfg(), "s", "h").unwrap();
+    let droughts: Vec<&mp_storage::VeracityFinding> = f
+        .veracity
+        .iter()
+        .filter(|v| v.kind == "trade_drought")
+        .collect();
+    assert_eq!(droughts.len(), 1, "exactly one drought: {:?}", f.veracity);
+    assert_eq!(droughts[0].venue, "bybit");
+    assert_eq!(droughts[0].window_from_ns, 3_600_000_000_000);
+    assert_eq!(droughts[0].trade_count, 5);
+    assert_eq!(droughts[0].cohort_median_trades, 60);
+    // bybit's price stayed in band — a pure count collapse, not a price issue.
+    assert!(f.veracity.iter().all(|v| v.kind != "price_divergence"));
+    // And the collapsed window is NOT a manifest gap (bybit has no findings).
+    assert!(f.findings.iter().all(|g| g.venue != "bybit"));
+}
+
+/// cvg_15: veracity needs a liquid cohort — a window where no member meets
+/// `veracity_min_trades` produces no findings (the reference would be noise),
+/// and the whole pass stays byte-deterministic.
+#[test]
+fn cvg_15_veracity_needs_liquid_cohort_and_is_deterministic() {
+    let root = tmp("cvg15");
+    let (syms, bin, byb, okx) = table();
+    // Thin day: 5 trades/venue — far below the 50-trade liquidity bar.
+    compact(
+        &root,
+        Venue::BinanceFutures,
+        "2026-08-04",
+        dense(Venue::BinanceFutures, bin, 100_000_000_000, 5, 100.0, 40),
+        &syms,
+        "hB",
+    );
+    compact(
+        &root,
+        Venue::Bybit,
+        "2026-08-04",
+        dense(Venue::Bybit, byb, 100_000_000_000, 5, 130.0, 40),
+        &syms,
+        "hY",
+    );
+    compact(
+        &root,
+        Venue::Okx,
+        "2026-08-04",
+        dense(Venue::Okx, okx, 100_000_000_000, 5, 100.0, 40),
+        &syms,
+        "hO",
+    );
+    let f1 = detect(&root, "2026-08-04", &cfg(), "s", "h").unwrap();
+    let f2 = detect(&root, "2026-08-04", &cfg(), "s", "h").unwrap();
+    // A 30% price outlier on a sub-liquid window must NOT be flagged — no
+    // liquid reference exists, so no claim is made (fail-closed, CVG-10 analog).
+    assert!(f1.veracity.is_empty(), "thin window ⇒ no veracity findings: {:?}", f1.veracity);
+    // Determinism covers the whole artifact including the veracity section.
+    assert_eq!(
+        serde_json::to_vec_pretty(&f1).unwrap(),
+        serde_json::to_vec_pretty(&f2).unwrap()
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

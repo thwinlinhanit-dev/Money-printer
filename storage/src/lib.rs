@@ -14,6 +14,7 @@ pub mod audit;
 pub mod compactor;
 pub mod cross_venue;
 pub mod dataset;
+pub mod determinism;
 pub mod feature_store;
 pub mod historical;
 pub mod layout;
@@ -47,13 +48,15 @@ pub enum StorageError {
     Refused(String),
 }
 
-pub use audit::{audit_raw_log, scorecard, AuditConfig, DailyScorecard, RawLogAudit};
+pub use audit::{audit_raw_log, scorecard, AuditConfig, DailyScorecard, RawLogAudit, RecordingBursts};
 pub use compactor::{compact_day, compact_day_verified, CompactStats};
 pub use cross_venue::{
     app_version, config_hash, detect, findings_file, parse_config, version_string, write_findings,
     Classification, CohortMember, CrossVenueConfig, Finding, Findings, SymbolCohort,
+    VeracityFinding,
 };
 pub use dataset::Dataset;
+pub use determinism::{determinism_file, load_determinism, write_determinism, DeterminismArtifact};
 pub use feature_store::{
     materialize, read_feature_meta, read_features, resolve_version, FeatureMeta, FeatureRow,
     StreamingFeatureStore,
@@ -67,12 +70,13 @@ pub use historical::{
 pub use historical_download::{unzip_single_csv, BinanceVisionSource, RetryPolicy, Throttle};
 pub use manifest::{derive_manifest, Gap, GapKind, QualityManifest, StreamStats};
 pub use materialize::{
-    materialize_logs, materialize_logs_limited, MaterializeStats, SymbolRow,
-    DEFAULT_MAX_BACKFILL_BYTES,
+    load_logs_merged, materialize_logs, materialize_logs_limited, LoadedLogs, MaterializeStats,
+    SymbolRow, DEFAULT_MAX_BACKFILL_BYTES,
 };
 pub use migrate::{migrate_log, MigrateError, MigrateOutcome};
 pub use promotion::{
-    check_promotion, check_promotion_n, PromotionVerdict, REQUIRED_CONSECUTIVE_CLEAN_DAYS,
+    check_promotion, check_promotion_determinism, check_promotion_n, PromotionVerdict,
+    REQUIRED_CONSECUTIVE_CLEAN_DAYS,
 };
 pub use prune::{verify_prunable, PruneRefusal};
 pub use scd2::{Scd2AppendError, SymbolScd2, SymbolVersion};

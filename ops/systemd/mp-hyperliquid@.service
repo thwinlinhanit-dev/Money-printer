@@ -1,0 +1,26 @@
+# Templated Hyperliquid collector unit (Phase-0 gate; ops/runbooks/vps-phase0-bringup.md):
+#   systemctl enable --now mp-hyperliquid@BTC mp-hyperliquid@ETH
+# Public market data only (PD-1) — no order path, no auth here.
+# %I expands to the symbol (BTC/ETH). Venue is hardcoded to hyperliquid.
+[Unit]
+Description=Money Printer collector for hyperliquid/%i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printer
+Group=printer
+EnvironmentFile=/etc/money-printer/venues.env
+WorkingDirectory=/opt/money-printer
+ExecStart=/opt/money-printer/bin/mp-collector --venue hyperliquid --symbol %I
+Restart=always
+RestartSec=2
+MemoryMax=512M
+CPUQuota=50%
+LimitNOFILE=65536
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/data
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

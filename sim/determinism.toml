@@ -1,0 +1,15 @@
+# Determinism-check runtime config (spec 018 MOD-9..11, sim/src/determinism.rs).
+# The replay's pinned strategy + seed. Parsed with deny_unknown_fields (a
+# typo'd key is an error, not a silent default).
+#
+# strategy:
+#   carry-v1 — the real funding strategy (spec 015): the full
+#              feature→strategy→risk decision path must be reproducible.
+#   null     — pipeline-only watcher: feature/decision determinism over the
+#              event stream, no strategy state (a weaker but always-valid check).
+#
+# Consumed by: mp-determinism --config sim/determinism.toml (daily pipeline,
+# after the scorecard, before compaction — the artifact the promotion gate
+# reads, vps-phase0-bringup.md sec 5).
+strategy = "carry-v1"
+seed = 12648430

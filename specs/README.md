@@ -26,7 +26,7 @@ should be updated).
 | 015 | [carry-v1 Strategy](015-carry-v1.md) | intelligence | 🔨 implementing |
 | 016 | [Feature Materialization](016-feature-materialization.md) | intelligence | 📝 draft |
 | 017 | [Screener Hit Journal & Grading](017-screener-grading.md) | intelligence | 📝 draft |
-| 018 | [Paper/Shadow/Live Mode Switch](018-mode-switch.md) | ops | 📝 draft |
+| 018 | [One Runtime, Four Modes (Paper/Shadow/Live Mode Switch)](018-mode-switch.md) | ops | ✅ ready |
 | 019 | [Collector Binary & Systemd](019-collector-binary.md) | collectors | 📝 draft |
 | 020 | [Binance REST Snapshot](020-binance-snapshot.md) | collectors | 📝 draft |
 | 021 | [Bot Command Journal](021-bot-journal.md) | ops | 📝 draft |

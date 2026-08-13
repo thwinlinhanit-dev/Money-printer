@@ -28,40 +28,26 @@ param(
     [int]$GraceSeconds         = 45
 )
 
-# Recordings default: empty = load the single source of truth
-# (ops/core_symbols.txt, one `venue:SYMBOL` per line; a plain SYMBOL means
-# the binance venue) so the recorded set always matches the daily pipeline's
-# required set.  Falls back to hyperliquid:BTC+ETH when the file is absent.
-function Resolve-Recordings {
-    param([string[]]$Raw)
-    # Emit one object per entry directly to the pipeline: an explicit array
-    # build + `return ,$items` was observed to double-wrap and collapse the
-    # pair list into a single Object[] (venue then stringified as
-    # "hyperliquid hyperliquid" in the spawn args - verified 2026-08-08).
-    foreach ($entry in $Raw) {
-        $entry = $entry.Trim()
-        if ($entry -match '^([a-z][a-z0-9]*):([A-Z0-9]{2,20})$') {
-            [pscustomobject]@{ venue = $Matches[1]; symbol = $Matches[2] }
-        } elseif ($entry -match '^([A-Z0-9]{2,20})$') {
-            [pscustomobject]@{ venue = 'binance'; symbol = $Matches[1] }
-        } else {
-            Write-Host "[!!] Invalid recording '$entry' (expected venue:SYMBOL or SYMBOL); aborting." -ForegroundColor Red
-            Exit 1
-        }
-    }
-}
+# Recordings default: empty = load the single source of truth from the
+# shared parser (ops/scripts/recordings.ps1, dot-sourced below — the SAME
+# resolver start_collectors.ps1 and scripts/daily_pipeline.ps1 use, so
+# recorded == required can never drift; audit 08-10).  `venue:SYMBOL` per
+# line, a plain SYMBOL means binance; falls back to hyperliquid:BTC+ETH when
+# the file is absent.  An explicit -Recordings override goes through the same
+# parser (which emits one object per entry — no array double-wrap).
+. (Join-Path $PSScriptRoot "scripts\recordings.ps1")
 
 $recPairs = @()
-if ($Recordings.Count -eq 0) {
-    $coreFile = Join-Path $PSScriptRoot "core_symbols.txt"
-    if (Test-Path $coreFile) {
-        # Trim BEFORE filtering so a line with leading whitespace is not
-        # silently dropped (audit 08-08).
-        $Recordings = @(Get-Content $coreFile | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9]' -and $_ -notmatch '^\s*#' } | Where-Object { $_ -ne '' })
+try {
+    if ($Recordings.Count -eq 0) {
+        $recPairs = @(Resolve-Recordings -CoreFile (Join-Path $PSScriptRoot "core_symbols.txt"))
+    } else {
+        $recPairs = @(Resolve-Recordings -Raw $Recordings)
     }
-    if ($Recordings.Count -eq 0) { $Recordings = @("hyperliquid:BTC", "hyperliquid:ETH") }
+} catch {
+    Write-Host "[!!] $_" -ForegroundColor Red
+    Exit 1
 }
-$recPairs = @(Resolve-Recordings $Recordings)
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $collectorExe = Join-Path $root "target\release\mp-collector.exe"
@@ -162,6 +148,20 @@ if ($RegisterTask) {
             Write-Host "[OK] Registered for $($env:USERNAME) (logon-only)." -ForegroundColor Green
         }
     }
+    Exit 0
+}
+
+# One watchdog owns collector supervision. Task Scheduler's IgnoreNew setting
+# only protects duplicate task launches; it cannot prevent a foreground/manual
+# invocation from racing the scheduled task and restarting the same processes.
+$watchdogCreated = $false
+$watchdogMutex = [System.Threading.Mutex]::new(
+    $true,
+    'Local\MoneyPrinterCollectorsWatchdog',
+    [ref]$watchdogCreated
+)
+if (-not $watchdogCreated) {
+    Write-Host "[INFO] MoneyPrinterCollectorsWatchdog is already running; exiting duplicate invocation." -ForegroundColor Yellow
     Exit 0
 }
 
@@ -298,8 +298,8 @@ while ($true) {
             # keep LastWriteTime fresh) can see this - today's 10h stale
             # window (2026-08-08) is exactly that case - so track the growth
             # rate over the last window and restart on a sustained stall.
-            # (A trace-file scan was tried first, but the --trace-file sink is
-            # buffered and stays 0 bytes until 8KB/exit - unusable for liveness.)
+            # The collector's --trace-file sink is unbuffered, so its latest
+            # reconnect/error line survives a watchdog restart for diagnosis.
             if (-not $needRestart -and $s.kind -eq 'collector' -and (Test-Path $dataLog)) {
                 $curLen = (Get-Item $dataLog).Length
                 if ($lastDataLenTs[$s.id] -ne [datetime]::MinValue) {

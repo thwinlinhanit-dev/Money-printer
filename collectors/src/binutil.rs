@@ -201,14 +201,16 @@ pub fn touch_heartbeat(raw_dir: &Path, name: &str) {
 /// the caller (watchdog passes `trace_<date>_<venue>_<symbol>.log`).
 #[derive(Clone)]
 pub struct SharedLogFile {
-    file: std::sync::Arc<std::sync::Mutex<std::io::BufWriter<File>>>,
+    // Do not buffer this sink. The watchdog may terminate a stale collector,
+    // and its last reconnect/error line must already be inspectable on disk.
+    file: std::sync::Arc<std::sync::Mutex<File>>,
 }
 
 impl SharedLogFile {
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
-            file: std::sync::Arc::new(std::sync::Mutex::new(std::io::BufWriter::new(file))),
+            file: std::sync::Arc::new(std::sync::Mutex::new(file)),
         })
     }
 }
@@ -237,5 +239,27 @@ impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for SharedLogFile {
     type Writer = Self;
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedLogFile;
+    use std::io::Write;
+
+    #[test]
+    fn shared_log_file_is_visible_without_waiting_for_drop() {
+        let path = std::env::temp_dir().join(format!("mp-trace-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut sink = SharedLogFile::open(&path).expect("open trace sink");
+        sink.write_all(b"reconnect diagnostic\\n")
+            .expect("write trace event");
+
+        assert_eq!(
+            std::fs::read(&path).expect("read trace file"),
+            b"reconnect diagnostic\\n"
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

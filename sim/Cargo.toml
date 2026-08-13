@@ -16,7 +16,15 @@ mp-core = { path = "../core" }
 mp-features = { path = "../features" }
 mp-strategies = { path = "../strategies" }
 mp-risk = { path = "../risk" }
+# The daily determinism check (mp-determinism, spec 018 MOD-9..11) loads the
+# day's raw logs and writes the gate artifact through mp-storage — the SAME
+# loader (`load_logs_merged`) and artifact layout the materializer and the
+# promotion gate use, so replay inputs == materializer inputs and the gate
+# reads one artifact convention.
+mp-storage = { path = "../storage" }
 serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

@@ -1120,6 +1120,16 @@ mod inner {
     }
 }
 
+/// RUST_LOG-aware filter that falls back to `info` when the var is unset, so
+/// existing deployments (watchdog --trace-file) keep today's verbosity while a
+/// probe can raise the level (RUST_LOG=mp_collectors=debug) to see the
+/// keepalive pings (2026-08-12; vps-phase0-bringup.md sec 6 A-B).
+#[cfg(feature = "live-ws")]
+fn tracing_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+}
+
 fn main() {
     #[cfg(not(feature = "live-ws"))]
     {
@@ -1142,17 +1152,26 @@ fn main() {
             Some(path) => {
                 match mp_collectors::binutil::SharedLogFile::open(std::path::Path::new(&path)) {
                     Ok(sink) => {
-                        tracing_subscriber::fmt().with_writer(sink).init();
+                        tracing_subscriber::fmt()
+                            .with_writer(sink)
+                            .with_env_filter(tracing_filter())
+                            .init();
                     }
                     Err(e) => {
                         eprintln!(
                             "warning: cannot open --trace-file {path}: {e}; tracing to stderr"
                         );
-                        tracing_subscriber::fmt::init();
+                        tracing_subscriber::fmt()
+                            .with_env_filter(tracing_filter())
+                            .init();
                     }
                 }
             }
-            None => tracing_subscriber::fmt::init(),
+            None => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(tracing_filter())
+                    .init();
+            }
         }
         if let Err(e) = inner::run() {
             tracing::error!(error = %e, "collector failed");

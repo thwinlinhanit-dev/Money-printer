@@ -73,6 +73,97 @@ pub struct MaterializeStats {
     pub symbols_hash: String,
 }
 
+/// Logs read, symbol-remapped, and k-way merged — the canonical day input
+/// shared by materialization and the daily determinism check.
+#[derive(Debug)]
+pub struct LoadedLogs {
+    /// All events from all logs, k-way merged by `(recv_ts_ns, stream_seq)`.
+    pub events: Vec<mp_core::EventEnvelope>,
+    /// The ONE shared symbol table every event was re-interned onto.
+    pub symbols: SymbolTable,
+    /// Raw events read across all logs (before merge).
+    pub events_read: u64,
+}
+
+/// Read, symbol-remap, and k-way merge event logs (MAT-5/EVT-5/EVT-8). The
+/// caller's log ORDER is ignored: paths are sorted canonically and exact
+/// duplicates removed, so `(venue, symbol)` → `SymbolId` assignment and the
+/// merge order depend only on the input SET, never argument order. Log-local
+/// symbol ids are re-interned onto ONE shared table (each log rebuilds its
+/// own table — ids collide across logs, EVT-8). Fail-closed: an unresolvable
+/// symbol reference, or a symbol-less log carrying data events, is an error,
+/// never a silent drop.
+///
+/// Shared with the daily determinism check (`mp-determinism`, spec 018
+/// MOD-9) so the replay consumes the exact event stream the materializer
+/// does — recorded features == checked features (FEA-4).
+pub fn load_logs_merged(logs: &[PathBuf]) -> Result<LoadedLogs, String> {
+    let mut logs: Vec<PathBuf> = logs.to_vec();
+    logs.sort();
+    logs.dedup();
+    if logs.is_empty() {
+        return Err("load_logs_merged: log set is empty".into());
+    }
+    let mut symbols = SymbolTable::new();
+    let mut sources: Vec<std::vec::IntoIter<mp_core::EventEnvelope>> = Vec::new();
+    let mut events_read = 0u64;
+    for path in &logs {
+        let mut reader =
+            LogReader::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+        let mut events = Vec::new();
+        for ev in &mut reader {
+            events.push(ev.map_err(|e| format!("read {}: {e}", path.display()))?);
+        }
+        events_read += events.len() as u64;
+        // Log-local ids → shared ids (EVT-8): same (venue, symbol) is one id
+        // everywhere, so cross-log feature state merges correctly.
+        let metas = reader.symbols().to_vec();
+        if metas.is_empty() {
+            // Symbol-less log: only control/status events can legitimately
+            // appear (a data event would have interned its symbol). A whale
+            // day with no positions records only GapDetected statuses, and
+            // control events produce no features — drop them instead of
+            // failing (audit 2026-08-08). Anything that is NOT a control
+            // event is unresolvable corruption and stays fail-closed.
+            let dropped = events.len();
+            events.retain(|ev| !matches!(ev.body, MarketEvent::Status { .. }));
+            if !events.is_empty() {
+                return Err(format!(
+                    "{}: {} event(s) reference symbols but the log has no symbol table (corrupt log?)",
+                    path.display(),
+                    events.len()
+                ));
+            }
+            tracing::warn!(
+                path = %path.display(),
+                dropped,
+                "symbol-less log: dropped control events"
+            );
+        } else {
+            for ev in events.iter_mut() {
+                let meta = metas.get(ev.symbol.0 as usize).ok_or_else(|| {
+                    format!(
+                        "{}: symbol id {} has no metadata (corrupt log?)",
+                        path.display(),
+                        ev.symbol.0
+                    )
+                })?;
+                let shared = symbols.intern_default(meta.venue, &meta.venue_symbol);
+                ev.symbol = shared;
+            }
+        }
+        sources.push(events.into_iter());
+    }
+    // Global stream order (EVT-5): a multi-log corpus must reach the engine
+    // sorted, or bar buckets would regress.
+    let events = mp_core::log::merge_sorted_events(sources);
+    Ok(LoadedLogs {
+        events,
+        symbols,
+        events_read,
+    })
+}
+
 /// Materialize features from recorded event logs into the FeatureStore at
 /// `root`. `logs` may span venues/symbols/days; each log contributes to the
 /// shared engine state (symbol ids remapped so BTCUSDT on Binance and BTC on
@@ -115,9 +206,9 @@ pub fn materialize_logs_limited(
     max_bytes: Option<u64>,
 ) -> Result<MaterializeStats, String> {
     // MAT-5 canonical input: sort paths byte-wise and drop exact duplicates
-    // (a twice-passed log would otherwise double its events). Symbol interning
-    // and the k-way merge then depend only on the input SET, never argument
-    // order — `--log a --log b` ≡ `--log b --log a`.
+    // (a twice-passed log would otherwise double its events). Sorting here is
+    // idempotent with `load_logs_merged` (which also sorts) so the RAM guard
+    // sees the same canonical set the loader will use.
     let mut logs: Vec<PathBuf> = logs.to_vec();
     logs.sort();
     logs.dedup();
@@ -145,62 +236,14 @@ pub fn materialize_logs_limited(
         ));
     }
 
-    // Read every log and remap its local symbol ids onto one shared table.
-    let mut symbols = SymbolTable::new();
-    let mut sources: Vec<std::vec::IntoIter<mp_core::EventEnvelope>> = Vec::new();
-    let mut events_read = 0u64;
-    for path in &logs {
-        let mut reader =
-            LogReader::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-        let mut events = Vec::new();
-        for ev in &mut reader {
-            events.push(ev.map_err(|e| format!("read {}: {e}", path.display()))?);
-        }
-        events_read += events.len() as u64;
-        // Log-local ids → shared ids (EVT-8): same (venue, symbol) is one id
-        // everywhere, so cross-log feature state merges correctly.
-        let metas = reader.symbols().to_vec();
-        if metas.is_empty() {
-            // Symbol-less log: only control/status events can legitimately
-            // appear (a data event would have interned its symbol). A whale
-            // day with no positions records only GapDetected statuses, and
-            // control events produce no features — drop them instead of
-            // failing the whole materialization (audit 2026-08-08). Anything
-            // that is NOT a control event is unresolvable corruption and
-            // stays fail-closed.
-            let dropped = events.len();
-            events.retain(|ev| !matches!(ev.body, MarketEvent::Status { .. }));
-            if !events.is_empty() {
-                return Err(format!(
-                    "{}: {} event(s) reference symbols but the log has no symbol table (corrupt log?)",
-                    path.display(),
-                    events.len()
-                ));
-            }
-            tracing::warn!(
-                path = %path.display(),
-                dropped,
-                "symbol-less log: dropped control events"
-            );
-        } else {
-            for ev in events.iter_mut() {
-                let meta = metas.get(ev.symbol.0 as usize).ok_or_else(|| {
-                    format!(
-                        "{}: symbol id {} has no metadata (corrupt log?)",
-                        path.display(),
-                        ev.symbol.0
-                    )
-                })?;
-                let shared = symbols.intern_default(meta.venue, &meta.venue_symbol);
-                ev.symbol = shared;
-            }
-        }
-        sources.push(events.into_iter());
-    }
-
-    // Global stream order (EVT-5): a midnight-straddling or multi-log corpus
-    // must reach the engine sorted, or bar buckets would regress.
-    let merged = mp_core::log::merge_sorted_events(sources);
+    // Read every log, remap log-local symbol ids onto one shared table
+    // (EVT-8), and k-way merge (EVT-5) — the canonical day input, shared with
+    // the daily determinism check (mp-determinism) so both consume the exact
+    // same event stream the materializer does.
+    let loaded = load_logs_merged(&logs)?;
+    let events_read = loaded.events_read;
+    let symbols = loaded.symbols;
+    let merged = loaded.events;
     let last_ts = merged.last().map(|e| e.recv_ts_ns).unwrap_or(0);
 
     let mut engine: FeatureEngine = engine_from_config(cfg).map_err(|e| e.to_string())?;

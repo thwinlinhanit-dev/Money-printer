@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Findings artifact schema version (CONV-20).
-pub const FINDINGS_SCHEMA_VER: u16 = 1;
+/// Findings artifact schema version (CONV-20). v2 adds the whole-day
+/// value-level veracity section (`Findings::veracity`, spec 026 amendment
+/// 2026-08-13) — old v1 artifacts still parse (`veracity` defaults empty).
+pub const FINDINGS_SCHEMA_VER: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +55,39 @@ pub struct Findings {
     pub detector_version: String,
     pub config_hash: String,
     pub findings: Vec<Finding>,
+    /// Whole-day value-level veracity findings (spec 026 amendment
+    /// 2026-08-13): presence looked fine but the VALUE of a feed diverged
+    /// from its cohort — the failure mode coverage structurally cannot see.
+    #[serde(default)]
+    pub veracity: Vec<VeracityFinding>,
+}
+
+/// One whole-day value-level veracity finding. `kind` is `price_divergence`
+/// (VWP left the cohort median by more than `max_price_band_pct`) or
+/// `trade_drought` (trade count collapsed below `veracity_trade_ratio` × the
+/// cohort median while the cohort stayed liquid) over a fixed window
+/// (default 1h). Evidence, never a gate (CVG-7) — and the same fail-closed
+/// discipline as gap findings: a non-finite VWP is never serialized and never
+/// silently defaulted (CVG-10).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VeracityFinding {
+    pub venue: String,
+    pub symbol: String,
+    /// Fixed window (UTC-day aligned) the finding covers.
+    pub window_from_ns: i64,
+    pub window_to_ns: i64,
+    /// `price_divergence` | `trade_drought`.
+    pub kind: String,
+    /// The venue's own metrics over the window.
+    pub trade_count: u64,
+    /// None when the venue had no trades — NaN is never serialized (CVG-10).
+    pub vwp: Option<f64>,
+    /// Cohort reference it diverged from (median of the liquid members).
+    pub cohort_vwp: Option<f64>,
+    pub cohort_median_trades: u64,
+    /// Liquid cohort members the reference was computed over.
+    pub cohort_size: usize,
+    pub evidence: String,
 }
 
 /// Tunables + per-venue symbol cohort mapping (CVG-9). `deny_unknown_fields` so
@@ -70,6 +105,18 @@ pub struct CrossVenueConfig {
     pub cohort_gap_overlap: f64,
     #[serde(default = "default_max_price_band_pct")]
     pub max_price_band_pct: f64,
+    /// Veracity check (2026-08-13 amendment): fixed window length in minutes
+    /// over which each member's trade count + VWP is compared to the cohort.
+    #[serde(default = "default_veracity_window_min")]
+    pub veracity_window_min: u64,
+    /// Minimum per-window trade count for a member to count as liquid (and
+    /// for its VWP to be meaningful) in the veracity reference.
+    #[serde(default = "default_veracity_min_trades")]
+    pub veracity_min_trades: u64,
+    /// A member whose window trade count falls below this fraction of the
+    /// cohort's median (while the cohort is liquid) is a `trade_drought`.
+    #[serde(default = "default_veracity_trade_ratio")]
+    pub veracity_trade_ratio: f64,
     pub symbol_cohorts: Vec<SymbolCohort>,
 }
 
@@ -89,6 +136,9 @@ impl CrossVenueConfig {
             min_trades: default_min_trades(),
             cohort_gap_overlap: default_cohort_gap_overlap(),
             max_price_band_pct: default_max_price_band_pct(),
+            veracity_window_min: default_veracity_window_min(),
+            veracity_min_trades: default_veracity_min_trades(),
+            veracity_trade_ratio: default_veracity_trade_ratio(),
             symbol_cohorts: Vec::new(),
         }
     }
@@ -108,6 +158,15 @@ fn default_cohort_gap_overlap() -> f64 {
 }
 fn default_max_price_band_pct() -> f64 {
     5.0
+}
+fn default_veracity_window_min() -> u64 {
+    60
+}
+fn default_veracity_min_trades() -> u64 {
+    50
+}
+fn default_veracity_trade_ratio() -> f64 {
+    0.5
 }
 
 /// Parse a config TOML (CVG-9). Unknown fields error (deny_unknown_fields).
@@ -179,13 +238,202 @@ pub fn detect(
             }
         }
     }
+    // Whole-day value-level veracity pass (2026-08-13 amendment): for every
+    // cohort, compare each member's per-window trade count + VWP against the
+    // cohort's median — catching silent corruption, a wrong feed, or dropped
+    // frames that presence (coverage/manifest gaps) structurally cannot see.
+    let mut veracity: Vec<VeracityFinding> = Vec::new();
+    for cohort in &cfg.symbol_cohorts {
+        veracity.extend(detect_veracity(root, &ds, date, cohort, cfg)?);
+    }
     Ok(Findings {
         schema_ver: FINDINGS_SCHEMA_VER,
         date: date.to_owned(),
         detector_version: detector_version.to_owned(),
         config_hash: config_hash.to_owned(),
         findings: out,
+        veracity,
     })
+}
+
+/// Whole-day value-level veracity check (spec 026 amendment 2026-08-13).
+/// Presence looked fine — the member's manifest shows no gap in a window, and
+/// the aggregate coverage passed — but the VALUE of the feed diverged from
+/// its cohort. Two kinds:
+///
+/// - `price_divergence` — the member's window VWP leaves the cohort's median
+///   VWP by more than `max_price_band_pct`;
+/// - `trade_drought` — the member's window trade count collapses below
+///   `veracity_trade_ratio` × the cohort's median count while the cohort
+///   itself is liquid (≥ `veracity_min_trades` per window).
+///
+/// Windows are fixed-length (`veracity_window_min`), aligned to the UTC day.
+/// The reference is the median of the LIQUID members only (a venue that
+/// barely trades is no reference for anyone). Same discipline as the gap
+/// detector: offline + read-only (CVG-1/6), deterministic (CVG-2, BTreeMap
+/// iteration + sorted output), evidence not a gate (CVG-7), non-finite VWP
+/// never serialized (CVG-10).
+fn detect_veracity(
+    root: &Path,
+    ds: &Dataset,
+    date: &str,
+    cohort: &SymbolCohort,
+    cfg: &CrossVenueConfig,
+) -> Result<Vec<VeracityFinding>, StorageError> {
+    let win_ns = cfg.veracity_window_min.saturating_mul(60_000_000_000) as i64;
+    if win_ns <= 0 {
+        return Ok(Vec::new());
+    }
+    // Per-venue trade streams for members that recorded the date (BTreeMap
+    // iteration ⇒ deterministic, CONV-10). No recording ⇒ nothing to verify.
+    let mut streams: Vec<(String, String, Vec<EventEnvelope>)> = Vec::new();
+    for (vslug, symbol) in &cohort.members {
+        let Some(venue) = Venue::from_slug(vslug) else {
+            continue;
+        };
+        if manifest_opt(root, venue, date)?.is_none() {
+            continue;
+        }
+        let trades = ds.trades_day(venue, symbol, date)?;
+        if trades.is_empty() {
+            continue;
+        }
+        streams.push((venue.slug().to_owned(), symbol.clone(), trades));
+    }
+    if streams.len() < cfg.min_cohort {
+        return Ok(Vec::new()); // no cohort to diverge from (CVG-3 analog)
+    }
+    let first = streams
+        .iter()
+        .map(|(_, _, t)| t[0].recv_ts_ns)
+        .min()
+        .unwrap_or(0);
+    let last = streams
+        .iter()
+        .map(|(_, _, t)| t[t.len() - 1].recv_ts_ns)
+        .max()
+        .unwrap_or(0);
+    let day_start = first.div_euclid(86_400_000_000_000) * 86_400_000_000_000;
+
+    let mut out: Vec<VeracityFinding> = Vec::new();
+    let mut cursors = vec![0usize; streams.len()];
+    let mut ws = day_start;
+    while ws < last {
+        let we = ws + win_ns;
+        // Per-member metrics over [ws, we) via monotonic cursors (streams are
+        // sorted by recv_ts, windows advance forward ⇒ O(n) total).
+        let mut rows: Vec<(usize, u64, f64)> = Vec::with_capacity(streams.len());
+        for (i, (_, _, trades)) in streams.iter().enumerate() {
+            let mut count = 0u64;
+            let mut notional = 0.0_f64;
+            let mut qty = 0.0_f64;
+            while cursors[i] < trades.len() && trades[cursors[i]].recv_ts_ns < we {
+                let e = &trades[cursors[i]];
+                if e.recv_ts_ns >= ws {
+                    if let MarketEvent::Trade { price, qty: q, .. } = &e.body {
+                        notional += price * q;
+                        qty += q;
+                        count += 1;
+                    }
+                }
+                cursors[i] += 1;
+            }
+            let v = if qty > 0.0 { notional / qty } else { f64::NAN };
+            rows.push((i, count, v));
+        }
+        // Reference from the liquid members only; non-finite VWP is excluded
+        // and never propagated (CVG-10).
+        let liquid: Vec<&(usize, u64, f64)> = rows
+            .iter()
+            .filter(|(_, c, v)| *c >= cfg.veracity_min_trades && v.is_finite() && *v != 0.0)
+            .collect();
+        if liquid.len() >= cfg.min_cohort {
+            let med_vwp = median(liquid.iter().map(|(_, _, v)| *v));
+            let med_trades =
+                median(liquid.iter().map(|(_, c, _)| *c as f64)).round() as u64;
+            let band = cfg.max_price_band_pct / 100.0;
+            for (i, count, v) in &rows {
+                let (vslug, symbol, _) = &streams[*i];
+                // Price divergence: only meaningful when the member itself is
+                // liquid enough for its VWP to be a real number.
+                if *count >= cfg.veracity_min_trades && v.is_finite() {
+                    let dev = (v - med_vwp).abs();
+                    if dev > band * med_vwp.abs() {
+                        out.push(VeracityFinding {
+                            venue: vslug.clone(),
+                            symbol: symbol.clone(),
+                            window_from_ns: ws,
+                            window_to_ns: we,
+                            kind: "price_divergence".into(),
+                            trade_count: *count,
+                            vwp: Some(*v),
+                            cohort_vwp: Some(med_vwp),
+                            cohort_median_trades: med_trades,
+                            cohort_size: liquid.len(),
+                            evidence: format!(
+                                "vwp {v:.4} deviates {:.2}% from cohort median {med_vwp:.4} (band {:.1}%)",
+                                (dev / med_vwp.abs()) * 100.0,
+                                cfg.max_price_band_pct
+                            ),
+                        });
+                    }
+                }
+                // Trade drought: the member traded (so presence is fine) but
+                // collapsed vs a liquid cohort — dropped frames coverage
+                // cannot see.
+                if *count > 0
+                    && med_trades >= cfg.veracity_min_trades
+                    && (*count as f64) < cfg.veracity_trade_ratio * (med_trades as f64)
+                {
+                    out.push(VeracityFinding {
+                        venue: vslug.clone(),
+                        symbol: symbol.clone(),
+                        window_from_ns: ws,
+                        window_to_ns: we,
+                        kind: "trade_drought".into(),
+                        trade_count: *count,
+                        vwp: if v.is_finite() { Some(*v) } else { None },
+                        cohort_vwp: Some(med_vwp),
+                        cohort_median_trades: med_trades,
+                        cohort_size: liquid.len(),
+                        evidence: format!(
+                            "{} trades vs cohort median {med_trades} (ratio {:.2} < {:.2})",
+                            count,
+                            (*count as f64) / (med_trades as f64),
+                            cfg.veracity_trade_ratio
+                        ),
+                    });
+                }
+            }
+        }
+        if we <= ws {
+            break; // window width clamped to 0 (defensive; never loops forever)
+        }
+        ws = we;
+    }
+    // Explicit deterministic order (CONV-10): venue, then window, then kind.
+    out.sort_by(|a, b| {
+        a.venue
+            .cmp(&b.venue)
+            .then(a.window_from_ns.cmp(&b.window_from_ns))
+            .then(a.kind.cmp(&b.kind))
+    });
+    Ok(out)
+}
+
+/// Median of an f64 iterator (sorted copy; empty ⇒ NaN).
+fn median<I: IntoIterator<Item = f64>>(vals: I) -> f64 {
+    let mut v: Vec<f64> = vals.into_iter().collect();
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
 }
 /// Classify one gap window on (venue, symbol) (CVG-3..5, CVG-10).
 #[allow(clippy::too_many_arguments)]

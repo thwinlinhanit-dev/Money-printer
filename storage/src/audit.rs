@@ -8,6 +8,18 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+/// Minimum receive-clock coverage for a promotable day. This is the ROADMAP
+/// Phase-0 validation gate: "7 consecutive days with manifest coverage
+/// ≥ 0.995 on core symbols" (spec 024, decision 2026-08-12 — the gate
+/// criterion is the numeric coverage bar; a single sub-tolerance gap or a
+/// recovered stale blip must not veto an otherwise-complete day).
+pub const MIN_COVERAGE: f64 = 0.995;
+
+/// Two `Status::Stale` events farther apart than this (ns) start a new burst
+/// window. Matches `ops/scripts/audit_bursts.py` `BURST_GAP_S = 90` so the
+/// burst grouping lives in one place (spec 024, decision 2026-08-12).
+pub const STALE_BURST_GAP_NS: i64 = 90_000_000_000;
+
 /// Expected identity and quality thresholds for one raw recording.
 #[derive(Debug, Clone)]
 pub struct AuditConfig {
@@ -102,30 +114,51 @@ pub struct RawLogAudit {
     pub coverage: f64,
     pub streams: BTreeMap<String, u64>,
     pub gaps: Vec<TimeRange>,
+    /// Raw `Status::Stale` events (0-width ranges at each event's recv time).
     pub stale_periods: Vec<TimeRange>,
+    /// Stale events collapsed into burst windows (events within
+    /// [`STALE_BURST_GAP_NS`] of each other are one burst; start = first event,
+    /// end = last event). Margin field — never a blocker (2026-08-12).
+    pub stale_bursts: Vec<TimeRange>,
+    /// Longest recv-clock hole in ns. Margin field — the gate's numeric
+    /// criterion is aggregate [`RawLogAudit::coverage`], but the worst single
+    /// hole must stay visible in every scorecard.
+    pub worst_gap_ns: i64,
     pub findings: Vec<AuditFinding>,
 }
 
 impl RawLogAudit {
     /// A clean audit is the only state compaction may accept (INT-4).
     ///
-    /// Clean means *no blocking findings* (spec 024, decision 2026-08-04):
-    /// `recv_time_reversal` is a warning, not a blocker — it records pure
-    /// arrival-order jitter with zero frame loss (the collector reorders
-    /// REST-injected events relative to WS frames; the log holds every event).
+    /// Clean means the ROADMAP Phase-0 criterion is met: `coverage ≥
+    /// MIN_COVERAGE` (0.995) with no blocking findings (spec 024, decisions
+    /// 2026-08-04 and 2026-08-12). Coverage is the aggregate completeness
+    /// number — a single gap's severity is its contribution to coverage, not
+    /// a binary veto — so `recv_time_reversal`, `stale_stream` (a COL-2
+    /// recovery signal: the collector already reconnected) and `coverage_gap`
+    /// are warnings. Codes that mean the data cannot be attributed (parse /
+    /// identity / provenance) or that record loss coverage cannot see
+    /// (venue-side `sequence_gap`, dropped frames) still block, and
+    /// `low_coverage` carries the numeric verdict when the bar is missed.
     pub fn is_clean(&self) -> bool {
-        self.event_count > 0 && self.findings.iter().all(|f| !is_blocking_finding(&f.code))
+        self.event_count > 0
+            && self.coverage >= MIN_COVERAGE
+            && self.findings.iter().all(|f| !is_blocking_finding(&f.code))
     }
 }
 
 /// Findings that make a recording ineligible for promotion. Every code that
-/// indicates real data loss or unattributable data blocks: malformed/unreadable
-/// frames, missing provenance, venue/symbol identity issues, venue-side gaps,
-/// backpressure drops, and recv-clock holes (coverage gaps). `recv_time_reversal`
-/// is the single non-blocking code: all frames are present, only their receive
-/// order jitters (spec 024, decision 2026-08-04).
+/// indicates unattributable data — malformed/unreadable frames, missing
+/// provenance, venue/symbol identity issues, an empty log — or real loss the
+/// aggregate coverage number cannot see (venue-side `sequence_gap`, dropped
+/// frames) blocks. `recv_time_reversal`, `stale_stream` and `coverage_gap` are
+/// warnings: their severity is already captured by `coverage` (spec 024,
+/// decision 2026-08-12 — on 2026-08-09 a single ~138s gap plus 400 stale
+/// events left coverage at 0.9984, above the 0.995 bar; a sub-tolerance gap
+/// must not veto such a day), and `low_coverage` is the blocker that carries
+/// the numeric verdict.
 pub fn is_blocking_finding(code: &str) -> bool {
-    !matches!(code, "recv_time_reversal")
+    !matches!(code, "recv_time_reversal" | "stale_stream" | "coverage_gap")
 }
 
 /// Audit a single `(venue, symbol)` raw log.  Any malformed or older schema is
@@ -139,6 +172,8 @@ pub fn audit_raw_log(path: &Path, config: &AuditConfig) -> RawLogAudit {
         streams: BTreeMap::new(),
         gaps: Vec::new(),
         stale_periods: Vec::new(),
+        stale_bursts: Vec::new(),
+        worst_gap_ns: 0,
         findings: Vec::new(),
     };
 
@@ -177,6 +212,8 @@ pub fn audit_raw_log(path: &Path, config: &AuditConfig) -> RawLogAudit {
                     format!("{previous} then {}", event.recv_ts_ns),
                 ));
             } else if event.recv_ts_ns - previous > config.max_gap_ns {
+                let duration = event.recv_ts_ns - previous;
+                audit.worst_gap_ns = audit.worst_gap_ns.max(duration);
                 audit.gaps.push(TimeRange {
                     start_ns: previous,
                     end_ns: event.recv_ts_ns,
@@ -216,6 +253,23 @@ pub fn audit_raw_log(path: &Path, config: &AuditConfig) -> RawLogAudit {
                 .push(finding("missing_stream", stream.clone()));
         }
     }
+    // Group stale status events into burst windows (2026-08-12). Sorted
+    // defensively: recv order can jitter (`recv_time_reversal` is a warning,
+    // not a blocker, so a stale event may land slightly out of order).
+    let mut stale_ts: Vec<i64> = audit.stale_periods.iter().map(|p| p.start_ns).collect();
+    stale_ts.sort_unstable();
+    for ts in stale_ts {
+        match audit.stale_bursts.last_mut() {
+            Some(burst) if ts - burst.end_ns <= STALE_BURST_GAP_NS => {
+                burst.end_ns = burst.end_ns.max(ts);
+            }
+            _ => audit.stale_bursts.push(TimeRange {
+                start_ns: ts,
+                end_ns: ts,
+            }),
+        }
+    }
+
     if !audit.gaps.is_empty() {
         audit.findings.push(finding(
             "coverage_gap",
@@ -229,6 +283,15 @@ pub fn audit_raw_log(path: &Path, config: &AuditConfig) -> RawLogAudit {
         ));
     }
     audit.coverage = coverage(&audit);
+    if audit.event_count > 0 && audit.coverage < MIN_COVERAGE {
+        audit.findings.push(finding(
+            "low_coverage",
+            format!(
+                "coverage {:.4} < required {MIN_COVERAGE}",
+                audit.coverage
+            ),
+        ));
+    }
     audit
 }
 
@@ -307,6 +370,14 @@ pub struct DailyScorecard {
     pub date: String,
     pub recordings: Vec<ScorecardEntry>,
     pub promotable: bool,
+    /// Per-recording stale-burst counts for the Phase-0 promotion window
+    /// condition (spec 024, amendment 2026-08-12). Zero `stale_bursts` on
+    /// every required recording for every day in the qualifying window is
+    /// required for `PROMOTED`; a burst alone never makes a day
+    /// non-promotable (the 2026-08-12 tolerance semantics hold — the streak
+    /// keeps counting bursty days, the window condition is what holds
+    /// promotion back).
+    pub recording_bursts: Vec<RecordingBursts>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -317,24 +388,41 @@ pub struct ScorecardEntry {
     pub audit: RawLogAudit,
 }
 
+/// One recording's stale-burst count, carried into the promotion gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecordingBursts {
+    pub venue: String,
+    pub symbol: String,
+    /// Number of stale-event burst windows on this recording that day
+    /// (margin, never a per-day veto — see [`DailyScorecard::recording_bursts`]).
+    pub stale_bursts: usize,
+}
+
 pub fn scorecard(
     date: impl Into<String>,
     entries: Vec<(Venue, String, RawLogAudit)>,
 ) -> DailyScorecard {
-    let recordings = entries
-        .into_iter()
-        .map(|(venue, symbol, audit)| ScorecardEntry {
+    let mut recordings = Vec::with_capacity(entries.len());
+    let mut recording_bursts = Vec::with_capacity(entries.len());
+    for (venue, symbol, audit) in entries {
+        recording_bursts.push(RecordingBursts {
+            venue: venue.slug().to_owned(),
+            symbol: symbol.clone(),
+            stale_bursts: audit.stale_bursts.len(),
+        });
+        recordings.push(ScorecardEntry {
             venue: venue.slug().to_owned(),
             symbol,
             clean: audit.is_clean(),
             audit,
-        })
-        .collect::<Vec<_>>();
+        });
+    }
     let promotable = !recordings.is_empty() && recordings.iter().all(|entry| entry.clean);
     DailyScorecard {
         date: date.into(),
         recordings,
         promotable,
+        recording_bursts,
     }
 }
 
@@ -554,6 +642,8 @@ mod tests {
             streams: BTreeMap::new(),
             gaps: vec![],
             stale_periods: vec![],
+            stale_bursts: vec![],
+            worst_gap_ns: 0,
             findings: vec![finding(
                 "recv_time_reversal",
                 "arrival-order jitter, all frames present",
@@ -561,19 +651,35 @@ mod tests {
         };
         assert!(audit.is_clean(), "reversal-only log must be promotable");
 
-        // Any data-loss finding still blocks, even alongside warnings.
+        // Loss the coverage number cannot see still blocks.
         audit
             .findings
             .push(finding("sequence_gap", "venue-side gap"));
         assert!(!audit.is_clean(), "sequence_gap must block promotion");
         audit.findings.clear();
+        audit.findings.push(finding("backpressure_loss", "dropped"));
+        assert!(!audit.is_clean(), "backpressure_loss must block promotion");
+
+        // COL-2 recovery signals are warnings, not vetoes (2026-08-12).
+        audit.findings.clear();
         audit.findings.push(finding("stale_stream", "stale status"));
-        assert!(!audit.is_clean(), "stale_stream remains a blocker");
+        assert!(
+            audit.is_clean(),
+            "stale_stream is a warning (collector already recovered), not a blocker"
+        );
+        audit.findings.clear();
+        audit.findings.push(finding("coverage_gap", "one 138s gap"));
+        assert!(
+            audit.is_clean(),
+            "a single sub-tolerance gap must not veto a 0.9984-coverage day"
+        );
     }
 
     #[test]
     fn int_7_blocking_code_classification() {
         assert!(!is_blocking_finding("recv_time_reversal"));
+        assert!(!is_blocking_finding("stale_stream"));
+        assert!(!is_blocking_finding("coverage_gap"));
         for code in [
             "legacy_or_malformed",
             "unreadable_log",
@@ -586,11 +692,77 @@ mod tests {
             "missing_snapshot_source",
             "sequence_gap",
             "backpressure_loss",
-            "coverage_gap",
-            "stale_stream",
+            "low_coverage",
         ] {
             assert!(is_blocking_finding(code), "{code} must block");
         }
+    }
+
+    #[test]
+    fn int_8_coverage_below_threshold_blocks_without_findings() {
+        // The numeric bar is the gate: coverage 0.99 is DIRTY even with no
+        // other findings (spec 024, decision 2026-08-12).
+        let audit = RawLogAudit {
+            event_count: 10,
+            first_recv_ts_ns: Some(1),
+            last_recv_ts_ns: Some(86_400_000_000_000),
+            coverage: 0.99,
+            streams: BTreeMap::new(),
+            gaps: vec![],
+            stale_periods: vec![],
+            stale_bursts: vec![],
+            worst_gap_ns: 0,
+            findings: vec![],
+        };
+        assert!(!audit.is_clean(), "coverage 0.99 < 0.995 must block");
+
+        let mut at_bar = audit.clone();
+        at_bar.coverage = 0.995;
+        assert!(at_bar.is_clean(), "coverage at the 0.995 bar is clean");
+    }
+
+    #[test]
+    fn int_9_stale_bursts_group_nearby_stale_events_and_worst_gap() {
+        fn stale_event(recv: i64) -> EventEnvelope {
+            let mut e = event(recv);
+            e.body = MarketEvent::Status {
+                kind: mp_core::StatusKind::Stale,
+                detail: "stale".into(),
+            };
+            e
+        }
+        // 1s event; stale at 10s and 25s (15s apart -> one burst); data at
+        // 30s; then a >120s recv hole (170s -> worst gap), stale at 200s,
+        // data at 201s.
+        let path = fixture(vec![
+            event(1_000_000_000),
+            stale_event(10_000_000_000),
+            stale_event(25_000_000_000),
+            event(30_000_000_000),
+            stale_event(200_000_000_000),
+            event(201_000_000_000),
+        ]);
+        let audit = audit_raw_log(
+            &path,
+            &AuditConfig::single(Venue::BinanceFutures, "BTCUSDT"),
+        );
+        assert_eq!(audit.stale_bursts.len(), 2, "{:?}", audit.stale_bursts);
+        assert_eq!(audit.stale_bursts[0].start_ns, 10_000_000_000);
+        assert_eq!(audit.stale_bursts[0].end_ns, 25_000_000_000);
+        assert_eq!(audit.stale_bursts[1].start_ns, 200_000_000_000);
+        assert_eq!(audit.worst_gap_ns, 170_000_000_000);
+        // The gap and the stale events are reported, but they are warnings:
+        // the day fails on the numeric bar (coverage ~0.15 < 0.995).
+        assert!(
+            audit
+                .findings
+                .iter()
+                .any(|f| f.code == "low_coverage"),
+            "{:?}",
+            audit.findings
+        );
+        assert!(!audit.is_clean());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -603,6 +775,8 @@ mod tests {
             streams: BTreeMap::new(),
             gaps: vec![],
             stale_periods: vec![],
+            stale_bursts: vec![],
+            worst_gap_ns: 0,
             findings: vec![],
         };
         let bad = RawLogAudit {

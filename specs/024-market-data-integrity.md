@@ -74,6 +74,73 @@ authenticated trading, strategy changes, and long-running hosting policy.
   `sequence_gap`, `backpressure_loss`, `coverage_gap`, `stale_stream` —
   remains a blocker.  Consumers of an audit must judge cleanliness by the
   `clean` flag / `is_blocking_finding`, never by "findings non-empty".
+- 2026-08-12 (supersedes part of the above): the Phase-0 gate is now the
+  ROADMAP's numeric bar — **`coverage ≥ 0.995`** (`MIN_COVERAGE`) with no
+  identity/provenance/parse findings and no loss the coverage number cannot
+  see.  `stale_stream` (a COL-2 recovery signal — the collector already
+  reconnected) and `coverage_gap` (its severity IS the aggregate coverage
+  number) are warnings, and `low_coverage` is the blocker that carries the
+  numeric verdict.  Rationale from live data: on 2026-08-09 a single ~138s
+  recv hole plus ~400 stale events left coverage at 0.9984 — above the
+  0.995 criterion yet DIRTY under the old any-blocking-finding gate; the
+  gate was stricter than its own requirement and structurally unmeetable on
+  any network.  `sequence_gap` and `backpressure_loss` remain blockers:
+  they are real loss the recv-clock coverage number cannot see.  Margin
+  fields keep every verdict self-explaining: `worst_gap_ns` (largest hole),
+  `stale_bursts` (stale events grouped into windows, 90s gap — same
+  constant the profiler uses), both now in the audit JSON and scorecard.
+  Consumers must still judge cleanliness by the `clean` flag /
+  `is_blocking_finding`, never by "findings non-empty".
+- 2026-08-12 (ENFORCED — implemented in `mp_storage::promotion`
+  `check_promotion` and `mp-ops promote`): the **Phase-0 promotion gate**
+  adds one window-level condition: the qualifying 7-day window must have
+  **zero `stale_bursts`** across every required recording.  This is a
+  PROMOTION condition, NOT a per-day veto: a day with a stale burst still
+  audits and still counts toward the streak (the numeric bar above is
+  unchanged — the 2026-08-12 tolerance semantics hold), but `PROMOTED`
+  additionally requires the window's `stale_bursts` total to be 0, on
+  every required venue:symbol, for every day in the window.  Rationale:
+  the VPS move's entire premise is that datacenter egress eliminates the
+  ~3h20m-periodic bursts that dirtied the Windows host (08-08 0.989,
+  08-10 0.983, 08-11 0.993 vs 08-09 0.9984 — the bursts are a real path
+  hole, not a collector defect); the runbook's §5 already names "zero
+  `stale_bursts` across all 7 days" as the root-cause proof, and this
+  makes that proof enforced rather than aspirational — a 7/7 `PROMOTED`
+  on a host that still bursts every ~3h20m would validate the wrong
+  hypothesis.  The condition is achievable by design on the target host
+  (that is the claim being validated), and a failed verdict stays
+  informative: the streak counter keeps advancing, the `why` names the
+  burst days, and the §6 A-B decides the next action (do not retire the
+  Windows recorder while the hypothesis is unproven).  Implementation:
+  `DailyScorecard` carries per-recording `stale_bursts` counts
+  (`recording_bursts`, populated by `scorecard()` and by `mp-ops promote`
+  scoped to the `--required` set — a day's extra recordings never veto a
+  window covering the required corpus); the verdict exposes `burst_days`
+  (date + the venue:symbol recordings that carried bursts) as the `why`
+  when a full streak is held back; and the qualifying window is the
+  latest burst-free run of `REQUIRED_CONSECUTIVE_CLEAN_DAYS` inside the
+  streak — on equal-length runs the most recent is preferred, so a fresh
+  burst-free tail promotes immediately instead of being masked by an old
+  bursty streak.  Scoped to the Phase-0 gate (the first promotion that
+  qualifies the corpus); after it, the ongoing daily gate remains the
+  numeric bar and `stale_bursts` / `worst_gap_ns` stay margins in every
+  scorecard.  `worst_gap_ns` is NOT part of the condition: sub-tolerance
+  holes are the designed coverage trade (the 0.995 bar absorbs them),
+  while the periodic stale burst is the signature that distinguishes a
+  clean path from a degraded one.  Evidence the two conditions measure
+  different degradations (2026-08-12 survey, `ops/scripts/margin_correlation.py`
+  over the 8 real hyperliquid recordings 08-08..08-11): `coverage` vs
+  `worst_gap_ns` r = −0.855 (p < 0.05 — the numeric bar is driven by the
+  largest hole, as designed), but `worst_gap_ns` vs `stale_bursts` r = +0.448
+  and `coverage` vs `stale_bursts` r = −0.392, both n.s.  The strongest
+  pairwise evidence is non-monotonic: the only CLEAN day (08-09) had the
+  smallest gap (136s) and the most bursts (11–15), while 08-11 (dirty, gap
+  239s) had just 2 bursts.  A clean day can be bursty and a dirty day can be
+  burst-light — the window condition is not redundant with the numeric bar
+  (it vetoes days the bar passes, e.g. 08-09) and it is not a proxy for it
+  (it lets days through the bar rejects, e.g. 08-11).  Caveat: n = 8 is
+  small; re-run `margin_correlation.py` as VPS days accumulate to sharpen
+  both correlations.
 - 2026-08-04: `mp-audit --json` emits a lightweight per-recording summary
   (clean flag, counts, per-code findings histogram) instead of the full
   findings Vec — legacy files hold millions of findings, and serializing them

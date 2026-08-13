@@ -42,6 +42,7 @@ pub const ALERTS: &[AlertSpec] = &[
     alert!("killswitch-tripped", P1),
     alert!("band-accuracy-decay", P3),
     alert!("telegram-stale", P2),
+    alert!("pipeline-stale", P1),
 ];
 
 /// Runbook path for an alert id (spec 009 convention).

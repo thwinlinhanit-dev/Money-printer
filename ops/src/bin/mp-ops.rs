@@ -39,6 +39,21 @@
 //!           fails loudly (exit 2) with the "dead until creds" reason — never
 //!           a silent drop, never a fake send. --ts-ns injects the dispatch
 //!           timestamp (default now; PD-3 edge clock).
+//!   status [--scorecards-dir DIR] [--required venue:symbol ...] [--trend-days N]
+//!           [--pipeline-log PATH] [--backup-manifest PATH] [--latch PATH]
+//!           OPS-16 one command that tells the truth: trading mode, the
+//!           promotion verdict, the latest scorecard with margins, the
+//!           per-day coverage trend, the last backup manifest entry, the
+//!           daily pipeline's last log line, and the kill-latch state — one
+//!           JSON document. Missing artifacts report `present: false`;
+//!           corrupt gate/safety artifacts fail closed (exit non-zero).
+//!   pipeline-stale [--scorecards-dir DIR] [--deadline-min N] [--dedupe-ns N]
+//!           [--ts-ns N] [--telegram] [--webhook]
+//!           OPS-17 dead-man for the daily gate: raises a P1 when the
+//!           previous UTC day's scorecard has not landed by the deadline
+//!           (default 15m past UTC midnight — the 00:05 gate plus margin).
+//!           Deferred before the deadline (safe to run hourly); --ts-ns
+//!           injects the clock for tests.
 //!   telegram-stale [--dir DIR] [--threshold-hours N] [--dedupe-ns N] [--telegram]
 //!           OPS-14 near-real-time watch on the quiet-hours batch ledger:
 //!           raises telegram-stale (P2) when a dispatch sits queued longer
@@ -70,16 +85,20 @@
 //!     p1-webhook --id recon-diverged --detail 'BTCUSDT position mismatch'
 
 use mp_core::log::LogReader;
-use mp_core::{EventEnvelope, SymbolTable, Venue};
+use mp_core::{EventEnvelope, SymbolTable, TradingMode, Venue};
 use mp_ops::{
     append_batch, append_run_record, band_accuracy_decay_alert, flush_batch,
     load_band_accuracy_trend, load_telegram_batch, post_telegram, stale_batch_alert, Alert,
-    AlertRouter, Channel, Dispatch, QuietHours, RouteOutcome, Severity, TelegramConfig,
+    AlertRouter, Channel, Dispatch, KillLatch, LatchScope, QuietHours, RouteOutcome, Severity,
+    TelegramConfig,
 };
-use mp_storage::promotion::check_promotion;
-use mp_storage::{audit_raw_log, compactor, AuditConfig, DailyScorecard, RawLogAudit};
+use mp_storage::promotion::check_promotion_determinism;
+use mp_storage::{
+    audit_raw_log, compactor, load_determinism, AuditConfig, DailyScorecard, DeterminismArtifact,
+    RawLogAudit, RecordingBursts,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -341,6 +360,55 @@ struct ScorecardFileEntry {
     findings: usize,
     #[serde(default)]
     blocking_findings: usize,
+    /// Longest recv-clock hole in ns (margin, never a veto; 2026-08-12).
+    #[serde(default)]
+    worst_gap_ns: i64,
+    /// Number of stale-event burst windows (margin, never a veto; 2026-08-12).
+    #[serde(default)]
+    stale_bursts: usize,
+}
+
+/// Source fingerprint sidecar (`data/scorecards/.scorecard_sources.json`) —
+/// the fast re-score cache (2026-08-13). The daily pipeline records, per
+/// scored day, each raw log's (size, mtime_ns) + the audit config fingerprint;
+/// a later `scorecard --reuse-unchanged` run skips the full re-audit when the
+/// source is byte-unchanged (append-only raw logs: size+mtime is the reuse
+/// key; `--force` always re-audits). A cache, never gate data: a corrupt or
+/// missing manifest just means a full audit, and the scorecard verdict always
+/// comes from a real audit or an exact source match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SourceEntry {
+    size: u64,
+    #[serde(default)]
+    mtime_ns: Option<i64>,
+    /// Audit-config fingerprint (`max_gap=..;streams=..`) — a config change
+    /// invalidates reuse.
+    config: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SourceDay {
+    /// Sorted `venue:symbol` required set the day was scored with — reuse
+    /// only when it matches the current command exactly.
+    #[serde(default)]
+    required: String,
+    #[serde(default)]
+    sources: BTreeMap<String, SourceEntry>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SourceManifest {
+    #[serde(default)]
+    days: BTreeMap<String, SourceDay>,
+}
+
+/// Fingerprint of the audit config for the current command (max-gap + the
+/// required stream set) — part of the reuse key.
+fn source_config_fingerprint(args: &[String]) -> String {
+    let max_gap = flag(args, "--max-gap-sec").unwrap_or_else(|| "default".to_string());
+    let mut streams = flags(args, "--require-stream");
+    streams.sort();
+    format!("max_gap={max_gap};streams={}", streams.join(","))
 }
 
 /// Lightweight per-recording entry (no findings Vec — see `ScorecardFile`).
@@ -359,19 +427,22 @@ fn light_entry(venue: &Venue, symbol: &str, audit: &RawLogAudit) -> ScorecardFil
         coverage: audit.coverage,
         findings: audit.findings.len(),
         blocking_findings: blocking,
+        worst_gap_ns: audit.worst_gap_ns,
+        stale_bursts: audit.stale_bursts.len(),
     }
 }
 
-fn cmd_promote(args: &[String]) -> Result<String, String> {
-    let dir = flag(args, "--scorecards-dir").unwrap_or_else(|| "data/scorecards".to_string());
-    let required = flags(args, "--required")
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let path = PathBuf::from(&dir);
+/// Load every YYYY-MM-DD.json / YYYYMMDD.json scorecard in `dir`, sorted by
+/// date, optionally filtered to days that cover every `required` venue:symbol
+/// recording. Shared by `promote` and `status` so both read the gate's
+/// artifacts identically. A BOM (PowerShell Set-Content) is stripped; dates
+/// normalize to YYYY-MM-DD. Fail-closed: a corrupt scorecard is an error, not
+/// a silently skipped day.
+fn load_scorecards(dir: &str, required: &BTreeSet<String>) -> Result<Vec<ScorecardFile>, String> {
+    let path = PathBuf::from(dir);
     if !path.is_dir() {
         return Err(format!("scorecards directory not found: {dir}"));
     }
-    // Load every YYYY-MM-DD.json scorecard, sorted by date.
     let mut files: Vec<ScorecardFile> = Vec::new();
     for entry in std::fs::read_dir(&path)
         .map_err(|e| format!("read {dir}: {e}"))?
@@ -405,9 +476,6 @@ fn cmd_promote(args: &[String]) -> Result<String, String> {
         files.push(card);
     }
     files.sort_by(|a, b| a.date.cmp(&b.date));
-    if files.is_empty() {
-        return Err(format!("no scorecards found in {dir}"));
-    }
     if !required.is_empty() {
         // Filter to days that include every required venue:symbol recording.
         // Invariant: the daily pipeline always generates scorecards with the
@@ -422,26 +490,110 @@ fn cmd_promote(args: &[String]) -> Result<String, String> {
                     .any(|r| r.venue == venue && r.symbol == symbol)
             })
         });
-        if files.is_empty() {
-            return Err("no scorecards cover the required venue:symbol set".into());
+    }
+    Ok(files)
+}
+
+/// Feed the gate date + promotable + the per-recording stale-burst margins
+/// (the Phase-0 window condition, spec 024 amendment 2026-08-12) through
+/// `check_promotion`. Bursts are scoped to the `required` venue:symbol set: a
+/// day's extra recordings (e.g. a legacy binance pair on a hyperliquid day)
+/// must not veto a window that covers the required corpus.
+/// Load the determinism artifacts for the loaded scorecards (spec 018 MOD-9
+/// gate input). A CORRUPT artifact fails closed — the gate must know the
+/// proof cannot be read; a missing one is simply not-passed for its day.
+fn load_determinism_artifacts(
+    dir: &str,
+    files: &[ScorecardFile],
+) -> Result<Vec<DeterminismArtifact>, String> {
+    let mut out = Vec::new();
+    for f in files {
+        if let Some(a) = load_determinism(Path::new(dir), &f.date)? {
+            out.push(a);
         }
     }
-    // Feed the gate only what it reads: date + promotable.
+    Ok(out)
+}
+
+fn promotion_verdict(
+    files: &[ScorecardFile],
+    required: &BTreeSet<String>,
+    artifacts: &[DeterminismArtifact],
+) -> (mp_storage::promotion::PromotionVerdict, Vec<DailyScorecard>) {
+    let is_required = |r: &ScorecardFileEntry| {
+        required.is_empty()
+            || required.iter().any(|req| {
+                let (venue, symbol) = req.split_once(':').unwrap_or((req.as_str(), ""));
+                r.venue == venue && r.symbol == symbol
+            })
+    };
     let scorecards: Vec<DailyScorecard> = files
-        .into_iter()
-        .map(|f| DailyScorecard {
-            date: f.date,
-            recordings: vec![],
-            promotable: f.promotable,
+        .iter()
+        .map(|f| {
+            let recording_bursts = f
+                .recordings
+                .iter()
+                .filter(|r| is_required(r))
+                .map(|r| RecordingBursts {
+                    venue: r.venue.clone(),
+                    symbol: r.symbol.clone(),
+                    stale_bursts: r.stale_bursts,
+                })
+                .collect();
+            DailyScorecard {
+                date: f.date.clone(),
+                recordings: vec![],
+                promotable: f.promotable,
+                recording_bursts,
+            }
         })
         .collect();
-    let verdict = check_promotion(&scorecards);
+    // The determinism condition (spec 018 MOD-9): every day in the qualifying
+    // window must carry a PASSING determinism artifact. check_promotion (the
+    // plain numeric + window gate) runs first; the determinism overlay holds
+    // the verdict back and names the failing days when the window passed.
+    (check_promotion_determinism(&scorecards, artifacts), scorecards)
+}
+
+fn cmd_promote(args: &[String]) -> Result<String, String> {
+    let dir = flag(args, "--scorecards-dir").unwrap_or_else(|| "data/scorecards".to_string());
+    let required = flags(args, "--required")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let files = load_scorecards(&dir, &required)?;
+    if files.is_empty() {
+        return Err(format!("no scorecards found in {dir}"));
+    }
+    let artifacts = load_determinism_artifacts(&dir, &files)?;
+    let (verdict, scorecards) = promotion_verdict(&files, &required, &artifacts);
     let summary = if verdict.promoted {
         format!(
             "PROMOTED: {} consecutive clean days {}..{}",
             verdict.consecutive_clean,
             verdict.window_start.as_deref().unwrap_or("?"),
             verdict.window_end.as_deref().unwrap_or("?")
+        )
+    } else if verdict.consecutive_clean >= verdict.required && !verdict.burst_days.is_empty() {
+        // A full streak held back by the window condition: name the burst
+        // days so the `why` is actionable (spec 024, amendment 2026-08-12).
+        let dates: Vec<&str> = verdict.burst_days.iter().map(|b| b.date.as_str()).collect();
+        format!(
+            "NOT YET: {} consecutive clean day(s) of {} required — window carries stale bursts on {}",
+            verdict.consecutive_clean,
+            verdict.required,
+            dates.join(", ")
+        )
+    } else if verdict.consecutive_clean >= verdict.required
+        && !verdict.determinism_failures.is_empty()
+    {
+        // A full streak held back by the determinism condition (spec 018
+        // MOD-9, 2026-08-13): the decision path for those days has no passing
+        // determinism artifact — name them so the `why` is actionable.
+        format!(
+            "NOT YET: {} consecutive clean day(s) of {} required — determinism check missing/failed on {}",
+            verdict.consecutive_clean,
+            verdict.required,
+            verdict.determinism_failures.join(", ")
         )
     } else {
         let why = verdict
@@ -463,13 +615,287 @@ fn cmd_promote(args: &[String]) -> Result<String, String> {
         "window_start": &verdict.window_start,
         "window_end": &verdict.window_end,
         "first_failure": &verdict.first_failure,
+        "burst_days": &verdict.burst_days,
+        "determinism_ok": verdict.determinism_ok,
+        "determinism_failures": &verdict.determinism_failures,
         "scorecards": scorecards.len(),
         "summary": summary,
     }))
     .map_err(|e| e.to_string())
 }
 
+/// UTC minute-of-day (0..1440) for an epoch-ns reading — pure arithmetic on
+/// the injected clock (PD-3).
+fn minute_of_day_utc(now_ns: i64) -> u32 {
+    ((now_ns.rem_euclid(86_400_000_000_000)) / 60_000_000_000) as u32
+}
+
+/// Civil date (y, m, d) for `z` days since 1970-01-01 (Howard Hinnant's
+/// inverse of days_from_epoch) — the inverse of the `date_to_nanos` math.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// UTC date `days` days before epoch-ns `now` as YYYY-MM-DD — the date the
+/// daily gate (00:05 UTC scoring yesterday) should have scored by now.
+fn utc_date_minus_days(now_ns: i64, days: i64) -> String {
+    let day = now_ns.div_euclid(86_400_000_000_000) - days;
+    let (y, m, d) = civil_from_days(day);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Trading mode as the lowercase string `status` reports.
+fn mode_str(m: TradingMode) -> &'static str {
+    match m {
+        TradingMode::Sleep => "sleep",
+        TradingMode::Backtest => "backtest",
+        TradingMode::Paper => "paper",
+        TradingMode::Shadow => "shadow",
+        TradingMode::Live => "live",
+    }
+}
+
+/// Conventional kill-latch path (OPS-3/RG-10): `MP_OPS_KILL_LATCH` overrides,
+/// else the same per-OS convention as `mode.toml` (core/src/mode.rs).
+fn default_latch_path() -> PathBuf {
+    if let Ok(p) = std::env::var("MP_OPS_KILL_LATCH") {
+        return PathBuf::from(p);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let pd = std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".into());
+        Path::new(&pd).join("money-printer").join("kill.json")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Path::new("/etc/money-printer/kill.json").to_path_buf()
+    }
+}
+
+/// Conventional off-host backup manifest (vps_backup.ps1 §`backup_manifest.jsonl`).
+fn default_backup_manifest() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        "C:\\mp-backup\\vps-data\\backup_manifest.jsonl".to_string()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "/opt/money-printer/backup/backup_manifest.jsonl".to_string()
+    }
+}
+
+/// A latched scope as a human-readable string (`status` field).
+fn latch_scope_str(s: &LatchScope) -> String {
+    match s {
+        LatchScope::Global => "global".to_string(),
+        LatchScope::Venue { venue } => format!("venue:{}", venue.slug()),
+        LatchScope::Strategy { id } => format!("strategy:{id}"),
+    }
+}
+
+/// Last non-empty line of a wrapper log (`[ts][LEVEL] msg`), as a JSON value
+/// for `status`. A missing log is reported honestly (`present: false`) — a
+/// fresh edge without that artifact is a valid state, not an error.
+fn last_log_line(path: &str) -> serde_json::Value {
+    let p = Path::new(path);
+    match std::fs::read_to_string(p) {
+        Ok(text) => {
+            let last = text.lines().rev().find(|l| !l.trim().is_empty());
+            let mtime_ns = p
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as i64);
+            serde_json::json!({
+                "present": true,
+                "path": path,
+                "last_line": last,
+                "mtime_ns": mtime_ns,
+            })
+        }
+        Err(_) => serde_json::json!({ "present": false, "path": path }),
+    }
+}
+
+/// `status` — one command that tells the truth about the whole system
+/// (OPS-16). Aggregates the artifacts the system already produces into ONE
+/// JSON document: trading mode (MOD-1), the promotion streak verdict, the
+/// latest scorecard with its per-recording margins, the per-day coverage
+/// trend, the last backup manifest entry, the daily pipeline's last log
+/// line, and the kill-latch state (OPS-3/RG-10).
+///
+/// Missing artifacts are reported honestly (`present: false`, `promotion:
+/// null`) — a fresh install or an edge without a backup sink is a valid
+/// state, not an error. A CORRUPT gate/safety artifact is a failed command
+/// (fail-closed, CONV-8): a scorecard that won't parse or a latch file that
+/// won't decode is itself an alert-worthy condition, and status must never
+/// hide it behind a fabricated verdict.
+///
+/// Flags:
+///   --scorecards-dir DIR     (default data/scorecards)
+///   --required venue:symbol ...  scope the verdict + trend to these recordings
+///   --trend-days N           coverage-trend depth (default 14)
+///   --pipeline-log PATH      (default data/scorecards/pipeline.log)
+///   --backup-manifest PATH   (default: the conventional off-host pull sink)
+///   --latch PATH             kill-latch file (MP_OPS_KILL_LATCH overrides)
+fn cmd_status(args: &[String]) -> Result<String, String> {
+    let score_dir = flag(args, "--scorecards-dir").unwrap_or_else(|| "data/scorecards".to_string());
+    let required = flags(args, "--required").into_iter().collect::<BTreeSet<_>>();
+    let trend_days = match flag(args, "--trend-days") {
+        Some(s) => s
+            .parse::<usize>()
+            .map_err(|_| "--trend-days must be a positive integer")?,
+        None => 14,
+    };
+    if trend_days == 0 {
+        return Err("--trend-days must be positive".into());
+    }
+
+    // 1. trading mode (MOD-1): env override, else the config file, else Sleep.
+    let mode = TradingMode::from_config();
+    let mode_source = if std::env::var("MONEY_PRINTER_MODE").is_ok() {
+        "env"
+    } else {
+        "config-or-default"
+    };
+
+    // 2. promotion verdict + latest scorecard + coverage trend. A missing dir
+    //    is a reportable state; a corrupt scorecard fails closed.
+    let mut promotion = serde_json::Value::Null;
+    let mut promotion_note = serde_json::Value::Null;
+    let mut latest_scorecard = serde_json::Value::Null;
+    let mut coverage_trend: Vec<serde_json::Value> = Vec::new();
+    if !PathBuf::from(&score_dir).is_dir() {
+        promotion_note = serde_json::json!("scorecards directory not present yet");
+    } else {
+        let files = load_scorecards(&score_dir, &required)?;
+        if files.is_empty() {
+            promotion_note = serde_json::json!(
+                "no scorecards yet — the streak starts with the first archived scorecard"
+            );
+        } else {
+            let artifacts = load_determinism_artifacts(&score_dir, &files)?;
+            let (verdict, _) = promotion_verdict(&files, &required, &artifacts);
+            promotion = serde_json::to_value(&verdict).map_err(|e| e.to_string())?;
+            if let Some(latest) = files.last() {
+                latest_scorecard = serde_json::json!({
+                    "date": latest.date,
+                    "promotable": latest.promotable,
+                    "recordings": latest.recordings.iter().map(|r| serde_json::json!({
+                        "venue": r.venue,
+                        "symbol": r.symbol,
+                        "clean": r.clean,
+                        "event_count": r.event_count,
+                        "coverage": r.coverage,
+                        "blocking_findings": r.blocking_findings,
+                        "worst_gap_ns": r.worst_gap_ns,
+                        "stale_bursts": r.stale_bursts,
+                    })).collect::<Vec<_>>(),
+                });
+            }
+            coverage_trend = files
+                .iter()
+                .rev()
+                .take(trend_days)
+                .rev()
+                .map(|f| serde_json::json!({
+                    "date": f.date,
+                    "recordings": f.recordings.iter().map(|r| serde_json::json!({
+                        "venue": r.venue,
+                        "symbol": r.symbol,
+                        "coverage": r.coverage,
+                        "clean": r.clean,
+                    })).collect::<Vec<_>>(),
+                }))
+                .collect();
+        }
+    }
+
+    // 3. daily pipeline's last log line (Windows artifact; the bash gate on
+    //    the VPS reports through the scorecard itself).
+    let pipeline_log =
+        flag(args, "--pipeline-log").unwrap_or_else(|| "data/scorecards/pipeline.log".to_string());
+    let pipeline = last_log_line(&pipeline_log);
+
+    // 4. last backup manifest entry (vps_backup.ps1): an entry exists only for
+    //    a run that passed integrity (failure exits append nothing), so a
+    //    present entry means the last run completed.
+    let backup_manifest = flag(args, "--backup-manifest").unwrap_or_else(default_backup_manifest);
+    let backup = match std::fs::read_to_string(&backup_manifest) {
+        Ok(text) => {
+            let last = text.lines().rev().find(|l| !l.trim().is_empty());
+            match last.and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+                Some(entry) => serde_json::json!({
+                    "present": true,
+                    "path": backup_manifest,
+                    "last_entry": entry,
+                }),
+                None => serde_json::json!({
+                    "present": true,
+                    "path": backup_manifest,
+                    "last_entry": null,
+                    "note": "manifest exists but its last line does not parse (incomplete or corrupt run)",
+                }),
+            }
+        }
+        Err(_) => serde_json::json!({ "present": false, "path": backup_manifest }),
+    };
+
+    // 5. kill-latch state (OPS-3/RG-10). A corrupt latch fails closed — the
+    //    gate artifact that decides whether the system may trade must never be
+    //    silently misread.
+    let latch_path = match flag(args, "--latch") {
+        Some(p) => PathBuf::from(p),
+        None => default_latch_path(),
+    };
+    let killswitch = match std::fs::read_to_string(&latch_path) {
+        Ok(text) => {
+            let latch = KillLatch::from_json(&text)
+                .map_err(|e| format!("kill-latch {} corrupt: {e}", latch_path.display()))?;
+            serde_json::json!({
+                "latched": !latch.scopes.is_empty(),
+                "file": latch_path.to_string_lossy(),
+                "scopes": latch.scopes.iter().map(latch_scope_str).collect::<Vec<_>>(),
+                "reason": latch.reason,
+                "ts_ns": latch.ts_ns,
+            })
+        }
+        Err(_) => serde_json::json!({ "latched": false, "file": latch_path.to_string_lossy() }),
+    };
+
+    serde_json::to_string(&serde_json::json!({
+        "mode": mode_str(mode),
+        "mode_source": mode_source,
+        "promotion": promotion,
+        "promotion_note": promotion_note,
+        "latest_scorecard": latest_scorecard,
+        "coverage_trend": coverage_trend,
+        "pipeline": pipeline,
+        "backup": backup,
+        "killswitch": killswitch,
+    }))
+    .map_err(|e| e.to_string())
+}
+
 fn cmd_scorecard(args: &[String]) -> Result<String, String> {
+    scorecard_from_root(Path::new("data"), args)
+}
+
+/// Scorecard JSON generation rooted at `data_root` — the workspace `data`
+/// dir in production, a temp dir under test. The per-recording `stale_bursts`
+/// count and `worst_gap_ns` are copied verbatim from the audit (the gate's
+/// truth under the 2026-08-12 tolerance semantics); the JSON is what `mp-ops
+/// promote` and the daily pipeline actually read.
+fn scorecard_from_root(data_root: &Path, args: &[String]) -> Result<String, String> {
     let date = need(args, "--date")?.replace('-', "");
     if date.len() != 8 {
         return Err("date must be YYYYMMDD or YYYY-MM-DD".into());
@@ -478,30 +904,135 @@ fn cmd_scorecard(args: &[String]) -> Result<String, String> {
     if required.is_empty() {
         return Err("scorecard requires one or more --required venue:symbol entries".into());
     }
+    let dashed = format!("{}-{}-{}", &date[0..4], &date[4..6], &date[6..8]);
+    let score_dir = data_root.join("scorecards");
+    let manifest_path = score_dir.join(".scorecard_sources.json");
+
+    // Fast re-score (2026-08-13): with --reuse-unchanged, a day whose every
+    // raw source matches the recorded (size, mtime_ns, config fingerprint)
+    // AND whose archived scorecard exists with the same required set is
+    // returned as-is — no multi-GB re-audit. The cache is never gate data:
+    // any mismatch falls through to the full audit below, and a corrupt
+    // manifest is discarded (a cache, not evidence).
+    let mut manifest = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<SourceManifest>(&text).ok())
+        .unwrap_or_default();
+    if args.iter().any(|a| a == "--reuse-unchanged")
+        && !args.iter().any(|a| a == "--force")
+    {
+        let mut req_sorted = required.clone();
+        req_sorted.sort();
+        let req_key = req_sorted.join(",");
+        let cfg_fp = source_config_fingerprint(args);
+        let mut match_ok = manifest
+            .days
+            .get(&dashed)
+            .map(|d| d.required == req_key)
+            .unwrap_or(false)
+            && score_dir.join(format!("{dashed}.json")).exists();
+        if match_ok {
+            for item in &required {
+                let (venue_name, symbol) = item
+                    .split_once(':')
+                    .ok_or_else(|| format!("invalid --required {item}; expected venue:symbol"))?;
+                let raw_path = data_root
+                    .join("raw")
+                    .join(format!("{date}_{venue_name}_{symbol}.log"));
+                let recorded = manifest
+                    .days
+                    .get(&dashed)
+                    .and_then(|d| d.sources.get(item));
+                match (recorded, std::fs::metadata(&raw_path)) {
+                    (Some(f), Ok(md)) => {
+                        let size = md.len();
+                        let mtime = md
+                            .modified()
+                            .ok()
+                            .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as i64);
+                        if f.size != size || f.mtime_ns != mtime || f.config != cfg_fp {
+                            match_ok = false;
+                            break;
+                        }
+                    }
+                    _ => {
+                        match_ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if match_ok {
+            let text = std::fs::read_to_string(score_dir.join(format!("{dashed}.json")))
+                .map_err(|e| format!("read archived scorecard {dashed}.json: {e}"))?;
+            let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
+            eprintln!("scorecard {dashed}: reused from unchanged sources ({} recording(s))", required.len());
+            return Ok(text);
+        }
+    }
+
     let mut entries = Vec::new();
-    for item in required {
+    for item in &required {
         let (venue_name, symbol) = item
             .split_once(':')
             .ok_or_else(|| format!("invalid --required {item}; expected venue:symbol"))?;
         let venue = parse_venue(venue_name)?;
-        let path = Path::new("data")
+        let path = data_root
             .join("raw")
             .join(format!("{date}_{venue_name}_{symbol}.log"));
         let audit = audit_raw_log(&path, &audit_config(args, venue, symbol)?);
         entries.push((venue, symbol.to_owned(), audit));
     }
-    let dashed = format!("{}-{}-{}", &date[0..4], &date[4..6], &date[6..8]);
     // Lightweight file: verdict + per-recording counts only, never the full
     // findings Vec (legacy days balloon to GB otherwise — 2026-08-04).
     let promotable = !entries.is_empty() && entries.iter().all(|(_, _, a)| a.is_clean());
     let file = ScorecardFile {
-        date: dashed,
+        date: dashed.clone(),
         promotable,
         recordings: entries
             .iter()
             .map(|(venue, symbol, audit)| light_entry(venue, symbol, audit))
             .collect(),
     };
+    // Record the source fingerprints for future --reuse-unchanged runs. The
+    // audit-config fingerprint covers max-gap + required streams; venue/symbol
+    // are the entry key itself.
+    let cfg_fp = source_config_fingerprint(args);
+    let mut req_sorted = required.clone();
+    req_sorted.sort();
+    let mut day = SourceDay {
+        required: req_sorted.join(","),
+        ..Default::default()
+    };
+    for item in &required {
+        let (venue_name, symbol) = item
+            .split_once(':')
+            .ok_or_else(|| format!("invalid --required {item}; expected venue:symbol"))?;
+        let raw_path = data_root
+            .join("raw")
+            .join(format!("{date}_{venue_name}_{symbol}.log"));
+        if let Ok(md) = std::fs::metadata(&raw_path) {
+            day.sources.insert(
+                item.clone(),
+                SourceEntry {
+                    size: md.len(),
+                    mtime_ns: md
+                        .modified()
+                        .ok()
+                        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as i64),
+                    config: cfg_fp.clone(),
+                },
+            );
+        }
+    }
+    manifest.days.insert(dashed.clone(), day);
+    if let Some(dir) = manifest_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+        let _ = std::fs::write(&manifest_path, json);
+    }
+
     serde_json::to_string_pretty(&file).map_err(|error| error.to_string())
 }
 
@@ -892,6 +1423,157 @@ fn cmd_p1_webhook(args: &[String]) -> Result<String, String> {
 /// the same seam the weekly wrapper used, so e2e tests never block on a real
 /// multi-hour sleep. The override is best-effort — an unspawnable override
 /// falls through to flushing rather than failing the drain.
+/// `pipeline-stale` — OPS-17 dead-man for the daily gate itself (spec 024,
+/// vps-phase0-bringup.md §3). The scorecards and the streak are produced by
+/// one cron/scheduled job; a silent failure of THAT job is the failure mode
+/// "you find out in 11 days" (blueprint failure-mode #6). This check
+/// verifies the previous UTC day's scorecard exists and parses by the
+/// deadline (default 15 minutes after UTC midnight — the 00:05 gate plus
+/// margin), raising a P1 when it does not.
+///
+/// Safe to run hourly: before the deadline (UTC minute-of-day <
+/// `--deadline-min`) the check defers (`stale: false`, `deferred: true`)
+/// rather than alerting — the gate may still be running. `--ts-ns` injects
+/// the clock (PD-3) so tests never depend on wall time.
+///
+/// Prints a JSON verdict `{stale, expected_date, alert|null}` and exits 0
+/// either way (a fired alert is the check doing its job, not a failed
+/// command). With `--telegram` / `--webhook`, a fired P1 is delivered
+/// through the configured edges; unconfigured credentials are reported in
+/// the verdict, never silently dropped (CONV-8).
+fn cmd_pipeline_stale(args: &[String]) -> Result<String, String> {
+    let score_dir =
+        flag(args, "--scorecards-dir").unwrap_or_else(|| "data/scorecards".to_string());
+    let deadline_min = match flag(args, "--deadline-min") {
+        Some(s) => s
+            .parse::<u32>()
+            .map_err(|_| "--deadline-min must be an integer (minutes of UTC day)")?,
+        None => 15,
+    };
+    if deadline_min >= 1440 {
+        return Err("--deadline-min must be in 0..1440".into());
+    }
+    let dedupe_ns = match flag(args, "--dedupe-ns") {
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|_| "--dedupe-ns must be an integer")?,
+        None => 6 * 3_600_000_000_000i64,
+    };
+    if dedupe_ns <= 0 {
+        return Err("--dedupe-ns must be positive".into());
+    }
+    let now = match flag(args, "--ts-ns") {
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|_| "--ts-ns must be an integer")?,
+        None => now_ns(),
+    };
+    let expected_date = utc_date_minus_days(now, 1);
+    let mut verdict = serde_json::json!({
+        "stale": false,
+        "expected_date": expected_date,
+        "deferred": false,
+        "alert": null,
+    });
+    let minute = minute_of_day_utc(now);
+    if minute < deadline_min {
+        verdict["deferred"] = serde_json::json!(true);
+        verdict["note"] = serde_json::json!(format!(
+            "UTC minute {minute} is before the {deadline_min}-minute deadline — the 00:05 gate may still be running"
+        ));
+        return serde_json::to_string(&verdict).map_err(|e| e.to_string());
+    }
+
+    // The expected scorecard is for the PREVIOUS UTC day (the daily gate at
+    // 00:05 scores yesterday). Missing, unreadable, or unparseable all fire
+    // — a file that exists but cannot be read is as bad as no file.
+    let scorecard_path = PathBuf::from(&score_dir).join(format!("{expected_date}.json"));
+    let alert = if !scorecard_path.exists() {
+        Some(Alert::new(
+            "pipeline-stale",
+            Severity::P1,
+            dedupe_ns,
+            format!(
+                "no scorecard for {expected_date} at UTC minute {minute} (deadline {deadline_min}m) — the daily gate did not land; check the cron/scheduled task"
+            ),
+        ))
+    } else {
+        match std::fs::read_to_string(&scorecard_path) {
+            Ok(text) => {
+                let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+                match serde_json::from_str::<ScorecardFile>(text) {
+                    Ok(_) => None,
+                    Err(e) => Some(Alert::new(
+                        "pipeline-stale",
+                        Severity::P1,
+                        dedupe_ns,
+                        format!("scorecard for {expected_date} exists but is unparseable: {e}"),
+                    )),
+                }
+            }
+            Err(e) => Some(Alert::new(
+                "pipeline-stale",
+                Severity::P1,
+                dedupe_ns,
+                format!("scorecard for {expected_date} exists but cannot be read: {e}"),
+            )),
+        }
+    };
+
+    if let Some(alert) = alert {
+        verdict["stale"] = serde_json::json!(true);
+        verdict["alert"] = serde_json::json!({
+            "id": alert.id,
+            "severity": alert.severity.as_str(),
+            "detail": alert.detail,
+            "runbook": alert.runbook,
+            "dedupe_key": alert.dedupe_key,
+        });
+        if args.iter().any(|a| a == "--telegram") {
+            if let (Some(token), Some(chat_id)) = (
+                std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+                std::env::var("TELEGRAM_CHAT_ID").ok(),
+            ) {
+                let cfg = TelegramConfig {
+                    url: std::env::var("MP_OPS_TELEGRAM_URL")
+                        .unwrap_or_else(|_| "https://api.telegram.org".to_string()),
+                    token,
+                    chat_id,
+                };
+                // P1 always breaks through quiet hours (OPS-9); a one-shot
+                // router has no dedupe history, so the fired alert is Sent.
+                let mut router = AlertRouter::new(None);
+                match router.route(&alert, now) {
+                    RouteOutcome::Sent(d) => match post_telegram(&d, &cfg) {
+                        Ok(()) => verdict["telegram"] = serde_json::json!("sent"),
+                        Err(e) => return Err(format!("telegram send failed: {e}")),
+                    },
+                    RouteOutcome::Batched | RouteOutcome::Deduped => {
+                        unreachable!("a fresh no-quiet-hours router never batches or dedupes a P1")
+                    }
+                }
+            } else {
+                verdict["telegram"] = serde_json::json!("unconfigured");
+            }
+        }
+        if args.iter().any(|a| a == "--webhook") {
+            match std::env::var("MP_OPS_P1_WEBHOOK") {
+                Ok(url) => {
+                    match AlertRouter::post_p1_webhook(&Dispatch::from_alert(&alert, now), &url) {
+                        Ok(()) => verdict["webhook"] = serde_json::json!("sent"),
+                        Err(e) => return Err(format!("p1 webhook failed: {e}")),
+                    }
+                }
+                Err(_) => verdict["webhook"] = serde_json::json!("unconfigured"),
+            }
+        }
+    } else {
+        verdict["telegram"] = serde_json::json!("none");
+        verdict["webhook"] = serde_json::json!("none");
+    }
+    serde_json::to_string(&verdict).map_err(|e| e.to_string())
+}
+
 fn sleep_secs(secs: u64) {
     if secs == 0 {
         return;
@@ -947,7 +1629,7 @@ fn main() -> ExitCode {
     if args.len() < 2 {
         eprintln!("Usage: mp-ops <subcommand> [options]");
         eprintln!(
-            "Subcommands: compact, audit, scorecard, promote, band-accuracy-decay, telegram-flush, telegram-stale, telegram-send, p1-webhook"
+            "Subcommands: compact, audit, scorecard, promote, status, pipeline-stale, band-accuracy-decay, telegram-flush, telegram-stale, telegram-send, p1-webhook"
         );
         return ExitCode::FAILURE;
     }
@@ -958,6 +1640,8 @@ fn main() -> ExitCode {
         "scorecard" => cmd_scorecard(&args[2..]),
         "promote" => cmd_promote(&args[2..]),
         "band-accuracy-decay" => cmd_band_accuracy_decay(&args[2..]),
+        "status" => cmd_status(&args[2..]),
+        "pipeline-stale" => cmd_pipeline_stale(&args[2..]),
         "telegram-flush" => cmd_telegram_flush(&args[2..]),
         "telegram-stale" => cmd_telegram_stale(&args[2..]),
         "telegram-send" => cmd_telegram_send(&args[2..]),
@@ -986,6 +1670,7 @@ fn main() -> ExitCode {
                     | "telegram-stale"
                     | "telegram-send"
                     | "p1-webhook"
+                    | "pipeline-stale"
             ) {
                 ExitCode::from(2)
             } else {
@@ -1049,6 +1734,23 @@ mod tests {
                 serde_json::to_string(&card).unwrap(),
             )
             .unwrap();
+            // The determinism condition (spec 018 MOD-9): each window day must
+            // also carry a PASSING determinism artifact.
+            let det = serde_json::json!({
+                "date": format!("2026-08-{day:02}"),
+                "passed": true,
+                "self_consistent": true,
+                "live_present": false,
+                "live_matches": null,
+                "strategy": "null",
+                "event_count": 1,
+                "replayed_lines": 1,
+            });
+            std::fs::write(
+                dir.join(format!("2026-08-{day:02}.determinism.json")),
+                serde_json::to_string(&det).unwrap(),
+            )
+            .unwrap();
         }
         let verdict = cmd_promote(&["--scorecards-dir".into(), dir.to_string_lossy().into()]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1057,6 +1759,112 @@ mod tests {
             ok.contains("PROMOTED"),
             "seven clean days must promote: {ok}"
         );
+        let json: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(json["determinism_ok"], true, "gate must report determinism ok");
+    }
+
+    /// promote: the Phase-0 window condition (spec 024, amendment
+    /// 2026-08-12) holds a full streak back when a bursty day sits inside
+    /// the qualifying window — the streak stays at 7, the verdict names the
+    /// burst date and recording via `burst_days`, and promotion waits.
+    #[test]
+    fn promote_window_condition_blocks_bursty_streak() {
+        let dir = std::env::temp_dir().join(format!("mp-promote-burst-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for day in 1..=7 {
+            let mut recordings = vec![
+                serde_json::json!({ "venue": "hyperliquid", "symbol": "BTC", "clean": true,
+                     "event_count": 1, "coverage": 1.0, "findings": 0, "blocking_findings": 0,
+                     "stale_bursts": 0 }),
+                serde_json::json!({ "venue": "hyperliquid", "symbol": "ETH", "clean": true,
+                     "event_count": 1, "coverage": 1.0, "findings": 0, "blocking_findings": 0,
+                     "stale_bursts": 0 }),
+            ];
+            if day == 4 {
+                recordings[0]["stale_bursts"] = serde_json::json!(2);
+            }
+            let card = serde_json::json!({
+                "date": format!("2026-08-{day:02}"),
+                "recordings": recordings,
+                "promotable": true
+            });
+            std::fs::write(
+                dir.join(format!("2026-08-{day:02}.json")),
+                serde_json::to_string(&card).unwrap(),
+            )
+            .unwrap();
+        }
+        let verdict = cmd_promote(&[
+            "--scorecards-dir".into(),
+            dir.to_string_lossy().into(),
+            "--required".into(),
+            "hyperliquid:BTC".into(),
+            "--required".into(),
+            "hyperliquid:ETH".into(),
+        ]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let ok = verdict.expect("promote should succeed");
+        assert!(ok.contains("NOT YET"), "bursty window must not promote: {ok}");
+        assert!(
+            ok.contains("2026-08-04"),
+            "the burst day must be named in the why: {ok}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(json["consecutive_clean"], 7, "the streak stays intact");
+        assert_eq!(json["first_failure"], serde_json::Value::Null);
+        assert_eq!(json["burst_days"][0]["date"], "2026-08-04");
+        assert_eq!(json["burst_days"][0]["recordings"][0], "hyperliquid:BTC");
+    }
+
+    /// promote: the window condition is window-level, never a per-day veto
+    /// — an isolated burst inside a longer clean run does not block; the
+    /// burst-free tail becomes the qualifying window.
+    #[test]
+    fn promote_passes_on_burst_free_window_within_streak() {
+        let dir = std::env::temp_dir().join(format!("mp-promote-win-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for day in 1..=8 {
+            let burst = if day == 1 { 3 } else { 0 };
+            let card = serde_json::json!({
+                "date": format!("2026-08-{day:02}"),
+                "recordings": [
+                    { "venue": "hyperliquid", "symbol": "BTC", "clean": true,
+                     "event_count": 1, "coverage": 1.0, "findings": 0, "blocking_findings": 0,
+                     "stale_bursts": burst },
+                    { "venue": "hyperliquid", "symbol": "ETH", "clean": true,
+                     "event_count": 1, "coverage": 1.0, "findings": 0, "blocking_findings": 0,
+                     "stale_bursts": 0 }
+                ],
+                "promotable": true
+            });
+            std::fs::write(
+                dir.join(format!("2026-08-{day:02}.json")),
+                serde_json::to_string(&card).unwrap(),
+            )
+            .unwrap();
+            // Passing determinism artifact for every day of the streak (spec
+            // 018 MOD-9): day 1's burst is a window-level fact, not a veto.
+            let det = serde_json::json!({ "date": format!("2026-08-{day:02}"),
+                "passed": true, "self_consistent": true, "live_present": false,
+                "live_matches": null, "strategy": "null", "event_count": 1,
+                "replayed_lines": 1 });
+            std::fs::write(
+                dir.join(format!("2026-08-{day:02}.determinism.json")),
+                serde_json::to_string(&det).unwrap(),
+            )
+            .unwrap();
+        }
+        let verdict = cmd_promote(&["--scorecards-dir".into(), dir.to_string_lossy().into()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let ok = verdict.expect("promote should succeed");
+        assert!(ok.contains("PROMOTED"), "burst-free tail must qualify: {ok}");
+        let json: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(json["window_start"], "2026-08-02");
+        assert_eq!(json["window_end"], "2026-08-08");
+        assert!(json["burst_days"].as_array().unwrap().is_empty());
+        assert_eq!(json["determinism_ok"], true, "gate must report determinism ok");
     }
 
     #[test]
@@ -1260,5 +2068,433 @@ mod tests {
         let after = std::fs::read_to_string(runs_dir.join("index.jsonl")).unwrap();
         assert_eq!(before, after, "no run to correlate ⇒ no verdict line");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The audit's `stale_bursts` count and `worst_gap_ns` must surface in the
+    /// scorecard JSON exactly as the audit computed them — the scorecard is
+    /// what the gate (and `mp-ops promote`) actually read, so a mismatch here
+    /// would hide the data-integrity margins from the daily verdict
+    /// (2026-08-12 tolerance semantics).
+    #[test]
+    fn scorecard_json_carries_audit_stale_bursts_and_worst_gap() {
+        let root =
+            std::env::temp_dir().join(format!("mp-scorecard-margins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("raw")).unwrap();
+        let path = root.join("raw").join("20260812_hyperliquid_BTC.log");
+
+        // Mirror storage::audit int_9: data at 1s; stale at 10s and 25s
+        // (15s apart -> one 90s-grouped burst); data at 30s; a >120s recv
+        // hole 30s->200s (170s -> worst gap); stale at 200s; data at 201s.
+        fn ev(recv: i64, seq: u64, stale: bool) -> EventEnvelope {
+            let body = if stale {
+                MarketEvent::Status {
+                    kind: mp_core::StatusKind::Stale,
+                    detail: "stale".into(),
+                }
+            } else {
+                MarketEvent::Trade {
+                    price: 1.0,
+                    qty: 1.0,
+                    side: Side::Buy,
+                    trade_id: recv as u64,
+                }
+            };
+            EventEnvelope::new(Venue::Hyperliquid, SymbolId(0), recv, recv, seq, body)
+                .with_provenance(EventProvenance {
+                    stream: "trade".into(),
+                    subscription: "x".into(),
+                    connection_id: 1,
+                    snapshot_source: SnapshotSource::None,
+                })
+        }
+        let (mut writer, _) = EventLogWriter::open(&path).unwrap();
+        writer
+            .write_symbols(&[SymbolMeta::new(
+                SymbolId(0),
+                Venue::Hyperliquid,
+                "BTC",
+                "BTC",
+                "USD",
+                InstrumentKind::Perp,
+                0.1,
+                0.1,
+                1.0,
+            )])
+            .unwrap();
+        for (recv, seq, stale) in [
+            (1_000_000_000i64, 1u64, false),
+            (10_000_000_000, 2, true),
+            (25_000_000_000, 3, true),
+            (30_000_000_000, 4, false),
+            (200_000_000_000, 5, true),
+            (201_000_000_000, 6, false),
+        ] {
+            writer.append(&ev(recv, seq, stale)).unwrap();
+        }
+        writer.sync().unwrap();
+
+        let json = scorecard_from_root(
+            &root,
+            &[
+                "scorecard".into(),
+                "--date".into(),
+                "2026-08-12".into(),
+                "--required".into(),
+                "hyperliquid:BTC".into(),
+            ],
+        )
+        .expect("scorecard should generate from the fixture raw log");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let card: serde_json::Value = serde_json::from_str(&json).expect("scorecard is JSON");
+        let rec = &card["recordings"][0];
+        assert_eq!(rec["venue"], "hyperliquid");
+        assert_eq!(rec["symbol"], "BTC");
+        assert_eq!(rec["event_count"], 6, "{json}");
+        // The audit's margin fields surface verbatim in the gate's JSON.
+        assert_eq!(rec["stale_bursts"], 2, "{json}");
+        assert_eq!(rec["worst_gap_ns"], 170_000_000_000i64, "{json}");
+        // Warnings only on the margins, yet the day still blocks on the
+        // numeric bar (six events over ~200s < 0.995): the margins must not
+        // be hiding a blocked day.
+        assert_eq!(rec["clean"], false, "{json}");
+        assert!(rec["blocking_findings"].as_u64().unwrap() > 0, "{json}");
+    }
+
+    /// status: aggregates every artifact into one JSON document — promotion
+    /// verdict, latest scorecard margins, coverage trend, pipeline log,
+    /// backup manifest, and kill-latch state — and reports absent artifacts
+    /// honestly instead of failing.
+    #[test]
+    fn status_reports_the_whole_system_in_one_document() {
+        let root = std::env::temp_dir().join(format!("mp-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("scorecards")).unwrap();
+        for (day, promotable, cov) in [(10, false, 0.9910f64), (11, true, 0.9984f64)] {
+            let card = serde_json::json!({
+                "date": format!("2026-08-{day}"),
+                "recordings": [
+                    { "venue": "hyperliquid", "symbol": "BTC", "clean": promotable,
+                     "event_count": 1, "coverage": cov, "findings": 0,
+                     "blocking_findings": 0, "worst_gap_ns": 239_000_000_000i64,
+                     "stale_bursts": 2 },
+                    { "venue": "hyperliquid", "symbol": "ETH", "clean": promotable,
+                     "event_count": 1, "coverage": cov, "findings": 0,
+                     "blocking_findings": 0, "worst_gap_ns": 239_000_000_000i64,
+                     "stale_bursts": 2 }
+                ],
+                "promotable": promotable
+            });
+            std::fs::write(
+                root.join("scorecards").join(format!("2026-08-{day}.json")),
+                serde_json::to_string(&card).unwrap(),
+            )
+            .unwrap();
+        }
+        let pipeline_log = root.join("pipeline.log");
+        std::fs::write(
+            &pipeline_log,
+            "[2026-08-11T00:05:00Z][INFO] Daily pipeline start\n[2026-08-11T00:06:00Z][INFO] Daily pipeline complete: 2026-08-10\n",
+        )
+        .unwrap();
+        let manifest = root.join("backup_manifest.jsonl");
+        std::fs::write(
+            &manifest,
+            "{\"ts_utc\":\"2026-08-11T00:30:00Z\",\"full_copy\":false,\"src_delta_files\":2,\"dst_delta_files\":2}\n",
+        )
+        .unwrap();
+        let latch = root.join("kill.json");
+        std::fs::write(&latch, KillLatch::global("manual test", 42).to_json().unwrap()).unwrap();
+
+        let out = cmd_status(&[
+            "--scorecards-dir".into(),
+            root.join("scorecards").to_string_lossy().into(),
+            "--pipeline-log".into(),
+            pipeline_log.to_string_lossy().into(),
+            "--backup-manifest".into(),
+            manifest.to_string_lossy().into(),
+            "--latch".into(),
+            latch.to_string_lossy().into(),
+            "--trend-days".into(),
+            "14".into(),
+        ])
+        .expect("status succeeds");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let s: serde_json::Value = serde_json::from_str(&out).expect("status is JSON");
+        assert!(
+            ["sleep", "backtest", "paper", "shadow", "live"]
+                .iter()
+                .any(|m| s["mode"] == *m),
+            "mode must be one of the known modes: {out}"
+        );
+        // The promotion verdict: 1 clean day, first break 08-10.
+        assert_eq!(s["promotion"]["consecutive_clean"], 1, "{out}");
+        assert_eq!(s["promotion"]["first_failure"], "2026-08-10", "{out}");
+        assert_eq!(s["latest_scorecard"]["date"], "2026-08-11", "{out}");
+        assert_eq!(s["latest_scorecard"]["recordings"][0]["stale_bursts"], 2, "{out}");
+        assert_eq!(s["latest_scorecard"]["recordings"][0]["worst_gap_ns"], 239_000_000_000i64);
+        // Coverage trend: oldest→newest, both days present.
+        let trend = s["coverage_trend"].as_array().unwrap();
+        assert_eq!(trend.len(), 2, "{out}");
+        assert_eq!(trend[0]["date"], "2026-08-10", "{out}");
+        assert_eq!(trend[1]["recordings"][0]["coverage"], 0.9984, "{out}");
+        assert_eq!(s["pipeline"]["present"], true, "{out}");
+        assert_eq!(
+            s["pipeline"]["last_line"],
+            "[2026-08-11T00:06:00Z][INFO] Daily pipeline complete: 2026-08-10",
+            "{out}"
+        );
+        assert_eq!(s["backup"]["last_entry"]["full_copy"], false, "{out}");
+        assert_eq!(s["killswitch"]["latched"], true, "{out}");
+        assert_eq!(s["killswitch"]["scopes"][0], "global", "{out}");
+        assert_eq!(s["killswitch"]["reason"], "manual test", "{out}");
+    }
+
+    /// status: a scorecards directory that does not exist yet is a valid
+    /// early state — `promotion` is null with an explanatory note, not an
+    /// error. (Explicit --pipeline-log / --backup-manifest paths keep the
+    /// test hermetic: this host's real artifacts may exist.)
+    #[test]
+    fn status_reports_missing_artifacts_without_failing() {
+        let root = std::env::temp_dir().join(format!("mp-status-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let out = cmd_status(&[
+            "--scorecards-dir".into(),
+            root.join("nope").to_string_lossy().into(),
+            "--pipeline-log".into(),
+            root.join("no-pipeline.log").to_string_lossy().into(),
+            "--backup-manifest".into(),
+            root.join("no-manifest.jsonl").to_string_lossy().into(),
+            "--latch".into(),
+            root.join("no-latch.json").to_string_lossy().into(),
+        ])
+        .expect("status succeeds with no artifacts");
+        let _ = std::fs::remove_dir_all(&root);
+        let s: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(s["promotion"], serde_json::Value::Null, "{out}");
+        assert!(s["promotion_note"].as_str().is_some(), "{out}");
+        assert_eq!(s["pipeline"]["present"], false, "{out}");
+        assert_eq!(s["backup"]["present"], false, "{out}");
+        assert_eq!(s["killswitch"]["latched"], false, "{out}");
+    }
+
+    /// pipeline-stale: with yesterday's scorecard on disk past the deadline
+    /// the check is healthy — no alert, not deferred.
+    #[test]
+    fn pipeline_stale_healthy_when_scorecard_landed() {
+        let root = std::env::temp_dir().join(format!("mp-pstale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // 2026-08-13 01:00 UTC — past the 15-minute deadline.
+        let now = date_to_nanos("2026-08-13").unwrap().0 + 3_600_000_000_000;
+        let expected = utc_date_minus_days(now, 1);
+        assert_eq!(expected, "2026-08-12");
+        std::fs::write(
+            root.join("2026-08-12.json"),
+            serde_json::json!({
+                "date": "2026-08-12",
+                "recordings": [{"venue": "hyperliquid", "symbol": "BTC",
+                 "clean": true, "event_count": 1, "coverage": 1.0,
+                 "findings": 0, "blocking_findings": 0}],
+                "promotable": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let out = cmd_pipeline_stale(&[
+            "--scorecards-dir".into(),
+            root.to_string_lossy().into(),
+            "--ts-ns".into(),
+            now.to_string(),
+        ])
+        .expect("healthy check succeeds");
+        let _ = std::fs::remove_dir_all(&root);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stale"], false, "{out}");
+        assert_eq!(v["deferred"], false, "{out}");
+        assert_eq!(v["alert"], serde_json::Value::Null, "{out}");
+    }
+
+    /// pipeline-stale: a missing scorecard past the deadline raises the P1
+    /// with the expected runbook id. With credentials absent, egress is
+    /// reported as unconfigured in the verdict — never a fake send, never a
+    /// silent drop. (Creds are cleared for the duration so the test is
+    /// deterministic even on a host where TELEGRAM_* is configured; this
+    /// test binary holds no other reader of those vars.)
+    #[test]
+    fn pipeline_stale_fires_p1_when_gate_did_not_land() {
+        let root = std::env::temp_dir().join(format!("mp-pstale-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let prior_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
+        let prior_chat = std::env::var("TELEGRAM_CHAT_ID").ok();
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+        std::env::remove_var("TELEGRAM_CHAT_ID");
+        let now = date_to_nanos("2026-08-13").unwrap().0 + 3_600_000_000_000;
+        let out = cmd_pipeline_stale(&[
+            "--scorecards-dir".into(),
+            root.to_string_lossy().into(),
+            "--ts-ns".into(),
+            now.to_string(),
+            "--telegram".into(),
+        ])
+        .expect("stale check succeeds");
+        if let Some(t) = prior_token {
+            std::env::set_var("TELEGRAM_BOT_TOKEN", t);
+        }
+        if let Some(c) = prior_chat {
+            std::env::set_var("TELEGRAM_CHAT_ID", c);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stale"], true, "{out}");
+        assert_eq!(v["expected_date"], "2026-08-12", "{out}");
+        assert_eq!(v["alert"]["id"], "pipeline-stale", "{out}");
+        assert_eq!(v["alert"]["severity"], "P1", "{out}");
+        assert_eq!(v["alert"]["runbook"], "ops/runbooks/pipeline-stale.md", "{out}");
+        assert!(v["alert"]["detail"].as_str().unwrap().contains("2026-08-12"), "{out}");
+        // Credentials absent ⇒ egress reported as unconfigured, never a fake send.
+        assert_eq!(v["telegram"], "unconfigured", "{out}");
+    }
+
+    /// pipeline-stale: an unparseable scorecard is as bad as a missing one —
+    /// the gate cannot read it, so the P1 fires.
+    #[test]
+    fn pipeline_stale_fires_on_unparseable_scorecard() {
+        let root = std::env::temp_dir().join(format!("mp-pstale-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("2026-08-12.json"), "{not json").unwrap();
+        let now = date_to_nanos("2026-08-13").unwrap().0 + 3_600_000_000_000;
+        let out = cmd_pipeline_stale(&[
+            "--scorecards-dir".into(),
+            root.to_string_lossy().into(),
+            "--ts-ns".into(),
+            now.to_string(),
+        ])
+        .expect("check succeeds");
+        let _ = std::fs::remove_dir_all(&root);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stale"], true, "{out}");
+        assert!(v["alert"]["detail"].as_str().unwrap().contains("unparseable"), "{out}");
+    }
+
+    /// pipeline-stale: before the deadline (UTC minute < --deadline-min) the
+    /// check defers instead of alerting — the 00:05 gate may still be running.
+    #[test]
+    fn pipeline_stale_defers_before_deadline() {
+        let root = std::env::temp_dir().join(format!("mp-pstale-def-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // 2026-08-13 00:05 UTC — inside the window, no scorecard yet.
+        let now = date_to_nanos("2026-08-13").unwrap().0 + 300_000_000_000;
+        let out = cmd_pipeline_stale(&[
+            "--scorecards-dir".into(),
+            root.to_string_lossy().into(),
+            "--ts-ns".into(),
+            now.to_string(),
+        ])
+        .expect("deferred check succeeds");
+        let _ = std::fs::remove_dir_all(&root);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stale"], false, "{out}");
+        assert_eq!(v["deferred"], true, "{out}");
+        assert_eq!(v["alert"], serde_json::Value::Null, "{out}");
+    }
+
+    /// The civil-date inverse is the exact inverse of days_from_epoch across
+    /// a leap-year boundary — the pipeline-stale expected-date math.
+    #[test]
+    fn utc_date_minus_days_roundtrips_across_leap_boundary() {
+        // 2024-02-29 12:00 UTC minus 1 day = 2024-02-28.
+        let (start, _) = date_to_nanos("2024-02-29").unwrap();
+        let d = utc_date_minus_days(start + 43_200_000_000_000, 1);
+        assert_eq!(d, "2024-02-28");
+        // And the day-count helpers agree: date_to_nanos → civil_from_days
+        // round-trips.
+        for day in 0..1461 {
+            let ns = day as i64 * 86_400_000_000_000;
+            let (y, m, d) = civil_from_days(day as i64);
+            let (back, _) = date_to_nanos(&format!("{y:04}-{m:02}-{d:02}")).unwrap();
+            assert_eq!(back, ns, "day {day} round-trips");
+        }
+    }
+
+    /// scorecard --reuse-unchanged: an unchanged source (size+mtime+config)
+    /// reuses the archived scorecard instead of re-auditing; a changed source
+    /// falls through to the full audit. The manifest is the cache; the verdict
+    /// always comes from a real audit or an exact source match.
+    #[test]
+    fn scorecard_reuse_unchanged_skips_reaudit_until_source_changes() {
+        let root = std::env::temp_dir().join(format!("mp-reuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("raw")).unwrap();
+        let ev = |recv: i64, seq: u64| {
+            EventEnvelope::new(
+                Venue::Hyperliquid,
+                SymbolId(0),
+                recv,
+                recv,
+                seq,
+                MarketEvent::Trade {
+                    price: 100.0,
+                    qty: 1.0,
+                    side: Side::Buy,
+                    trade_id: seq,
+                },
+            )
+            .with_provenance(EventProvenance {
+                stream: "trade".into(),
+                subscription: "x".into(),
+                connection_id: 1,
+                snapshot_source: SnapshotSource::None,
+            })
+        };
+        let raw = root.join("raw/20260813_hyperliquid_BTC.log");
+        let (mut writer, _) = EventLogWriter::open(&raw).unwrap();
+        writer
+            .write_symbols(&[SymbolMeta::new(
+                SymbolId(0),
+                Venue::Hyperliquid,
+                "BTC",
+                "BTC",
+                "USD",
+                InstrumentKind::Perp,
+                0.1,
+                0.1,
+                1.0,
+            )])
+            .unwrap();
+        writer.append(&ev(1_000_000_000, 1)).unwrap();
+        writer.sync().unwrap();
+        let args = vec![
+            "scorecard".into(),
+            "--date".into(),
+            "2026-08-13".into(),
+            "--required".into(),
+            "hyperliquid:BTC".into(),
+            "--reuse-unchanged".into(),
+        ];
+        let first = scorecard_from_root(&root, &args).expect("first scorecard");
+        // Second run: source unchanged ⇒ reuse (no re-audit of the raw log).
+        let second = scorecard_from_root(&root, &args).expect("reused scorecard");
+        assert_eq!(first, second, "reuse returns the identical scorecard JSON");
+        let card1: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(card1["recordings"][0]["event_count"], 1);
+        // Append a trade ⇒ size changes ⇒ the reuse key breaks ⇒ re-audit.
+        writer.append(&ev(2_000_000_000, 2)).unwrap();
+        writer.sync().unwrap();
+        let third = scorecard_from_root(&root, &args).expect("re-audited scorecard");
+        let card3: serde_json::Value = serde_json::from_str(&third).unwrap();
+        assert_eq!(card3["recordings"][0]["event_count"], 2, "{third}");
+        // The sidecar recorded the fingerprints for future reuse.
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("scorecards/.scorecard_sources.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest["days"]["2026-08-13"]["sources"]["hyperliquid:BTC"]["size"].as_u64().unwrap() > 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

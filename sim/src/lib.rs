@@ -15,6 +15,7 @@
 
 pub mod account;
 pub mod decision_log;
+pub mod determinism;
 pub mod engine;
 pub mod error;
 pub mod fills;
@@ -26,6 +27,10 @@ pub mod tracker;
 
 pub use account::Accountant;
 pub use decision_log::DecisionLog;
+pub use determinism::{
+    check_day, replay, strategy_for, DayReplay, DeterminismConfig, DeterminismVerdict,
+    ReplaySummary, DEFAULT_SEED,
+};
 pub use engine::{Backtester, SimConfig};
 pub use error::SimError;
 pub use fills::{FillModel, FillOptimism};

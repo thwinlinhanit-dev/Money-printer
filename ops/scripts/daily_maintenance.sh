@@ -35,6 +35,45 @@ SCORECARD_DIR="${LOG_DIR}/scorecards"
 mkdir -p "$SCORECARD_DIR"
 SCORECARD_PATH="${SCORECARD_DIR}/${YESTERDAY}.json"
 "${BIN_DIR}/mp-ops" "${scorecard_args[@]}" > "$SCORECARD_PATH"
+
+# --- 1.5 Decision determinism check (spec 018 MOD-9..11) --------------------
+# Replay yesterday's recorded session through the PRODUCTION runtime (features
+# -> strategy -> risk) and require the decision log to be byte-identical across
+# two fresh runs. The promotion gate reads the artifact this writes
+# (<date>.determinism.json): a window day without a PASSING artifact does not
+# promote, and a divergence is determinism-diff (P2, runbook
+# ops/runbooks/determinism-diff.md). Fail-closed: a missing binary means the
+# gate cannot prove the day — the run exits 1 and no cold writes happen.
+det_args=(--date "$YESTERDAY")
+for recording in ${RECORDINGS}; do
+    det_args+=(--required "$recording")
+done
+if [ -x "${BIN_DIR}/mp-determinism" ]; then
+    # Pin the replay config (sim/determinism.toml) so the artifact's strategy
+    # + seed are the reviewed values, not an implicit default (MOD-10).
+    if [ -f "/opt/money-printer/sim/determinism.toml" ]; then
+        det_args+=(--config /opt/money-printer/sim/determinism.toml)
+    fi
+    if "${BIN_DIR}/mp-determinism" "${det_args[@]}" --write >> "$SCORECARD_DIR/pipeline.log" 2>&1; then
+        echo "[$(date -u)] Determinism check: passed for $YESTERDAY"
+    else
+        det_code=$?
+        echo "[$(date -u)] Determinism check FAILED for $YESTERDAY (exit $det_code) - determinism-diff, promotion blocked" >&2
+        exit 1
+    fi
+else
+    echo "[$(date -u)] mp-determinism not installed - determinism gate inactive, day $YESTERDAY cannot prove itself" >&2
+    exit 1
+fi
+
+# Promotion gate (streak N/7): a lost day is visible within 24h, never
+# silently (ops/runbooks/vps-phase0-bringup.md sec 3).
+promote_args=(promote --scorecards-dir "$SCORECARD_DIR")
+for recording in ${RECORDINGS}; do
+    promote_args+=(--required "$recording")
+done
+SCORE="$("${BIN_DIR}/mp-ops" "${promote_args[@]}")"
+echo "[$(date -u)] Promotion gate: $SCORE"
 if ! grep -q '"promotable": true' "$SCORECARD_PATH"; then
     echo "[$(date -u)] Recording scorecard failed: $SCORECARD_PATH" >&2
     exit 1
@@ -82,12 +121,19 @@ else
 fi
 
 # --- 3. Archive verified copies; source recordings remain append-only ---
-if [ -d "${VENV_DIR}" ]; then
-    # shellcheck disable=SC1091
-    source "${VENV_DIR}/bin/activate"
-fi
+# S3 archive is optional (runbook sec 4: the minimal bar is an off-host copy
+# via rclone/rsync). Only run when a bucket is actually configured, else the
+# script would exit 1 on missing env vars and red the daily log for nothing.
+if [ -n "${AWS_BUCKET_NAME:-}" ]; then
+    if [ -d "${VENV_DIR}" ]; then
+        # shellcheck disable=SC1091
+        source "${VENV_DIR}/bin/activate"
+    fi
 
-echo "[$(date -u)] Running archive script"
-python3 "${SCRIPT_DIR}/../research/archive_data.py"
+    echo "[$(date -u)] Running archive script"
+    python3 "${SCRIPT_DIR}/../../research/archive_data.py"
+else
+    echo "[$(date -u)] No S3 archive configured (AWS_BUCKET_NAME unset) - skipping"
+fi
 
 echo "[$(date -u)] Daily integrity pipeline complete: $SCORECARD_PATH"

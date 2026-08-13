@@ -27,6 +27,7 @@ secrets*
 *.eventlog
 
 # Local scratch (ad-hoc binaries/inspectors — hygiene, audit L-series)
+.freebuff/
 /scratch
 scratch_*
 stdout.txt

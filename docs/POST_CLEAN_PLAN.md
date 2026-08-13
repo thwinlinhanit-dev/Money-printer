@@ -139,11 +139,14 @@ REST mitigations are ever removed) and the gate stays at 0.
 
 **2026-08-08 resolution:** the proxy/VPN path is no longer the dependency.
 The Phase-0 required venue switched to **Hyperliquid**, whose permissionless
-API is not geo-filtered from this egress (verified live: WS trades/l2Book/
-activeAssetCtx flow, audit CLEAN coverage 1.0).  The gate's required stream
-set is now `trade book funding mark_price open_interest`, with liquidation
-coming from the on-chain whale census (spec 028, `mp-whale`, recorded
-separately).  See `ops/core_symbols.txt` + `ops/watchdog_collectors.ps1`.
+API is not geo-filtered from this egress (a direct probe observed WS
+trades/l2Book/activeAssetCtx flow). This was only a moment-in-time probe, not
+a promotable daily result: the 2026-08-08 and 2026-08-09 scorecards were
+DIRTY with `stale_stream` (and a coverage gap on 08-09). Treat the archived
+daily scorecards as the source of truth. The gate's required stream set is now
+`trade book funding mark_price open_interest`, with liquidation coming from
+the on-chain whale census (spec 028, `mp-whale`, recorded separately). See
+`ops/core_symbols.txt` + `ops/watchdog_collectors.ps1`.
 
 ---
 

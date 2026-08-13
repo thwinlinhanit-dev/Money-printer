@@ -62,15 +62,46 @@ manifest for any gap overlapping the window.
 ### Findings artifact
 
 ```json
-{ "schema_ver": 1, "date": "2026-08-04", "detector_version": "<git-sha>",
+{ "schema_ver": 2, "date": "2026-08-04", "detector_version": "<git-sha>",
   "config_hash": "<sha256>", "findings": [
     { "venue": "binance", "symbol": "BTCUSDT",
       "gap_id": "<refs manifest gap>", "from_ns": 0, "to_ns": 0,
       "classification": "corroborated_venue_side",
       "cohort": [{"venue":"bybit","corroborates":true,"trade_count":0,"vwp":0.0},
                  {"venue":"okx","corroborates":true,"trade_count":0,"vwap":0.0}],
-      "evidence": "2/2 cohort venues continuous, price within 1.3%" } ] }
+      "evidence": "2/2 cohort venues continuous, price within 1.3%" } ],
+  "veracity": [
+    { "venue": "bybit", "symbol": "BTCUSDT", "window_from_ns": 0,
+      "window_to_ns": 3600000000000, "kind": "trade_drought",
+      "trade_count": 12, "vwp": 98512.4, "cohort_vwp": 98510.1,
+      "cohort_median_trades": 340, "cohort_size": 3,
+      "evidence": "12 trades vs cohort median 340 (ratio 0.04 < 0.50)" } ] }
 ```
+
+### Whole-day value-level veracity (amendment 2026-08-13)
+
+The gap detector classifies *absence*. A second, whole-day pass classifies
+*value*: for every cohort, in fixed windows (`veracity_window_min`, default
+60 min, UTC-day aligned), each member's `trade_count` + `vwp` is compared to
+the median of the LIQUID members (each ≥ `veracity_min_trades`, default 50,
+with finite non-zero `vwp`). Windows where fewer than `min_cohort` members
+are liquid produce no claim (a thin window is noise, not evidence). Two
+finding kinds, both written into `Findings::veracity`:
+
+- **price_divergence** — the member's window VWP leaves the cohort median by
+  more than `max_price_band_pct` (default 5%). Catches a wrong feed / silent
+  corruption: presence looks perfect, the price does not.
+- **trade_drought** — the member's window `trade_count` is positive (so
+  presence is fine) but below `veracity_trade_ratio` (default 0.5) × the
+  cohort's median count while the cohort itself is liquid. Catches dropped
+  frames the aggregate coverage cannot see.
+
+Veracity findings are **evidence, never a gate** (CVG-7 applies unchanged):
+they annotate the day for research triage; they never change a scorecard or
+relax promotion. Venue reporting differences (`aggTrade` vs `publicTrade` vs
+fills) mean absolute counts differ per venue by nature, so the drought test
+is deliberately coarse and the reference is the median — tune the ratio or
+window in config, and treat findings as hypotheses to verify in the raw log.
 
 ## Requirements
 
@@ -120,6 +151,22 @@ manifest for any gap overlapping the window.
   detector, reusing `mp_storage::Dataset`; it MUST accept `--date`, `--symbol`,
   `--venue`, `--config`, `--check-config`, `--version`. It is a sibling of
   `mp-audit` (INT-3) and `mp-migrate`.
+- **CVG-13** For every cohort, the detector MUST run a whole-day veracity
+  pass over fixed UTC-day-aligned windows (`veracity_window_min`): each
+  member's window `trade_count` + `vwp` vs the median of the liquid members.
+  A member whose VWP leaves the cohort median by more than
+  `max_price_band_pct` MUST produce a `price_divergence` finding even when
+  its manifest shows no gap (presence is fine; the value is not).
+- **CVG-14** A member with a positive window `trade_count` below
+  `veracity_trade_ratio` × the cohort's median count — while the cohort is
+  liquid (≥ `veracity_min_trades`) and the member has no manifest gap — MUST
+  produce a `trade_drought` finding: dropped frames the aggregate coverage
+  cannot see.
+- **CVG-15** Veracity MUST fail closed like the gap pass (CVG-10): windows
+  with fewer than `min_cohort` liquid members MUST produce no claim, and
+  non-finite `vwp` MUST never be serialized. The whole artifact (gap
+  findings + veracity) MUST stay byte-deterministic (CVG-2) and MUST NOT
+  change scorecards or relax the promotion gate (CVG-7).
 
 ## Acceptance criteria
 
@@ -144,6 +191,14 @@ manifest for any gap overlapping the window.
   `--check-config`; `--version` prints the git SHA.
 - [ ] `cvg_10_nan_fails_closed` — a fixture producing non-finite `vwp` yields
   `isolated_unknown` + WARN, with no NaN in findings.
+- [x] `cvg_13_veracity_flags_price_divergence_with_no_gap` — a member whose
+  window VWP leaves the liquid cohort median beyond the band is flagged
+  `price_divergence` with no manifest gap (schema_ver 2).
+- [x] `cvg_14_veracity_flags_trade_drought_with_no_gap` — a member whose
+  window count collapses below the ratio (cohort liquid, no gap) is flagged
+  `trade_drought`.
+- [x] `cvg_15_veracity_needs_liquid_cohort_and_is_deterministic` — a
+  sub-liquid window produces no claim; the artifact stays byte-deterministic.
 
 ## Decisions
 
@@ -175,7 +230,21 @@ manifest for any gap overlapping the window.
   (detector + config + findings), `storage/src/bin/mp-cross-venue.rs` (CVG-12
   flags: `--data-dir`, `--date`, `--venue`, `--symbol`, `--config`,
   `--check-config`, `--version`), `storage/tests/cross_venue.rs` (cvg_1..cvg_10
-  all pass). Judgment calls recorded (W-5): `Finding.venue` /
+  all pass).
+- 2026-08-13: CVG-13..15 whole-day value-level veracity implemented —
+  `Findings` gains `veracity: Vec<VeracityFinding>` (schema_ver 2, serde
+  default so v1 artifacts still parse), config gains `veracity_window_min` /
+  `veracity_min_trades` / `veracity_trade_ratio` (defaults keep existing
+  configs valid), `detect()` runs the veracity pass per cohort after the gap
+  pass. Reference is the median of LIQUID members only (a venue that barely
+  trades is no reference for anyone); windows with < `min_cohort` liquid
+  members produce no claim (fail-closed, CVG-10 analog). Evidence only — the
+  gate never reads `veracity` (CVG-7). Judgment call (W-5): with a small
+  cohort (3 members) a single large outlier shifts the median enough that a
+  healthy member near the band edge can also exceed it; the finding is
+  triage evidence, and operators tune `max_price_band_pct` per cohort.
+  Cross-venue spot vs perp basis lives in the same band — revisit via event
+  study (RES-4) if it produces noise on real data. Judgment calls recorded (W-5): `Finding.venue` /
   `CohortMember.venue` store `layout::venue_slug` (e.g. "binance_futures") so
   they round-trip with cohort-config keys (`Venue::from_slug` accepts both the
   short and partition slug forms). The CVG-5 market-wide alert is a

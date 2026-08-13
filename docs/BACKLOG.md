@@ -27,6 +27,38 @@ decision), or **[maybe-never]** (recorded so it stops being re-proposed).
   surface features, then covered structures around the spot/perp book.
 - **[maybe-never] sub-second HFT anything** — blueprint §2 stands: no arms race.
 
+## Sequencing note (2026-08-13) — data menu before more machinery
+
+The system's code is two phases ahead of its roadmap: sim/OMS/risk/strategies
+(Phases 3–7) exist while Phase 0 is unproven. The highest-value next work is
+not building new collectors — it is making the machinery that exists *prove
+itself daily* against the live corpus. Delivered 2026-08-13: `mp-ops status`
+(OPS-16, one JSON truth surface), `mp-ops pipeline-stale` (OPS-17, P1
+dead-man for the daily gate), spec 026 whole-day value-level veracity
+(CVG-13..15: `price_divergence`/`trade_drought` — presence can't see silent
+corruption), `scorecard --reuse-unchanged` (delta re-score, spec 024
+sidecar), and spec 018 upgraded to ready (one runtime, four modes). Delivered
+2026-08-13 (batch 2): **spec 018 MOD-9..11 implemented** — `mp-determinism`
+replays yesterday's recorded session through the production runtime
+(features -> strategy -> risk, SIM-5, same loader as the materializer) and
+requires a byte-identical decision log; the PASS artifact
+(`<date>.determinism.json`) is a promotion-gate condition, wired fail-closed
+into both daily pipelines (VPS cron step 1.5, Windows task), verified
+byte-identical on the real 08-10..08-13 corpus (843k events / 854k decision
+lines per day). Still on the menu, in priority order:
+- **[v1.x] veracity event study (RES-4)** — DELIVERED 2026-08-13
+  (research/veracity_study_2026-08-13.md): detector output on the cold corpus
+  is 0+0 (no cohort); the only real overlap day (08-08) shows 0/15
+  `price_divergence` (feeds track to 0.02%, 70-250x inside the 5% band) and
+  ~10 structural `trade_drought` flags that are all print-granularity noise;
+  the real corruption (07-19/07-21 cross-stream leaks, provenance-less
+  format) was caught at the INT-4 ingress gate. Action: trust
+  `price_divergence` in read paths; do not gate `trade_drought` on a
+  cross-venue count median without venue-relative baselines.
+- **[v1.x] off-host backup tier** — the nightly VPS→Windows pull protects
+  against VPS loss but not the PC's disk; deploy.md §7 rclone/age remains the
+  true off-host tier.
+
 ## Data & features
 - **[v1.x] more venues** (add-venue skill): OKX (checksummed books), Coinbase
   + Kraken (spot cross-check), Hyperliquid (complete liq visibility).
@@ -102,6 +134,14 @@ decision), or **[maybe-never]** (recorded so it stops being re-proposed).
   log format (W-6: migration = write new + verify).
 
 ## Ops & reporting
+- **[v1.x] relocate workspace out of ~/Downloads + external-volume backup** —
+  the whole tree (including `data/`) lives under `~/Downloads` on a single C:
+  drive (audit 08-10; the repo folder itself is double-nested). W-6 says keep
+  recorded data on a backed-up drive. `backup_data.ps1` already mirrors to
+  `C:/mp-backup` nightly, but that is the SAME physical volume — a dead disk
+  takes both. Move the workspace to `C:\mp` (or another drive) and point the
+  three Scheduled Tasks at the new path, then set the backup `-Destination` to
+  a separate physical drive or network share.
 - **[v1.x] tax/accounting export** — fills journal → per-jurisdiction lot
   report; boring, mandatory, cheap to spec early.
 - **[v1.x] soak-test farm** — long-running mock-venue chaos environment that
