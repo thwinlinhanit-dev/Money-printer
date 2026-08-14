@@ -32,7 +32,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 zip = { version = "0.6", default-features = false, features = ["deflate", "time"], optional = true }
 
 [dev-dependencies]
-bincode.workspace = true
+bincode-next.workspace = true
 crc32fast.workspace = true
 
 [lints]

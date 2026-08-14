@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 serde.workspace = true
-bincode.workspace = true
+bincode-next.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 smallvec.workspace = true
@@ -22,6 +22,11 @@ toml.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "codec_wire"
+harness = false
 
 [lints]
 workspace = true

@@ -222,10 +222,15 @@ Still on the menu, in priority order:
 - **[v2] security hardening spec** — threat model (key theft, VPS compromise,
   supply chain), key rotation runbook, withdrawal-address allowlisting at
   venue level, dependency audit cadence.
-- **[v1.x] bincode 2 migration** — bincode 1.3.3 is unmaintained
-  (RUSTSEC-2025-0141, flagged by the cargo-audit CI job); the event-log codec
-  is the only consumer. API-breaking upgrade, so spec it before touching the
-  log format (W-6: migration = write new + verify).
+- **[v1.x] bincode 2 migration** — ~~bincode 1.3.3 is unmaintained~~
+  IMPLEMENTED 2026-08-14 as a codec amendment to spec 001 (✅): workspace
+  swapped to `bincode-next` 3.x + `config::legacy()` (byte-identical to
+  bincode 1's
+  default format → no data migration, originals untouched); golden-bytes
+  tests (BDC-1/2/3) pin the identity; `cargo audit` now reports only the
+  `paste` RUSTSEC-2024-0436 debt (RUSTSEC-2025-0141 cleared); real-corpus
+  readback of pre-swap logs matches (bdc_6). `rust-version` raised 1.80 →
+  1.90 (bincode-next 3.x MSRV).
 
 ## Ops & reporting
 - **[v1.x] relocate workspace out of ~/Downloads + external-volume backup** —

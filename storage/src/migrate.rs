@@ -142,7 +142,7 @@ mod tests {
                 },
             };
             let mut payload = 1u16.to_le_bytes().to_vec();
-            payload.extend_from_slice(&bincode::serialize(&v1).unwrap());
+            payload.extend_from_slice(&mp_core::codec::encode_envelope_v1(&v1).unwrap());
             let mut frame = vec![1u8]; // FRAME_EVENT kind
             frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
             frame.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());

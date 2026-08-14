@@ -41,7 +41,6 @@ should be updated).
 | 030 | [Macro Data Collector (HIP-3 + FRED)](030-macro-collector.md) | data plane | ✅ implemented |
 | 031 | [Deribit Options Recorder](031-deribit-options-recorder.md) | data plane | ✅ implemented |
 
-
 Status values: `draft` → `ready` (implementable) → `implementing` →
 `implemented` → `superseded`. Update this table in the same commit as the work
 (rule W-7).
@@ -66,7 +65,7 @@ Open questions — needs human input; do NOT guess these
 
 Requirement prefixes: CONV, EVT, COL, STO, FEA, SIM, STR, EXE, RSK, OPS,
 RES, UI, ZCP (012), BKP (013), FSP (014), MAT (016), GRD (017), MOD (018),
-INT (024), WHL (028), MAC (030), OPT (031).
+INT (024), WHL (028), MAC (030), OPT (031), BDC (001 codec amendment).
 
 ## How to implement a spec
 

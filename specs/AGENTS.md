@@ -8,7 +8,7 @@ Design specification documents (000–031) defining the system architecture, dat
 
 - `README.md` — spec index and reading guide
 - `000-conventions.md` — repository conventions
-- `001-event-schema.md` — event schema specification
+- `001-event-schema.md` — event schema specification (incl. the 2026-08-14 codec amendment, BDC requirements)
 - `002-collectors.md` — collector architecture
 - `003-storage.md` — storage layer
 - `004-feature-engine.md` — feature engine

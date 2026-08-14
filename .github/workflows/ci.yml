@@ -83,9 +83,11 @@ jobs:
       # RustSec advisory audit (cargo-audit via the official rustsec/audit-check
       # action; prebuilt binary + auto-updated advisory DB). Fails the job only
       # on security advisories — unmaintained/informational advisories are
-      # reported but non-blocking (verified 2026-08-06: lockfile has 0 vulns;
-      # bincode 1.3.3 RUSTSEC-2025-0141 + paste 1.0.15 RUSTSEC-2024-0436 are
-      # flagged unmaintained — tracked as known debt in docs/BACKLOG.md).
+      # reported but non-blocking (verified 2026-08-14 after the spec 001
+      # codec amendment: lockfile has 0 vulns; only paste 1.0.15
+      # RUSTSEC-2024-0436 remains
+      # flagged unmaintained — tracked as known debt in docs/BACKLOG.md;
+      # RUSTSEC-2025-0141 cleared by the bincode-next swap).
       - name: Audit dependencies (RustSec)
         if: steps.detect.outputs.present == 'true'
         uses: rustsec/audit-check@v2.0.0

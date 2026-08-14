@@ -91,7 +91,10 @@ impl Arena {
     /// Encode a value into the arena and return an `EventRef`.
     /// The offset is a global byte address (chunk_idx << 16 | intra_offset).
     pub fn alloc<T: serde::Serialize>(&self, val: &T) -> io::Result<EventRef> {
-        let bytes = bincode::serialize(val).map_err(io::Error::other)?;
+        // Spec 001 (codec amendment): same wire config as the event log
+        // (bincode-1-compatible).
+        let bytes = bincode_next::serde::encode_to_vec(val, crate::codec::wire_config())
+            .map_err(io::Error::other)?;
         let len = bytes.len() as u32;
         let mut chunks = self.chunks.lock().unwrap();
         let idx = chunks.len() - 1;
@@ -142,7 +145,9 @@ impl Arena {
             ));
         }
         let data = chunks[idx].as_slice(r.offset_in_chunk(), r.len as usize);
-        bincode::deserialize(data).map_err(io::Error::other)
+        bincode_next::serde::decode_from_slice(data, crate::codec::wire_config())
+            .map(|(v, _)| v)
+            .map_err(io::Error::other)
     }
 
     /// Number of chunks currently live.

@@ -385,10 +385,7 @@ impl LogReader {
                             // legacy recordings are readable for research but
                             // never promoted to cold as live-attributable.
                             1 => {
-                                let legacy: EnvelopeV1 = bincode::deserialize(&payload[2..])
-                                    .map_err(|e| {
-                                        LogError::Codec(CodecError::Decode(e.to_string()))
-                                    })?;
+                                let legacy: EnvelopeV1 = codec::decode_envelope_v1(&payload[2..])?;
                                 EventEnvelope {
                                     schema_ver: legacy.schema_ver,
                                     venue: legacy.venue,
@@ -540,7 +537,7 @@ mod tests {
         f.write_all(&FORMAT_VER.to_le_bytes()).unwrap();
         for e in events {
             let mut payload = e.schema_ver.to_le_bytes().to_vec();
-            payload.extend_from_slice(&bincode::serialize(e).unwrap());
+            payload.extend_from_slice(&codec::encode_envelope_v1(e).unwrap());
             f.write_all(&encode_frame(FRAME_EVENT, &payload)).unwrap();
         }
         f.sync_all().unwrap();
