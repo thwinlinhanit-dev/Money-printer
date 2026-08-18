@@ -54,6 +54,18 @@ jobs:
         if: steps.detect.outputs.present == 'false'
         run: echo "No Cargo.toml — docs/specs-only change, rust job is a no-op."
 
+  log-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # LOG-1: trace/watchdog logs are machine input — the gate/audit parse
+      # timestamps out of them. Enforces the source contract (trace sink keeps
+      # with_ansi(false); 2026-08-15: ANSI ESC codes broke timestamp parsing)
+      # and the format contract on committed fixtures (no 0x1b, no BOM,
+      # timestamp-prefixed lines). Also accepts real log paths for host runs.
+      - name: Trace/watchdog log hygiene (LOG-1)
+        run: bash ops/ci/check_log_hygiene.sh
+
   research:
     runs-on: ubuntu-latest
     steps:
@@ -64,8 +76,32 @@ jobs:
           python-version: "3.12"
       - name: Install test deps (pytest, polars, ruff)
         run: pip install pytest polars ruff
+      - name: Lint (ruff check; config research/ruff.toml)
+        run: cd research && ruff check .
       - name: Format check (ruff format --check; config research/ruff.toml)
         run: cd research && ruff format --check .
+      # PowerShell 5.1-compatibility parse of every tracked .ps1 (ops scripts,
+      # watchdog, run/start harnesses). ubuntu-latest ships pwsh; ParseFile is
+      # the same syntax gate run locally before every ops change (audit
+      # 2026-08-18: 15/15 files parse clean) — a script that parses on PS 7
+      # but not 5.1 (the operational host) fails here, not at 01:00 UTC.
+      - name: ps1 parse check (all tracked .ps1, PS 5.1-compat)
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $files = @(& git ls-files '*.ps1')
+          if ($files.Count -eq 0) { Write-Host "ps1 parse: no tracked .ps1 files"; exit 0 }
+          $fail = 0
+          foreach ($f in $files) {
+            $tokens = $null; $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root $f), [ref]$tokens, [ref]$errs)
+            if ($errs -and $errs.Count -gt 0) {
+              $fail = 1
+              foreach ($e in $errs) { Write-Host "PARSE FAIL: $f : $($e.Message)" }
+            }
+          }
+          if ($fail -ne 0) { exit 1 }
+          Write-Host "ps1 parse: $($files.Count) files clean"
       - name: Research tests (RES-1..6, pure stdlib)
         run: cd research && python -m pytest -q
 
@@ -76,10 +112,11 @@ jobs:
     # job runs unconditionally — the prebuilt action makes it cheap (~30s).
     steps:
       - uses: actions/checkout@v4
-      - name: Detect lockfile
+      - name: Detect dependency manifests
         id: detect
         run: |
-          if [ -f Cargo.lock ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -f Cargo.lock ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -f research/requirements.txt ]; then echo "py=true" >> "$GITHUB_OUTPUT"; else echo "py=false" >> "$GITHUB_OUTPUT"; fi
       # RustSec advisory audit (cargo-audit via the official rustsec/audit-check
       # action; prebuilt binary + auto-updated advisory DB). Fails the job only
       # on security advisories — unmaintained/informational advisories are
@@ -89,7 +126,18 @@ jobs:
       # flagged unmaintained — tracked as known debt in docs/BACKLOG.md;
       # RUSTSEC-2025-0141 cleared by the bincode-next swap).
       - name: Audit dependencies (RustSec)
-        if: steps.detect.outputs.present == 'true'
+        if: steps.detect.outputs.rust == 'true'
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      # Python advisory audit (pip-audit). uv audit was considered first but
+      # only audits a project/script, not a bare requirements file; pip-audit
+      # takes -r directly, resolving research/requirements.txt's loose >= pins
+      # to the latest set and checking it against the OSV/PyPI advisory DBs
+      # (verified 2026-08-18: 0 findings, exit 0). No unmaintained/informational
+      # class like RustSec's, so ANY known vulnerability fails the job.
+      - name: Audit Python dependencies (pip-audit)
+        if: steps.detect.outputs.py == 'true'
+        run: |
+          python -m pip install --quiet pip-audit
+          cd research && python -m pip_audit -r requirements.txt

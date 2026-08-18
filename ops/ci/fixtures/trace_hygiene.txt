@@ -1,0 +1,3 @@
+2026-08-15T00:36:23.160974Z  INFO mp_collector::inner: instance lock acquired venue=hyperliquid
+2026-08-15T00:36:23.161509Z  INFO mp_collector::inner: connected stream=primary venue=hyperliquid
+2026-08-15T00:37:47.368149Z  WARN mp_collectors::ws: ws task ended error=A connection attempt failed

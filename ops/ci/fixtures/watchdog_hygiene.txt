@@ -1,0 +1,3 @@
+[2026-08-15T00:35:42Z][WARN] hyperliquid:ETH spawning #26: data flow stalled (10.4 B/s over 60s)
+[2026-08-15T00:35:42Z][INFO] hyperliquid:ETH spawned PID=36556
+[2026-08-15T00:36:23Z][WARN] hyperliquid:BTC spawning #27: data flow stalled (10.2 B/s over 61s)

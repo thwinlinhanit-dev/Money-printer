@@ -195,6 +195,29 @@ pub fn touch_heartbeat(raw_dir: &Path, name: &str) {
     );
 }
 
+/// RUST_LOG-aware filter that falls back to `info` when the var is unset, so
+/// existing deployments (watchdog `--trace-file`) keep today's verbosity while
+/// a probe can raise the level (RUST_LOG=mp_collectors=debug) to see the
+/// keepalive pings (2026-08-12; vps-phase0-bringup.md sec 6 A-B).
+pub fn tracing_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+}
+
+/// Build the `--trace-file` subscriber (COL-29). ANSI is force-disabled:
+/// trace files are machine input, not a terminal — the fmt() default color
+/// codes polluted every line with ESC[..m and broke timestamp parsing during
+/// the 2026-08-15 outage investigation (ANSI-strip was required before the
+/// timeline could be decoded; ops/ci/check_log_hygiene.sh enforces the
+/// plain-text contract).
+pub fn trace_subscriber(sink: SharedLogFile) -> impl tracing::Subscriber + Send + Sync + 'static {
+    tracing_subscriber::fmt()
+        .with_writer(sink)
+        .with_ansi(false)
+        .with_env_filter(tracing_filter())
+        .finish()
+}
+
 /// Append-only tracing sink shared by the collector binaries (`--trace-file`).
 /// Append (never truncate) so a watchdog respawn never erases the freeze
 /// evidence of the previous process — rotate by naming the path per day at
@@ -244,7 +267,7 @@ impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for SharedLogFile {
 
 #[cfg(test)]
 mod tests {
-    use super::SharedLogFile;
+    use super::{trace_subscriber, SharedLogFile};
     use std::io::Write;
 
     #[test]
@@ -260,6 +283,52 @@ mod tests {
             std::fs::read(&path).expect("read trace file"),
             b"reconnect diagnostic\\n"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// LOG-1: the `--trace-file` sink must emit plain text — no ANSI escape
+    /// codes, timestamp-prefixed lines — so trace files stay machine-parseable
+    /// (2026-08-15 outage investigation had to strip ESC[..m codes before
+    /// timestamps could be decoded; ops/ci/check_log_hygiene.sh enforces the
+    /// same contract on committed fixtures).
+    #[test]
+    fn trace_subscriber_emits_ansi_free_timestamped_lines() {
+        let path = std::env::temp_dir().join(format!("mp-trace-ansi-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let sink = SharedLogFile::open(&path).expect("open trace sink");
+        {
+            // Thread-local default so the global subscriber of other tests is
+            // untouched; dropped before we read the file back.
+            let _guard = tracing::subscriber::set_default(trace_subscriber(sink));
+            tracing::info!(
+                venue = "hyperliquid",
+                symbol = "BTC",
+                "stream stale; reconnecting"
+            );
+            tracing::error!(error = "os error 10060", "ws task ended");
+        }
+
+        let bytes = std::fs::read(&path).expect("read trace file");
+        assert!(
+            !bytes.contains(&0x1b),
+            "trace file must not contain ANSI escape bytes (0x1b)"
+        );
+        let text = String::from_utf8(bytes).expect("trace is utf8");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "both events landed");
+        for line in &lines {
+            // tracing-subscriber's SystemTime default: 2026-08-15T00:36:23.160974Z
+            assert!(
+                line.len() >= 20
+                    && line.as_bytes()[4] == b'-'
+                    && line.as_bytes()[7] == b'-'
+                    && line.as_bytes()[10] == b'T'
+                    && line.as_bytes()[13] == b':'
+                    && line.as_bytes()[16] == b':',
+                "line must start with a parseable timestamp, got: {line}"
+            );
+        }
         let _ = std::fs::remove_file(path);
     }
 }
