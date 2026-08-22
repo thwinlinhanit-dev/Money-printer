@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 
 @dataclass(frozen=True)
@@ -122,9 +123,21 @@ def bootstrap_ci(
     return (boot_means[lo_idx], boot_means[hi_idx])
 
 
+def _utc_day(ts_ns: int) -> datetime.date:
+    """UTC calendar date of a timestamp. Pure timestamp math on a fixed value
+    (PD-3: deterministic — no wall-clock read)."""
+    return datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=timezone.utc).date()
+
+
 @dataclass
 class StudyRecord:
-    """Tracker-style run record for a study (SIM-10 pattern, RES-4)."""
+    """Tracker-style run record for a study (SIM-10 pattern, RES-4).
+
+    ``n_days`` is the number of distinct UTC calendar days contributing
+    complete-window events — the bootstrap CI is block-bootstrapped by day,
+    so with < 3 distinct days the CI is computed from 1-2 blocks and is
+    meaningless (``ci_reliable`` False; reported, never hidden).
+    """
 
     name: str
     n_events: int
@@ -135,13 +148,21 @@ class StudyRecord:
     car: list[float]
     ci_lo: float
     ci_hi: float
+    n_days: int = 0
+    ci_reliable: bool = False
 
     def summary(self) -> str:
-        return (
-            f"study '{self.name}': n={self.n_events} "
+        text = (
+            f"study '{self.name}': n={self.n_events} n_days={self.n_days} "
             f"CAR[+{self.post}]={self.car[-1]:+.4f} "
             f"CI95=[{self.ci_lo:+.4f},{self.ci_hi:+.4f}] seed={self.seed}"
         )
+        if not self.ci_reliable:
+            text += (
+                " — CI from <3 distinct days — block-bootstrap CI is "
+                "unreliable at this corpus breadth"
+            )
+        return text
 
 
 def run_study(
@@ -165,6 +186,13 @@ def run_study(
         for e in events
         if _window_excess(excess_returns, e.ts_ns, bar_ns, pre, post) is not None
     )
+    n_days = len(
+        {
+            _utc_day(e.ts_ns)
+            for e in events
+            if _window_excess(excess_returns, e.ts_ns, bar_ns, pre, post) is not None
+        }
+    )
     return StudyRecord(
         name=name,
         n_events=complete,
@@ -175,4 +203,6 @@ def run_study(
         car=curve,
         ci_lo=lo,
         ci_hi=hi,
+        n_days=n_days,
+        ci_reliable=n_days >= 3,
     )

@@ -38,10 +38,15 @@ pub struct WsEndpoint {
     /// client-originated traffic is silent, and the ~3h20m-periodic data
     /// stalls observed on the Windows host are the signature of such a
     /// connection-lifetime mechanism.  Pinging periodically keeps the path
-    /// warm AND makes the 20s read timeout a real half-open detector: a venue
+    /// warm AND makes the read timeout a real half-open detector: a venue
     /// that stops answering stops ponging our pings, so it is reconnected
     /// within the timeout even though the socket never sends a FIN.
     pub ping_interval: Duration,
+    /// Read-idle timeout: if no frame OR pong arrives within this window the
+    /// connection is declared dead and the task ends so the collector
+    /// reconnects (COL-2). Default 20s; quiet venues whose streams deliver
+    /// rarely must raise it or they false-reconnect (audit).
+    pub read_timeout: Duration,
     /// Optional egress proxy for the WebSocket connection (spec 024
     /// 2026-08-04 incident: some networks are geo-filtered at the venue edge
     /// — Binance futures silently drops non-book streams — so a proxy/VPN in
@@ -59,6 +64,7 @@ impl WsEndpoint {
             subscribe,
             limits: WsLimits::default(),
             ping_interval: Duration::from_secs(10),
+            read_timeout: Duration::from_secs(20),
             proxy: None,
         }
     }
@@ -66,6 +72,14 @@ impl WsEndpoint {
     /// Route this connection through an HTTP CONNECT or SOCKS5 proxy.
     pub fn with_proxy(mut self, proxy: Option<String>) -> Self {
         self.proxy = proxy;
+        self
+    }
+
+    /// Override the read-idle timeout (default 20s). Quiet venues — ones
+    /// whose only stream delivers sparsely — should raise this to avoid
+    /// false reconnects (audit).
+    pub fn with_read_timeout(mut self, timeout: Duration) -> Self {
+        self.read_timeout = timeout;
         self
     }
 }
@@ -126,7 +140,18 @@ impl FrameQueue {
 
     fn push(&self, event: TransportEvent) -> PushResult {
         let (lock, available) = &*self.state;
-        let mut state = lock.lock().expect("frame queue mutex poisoned");
+        let mut state = match lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // A panic mid-loop poisoned the queue (e.g. a consumer that
+                // panicked holding the lock); the queue state is untrusted.
+                // Surface the poison and force a reconnect instead of
+                // panicking again (audit — a panic left the queue unclosed
+                // and the collector silently stalled).
+                tracing::warn!(error = %poisoned, "frame queue mutex poisoned; forcing reconnect");
+                return PushResult::TimedOut;
+            }
+        };
         match self.policy {
             BackpressurePolicy::Unbounded => {}
             BackpressurePolicy::DropNewest if state.frames.len() >= self.capacity => {
@@ -139,9 +164,15 @@ impl FrameQueue {
             }
             BackpressurePolicy::Block => {
                 while state.frames.len() >= self.capacity && !state.closed {
-                    let (next, timeout) = available
+                    let (next, timeout) = match available
                         .wait_timeout(state, Duration::from_millis(100))
-                        .expect("frame queue mutex poisoned");
+                    {
+                        Ok(waited) => waited,
+                        Err(poisoned) => {
+                            tracing::warn!(error = %poisoned, "frame queue mutex poisoned; forcing reconnect");
+                            return PushResult::TimedOut;
+                        }
+                    };
                     state = next;
                     if timeout.timed_out() && state.frames.len() >= self.capacity {
                         state.closed = true;
@@ -161,7 +192,17 @@ impl FrameQueue {
 
     fn poll(&self) -> Option<TransportEvent> {
         let (lock, available) = &*self.state;
-        let mut state = lock.lock().expect("frame queue mutex poisoned");
+        let mut state = match lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // Queue state untrusted after a panic mid-loop; surface a
+                // disconnect so the collector tears the connection down and
+                // reconnects with a fresh queue (audit — a silent stall was
+                // the previous failure mode).
+                tracing::warn!(error = %poisoned, "frame queue mutex poisoned; reconnecting");
+                return Some(TransportEvent::Disconnected);
+            }
+        };
         let event = state.frames.pop_front();
         if event.is_some() {
             available.notify_one();
@@ -176,7 +217,13 @@ impl FrameQueue {
 
     fn close(&self) {
         let (lock, available) = &*self.state;
-        let mut state = lock.lock().expect("frame queue mutex poisoned");
+        let mut state = match lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(error = %poisoned, "frame queue mutex poisoned; cannot mark closed");
+                return;
+            }
+        };
         state.closed = true;
         state.disconnect_pending = true;
         available.notify_all();
@@ -184,7 +231,13 @@ impl FrameQueue {
 
     fn take_metrics(&self) -> TransportMetrics {
         let (lock, _) = &*self.state;
-        let mut state = lock.lock().expect("frame queue mutex poisoned");
+        let mut state = match lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(error = %poisoned, "frame queue mutex poisoned; metrics unavailable");
+                return TransportMetrics::default();
+            }
+        };
         let metrics = TransportMetrics {
             dropped_frames: state.dropped_frames,
             queue_high_water: state.queue_high_water,
@@ -273,29 +326,32 @@ async fn run(
 
     // Read timeout (COL-2 defense): a half-open TCP socket can hold
     // `read.next()` forever (no FIN, no data). depth@100ms + markPrice@1s
-    // mean any real subscription delivers within seconds, so a 20s silence
-    // is a dead connection — end the task so the collector sees
-    // `Disconnected` and reconnects instead of freezing silently.
-    const READ_TIMEOUT: Duration = Duration::from_secs(20);
+    // mean any real subscription delivers within seconds, so a
+    // `endpoint.read_timeout` (default 20s) of silence is a dead connection
+    // — end the task so the collector sees `Disconnected` and reconnects
+    // instead of freezing silently. Quiet venues can raise the timeout via
+    // `WsEndpoint::with_read_timeout` (audit).
+    let read_timeout = endpoint.read_timeout;
 
     // Keepalive (2026-08-12): send client-initiated pings every
     // `endpoint.ping_interval`.  tungstenite 0.24 auto-queues pong replies
     // to the venue's pings (so we no longer reply manually) but has no
-    // auto-ping — the client must drive its own.  The 20s read timeout above
-    // now doubles as a half-open detector: it resets on every read (pongs
-    // included), so a venue that stops answering our pings is reconnected
-    // within the timeout even though the socket never sends a FIN.
+    // auto-ping — the client must drive its own.  The read timeout above
+    // (per-endpoint, default 20s) now doubles as a half-open detector: it
+    // resets on every read (pongs included), so a venue that stops answering
+    // our pings is reconnected within the timeout even though the socket
+    // never sends a FIN.
     let mut ping_tick = tokio::time::interval(endpoint.ping_interval);
     ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             biased;
-            next = tokio::time::timeout(READ_TIMEOUT, read.next()) => {
+            next = tokio::time::timeout(read_timeout, read.next()) => {
                 let msg = match next {
                     Err(_) => {
                         tracing::warn!(
                             "ws read timed out after {}s of silence; reconnecting",
-                            READ_TIMEOUT.as_secs()
+                            read_timeout.as_secs()
                         );
                         break;
                     }

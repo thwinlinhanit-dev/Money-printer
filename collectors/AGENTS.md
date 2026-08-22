@@ -15,8 +15,15 @@ Real-time market data ingestion from cryptocurrency exchange WebSocket streams a
 - `src/book_sync.rs` — book synchronization logic
 - `src/json.rs` — JSON parsing utilities
 - `src/rng.rs`, `src/staleness.rs` — helpers
-- `src/bin/mp-collector.rs` — 24/7 live collector binary (entry point)
-- `src/bin/collect.rs` — offline collect/replay utility
+- `src/binutil.rs` — shared helper utilities (lock/heartbeat/pid files, CLI flags) + the `--trace-file` subscriber builder (`trace_subscriber`, ANSI force-disabled — LOG-1: trace files are machine input, and the 2026-08-15 outage traces were polluted with ESC[..m codes that broke timestamp parsing; enforced by `binutil::tests::trace_subscriber_emits_ansi_free_timestamped_lines` + `ops/ci/check_log_hygiene.sh`)
+- `src/bin/mp-collector.rs` — 24/7 live collector binary (entry point; `--trace-file` sink uses the shared plain-text builder). `swing_only = true` (config) or `--swing-only` drops the L2 book stream (`l2Book` / `orderbook.50`) while keeping trades + funding/mark/OI (+ bybit `allLiquidation`) — spec 035 SWG-1 / spec 036 SLQ-D: swing features are bar-only, never L2/tick inputs. Unit-tested (`swing_only_*`)
+- `swing/*.toml` — the swing-set collector configs (bybit ×3 + standalone HL ×2 + whale census + FRED macro), deployed on the VPS via `ops/scripts/deploy_swing.sh`; topology + co-existence contract in `docs/SWING_DATA_PLAN.md`
+- `src/bin/mp-whale.rs` — Hyperliquid whale-position poller (spec 028)
+- `src/bin/mp-macro.rs` — FRED macro poller (spec 030; `FRED_API_KEY`)
+- `src/bin/mp-netflow.rs` — Ethereum exchange-reserve balance poller (spec 034; `MP_ETHERSCAN_KEY`, Etherscan free REST)
+- `src/etherscan.rs` — Etherscan normalizer (spec 034, NFL-1..8)
+- `src/netflow.rs` — netflow config + Etherscan route selection (spec 034, NFL-2/NFL-7; unit-testable without `live-http`)
+- `src/bin/collect.rs` — alias for `mp-collector` (identical entry point via `include!`, kept for older scripts)
 - `src/bin/inspect_data.rs` — data inspection tool
 - `src/bin/test_binance.rs` — Binance integration test binary
 - `tests/collector_chaos.rs` — chaos/fault-injection tests

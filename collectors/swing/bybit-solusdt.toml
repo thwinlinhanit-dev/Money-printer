@@ -1,0 +1,9 @@
+# Swing-only Bybit collector — SOLUSDT (spec 035 SWG-1 / spec 036 SLQ-D).
+# Adds cross-asset breadth (SOL) for the HTF beta/correlation/breadth edge.
+# Keep: publicTrade + tickers (funding/mark/OI) + allLiquidation. Drop: book.
+venue = "bybit"
+symbol = "SOLUSDT"
+data_dir = "data"
+channel_capacity = 10000
+backpressure = "drop_oldest"
+swing_only = true

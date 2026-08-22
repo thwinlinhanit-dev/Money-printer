@@ -15,6 +15,7 @@ pub mod log;
 pub mod mode;
 pub mod ring;
 pub mod rng;
+pub mod swing;
 pub mod symbol;
 pub mod time;
 pub mod wall_clock;
@@ -26,7 +27,11 @@ pub mod wall_clock;
 /// appended `Venue::Deribit`/`Venue::Fred`, appended
 /// `InstrumentKind::TradFiSynthetic`. Append-only, so schema-2 frames decode
 /// with the current types (see `log.rs` schema-ver dispatch).
-pub const SCHEMA_VER: u16 = 3;
+/// 4 (2026-08-18, specs 033/034): appended `TradeWithAddr` and
+/// `NetflowSnapshot` variants to `MarketEvent`, appended `Venue::Ethereum`.
+/// Append-only, so schema-3 frames decode with the current types (see
+/// `log.rs` schema-ver dispatch).
+pub const SCHEMA_VER: u16 = 4;
 
 pub use arena::{Arena, EventRef};
 pub use book::BookMirror;
@@ -43,6 +48,7 @@ pub use log::{merge_sorted_events, FsyncPolicy, MergeReader};
 pub use mode::TradingMode;
 pub use ring::{Consumer, Overrun, Producer, Ring};
 pub use rng::SplitMix64;
+pub use swing::{BarRange, RebalanceCadence};
 pub use symbol::{InstrumentKind, SymbolMeta, SymbolTable};
 pub use time::{Clock, Nanos, SimClock};
 pub use wall_clock::WallClock;

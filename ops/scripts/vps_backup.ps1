@@ -120,8 +120,19 @@ if ($full) {
 }
 
 # ---- remote delta stats (count, bytes, and the exact file list) --------------
+# PS 5.1 EAP hazard (audit 2026-08-17): native stderr becomes a TERMINATING
+# error under EAP=Stop even with 2>$null - override around the ssh call and
+# check $LASTEXITCODE. (Without the exit-code check a dead VPS would parse as
+# an empty delta and "succeed" - fail-closed: ssh failure is exit 3.)
+$oldEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 $statsOut = & $ssh -i $SshKey -o BatchMode=yes -o StrictHostKeyChecking=accept-new `
     "$SshUser@$VpsHost" "bash ~/vps_stats.sh '$mtime'" 2>$null
+$ErrorActionPreference = $oldEap
+if ($LASTEXITCODE -ne 0) {
+    Log "remote stats failed (ssh exit $LASTEXITCODE) - VPS unreachable or vps_stats.sh missing" "ERROR"
+    Exit 3
+}
 $srcCount = 0; $srcBytes = [int64]0; $srcFiles = [System.Collections.Generic.List[string]]::new()
 foreach ($line in $statsOut) {
     if ($line -match '^count (\d+)$') { $srcCount = [int]$Matches[1] }

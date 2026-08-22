@@ -101,6 +101,15 @@ click (G3/G4).** Agents may prepare the evidence, never click the button.
 - **STR-9** A `NullStrategy` and a deliberately-awful `CoinFlipStrategy` MUST
   exist as fixtures; the funnel docs use CoinFlip's (failing) run as the
   worked example of a G1 kill.
+- **STR-10** Swing strategies MAY declare horizon metadata per spec 035
+  SWG-3: `holding_period_bars() -> core::BarRange` and `rebalance_cadence()
+  -> core::RebalanceCadence`, both defaulting to `[1, MAX]` / `Daily`. Where
+  declared, these are HINTS for sim/sizing — never enforced by the risk gate
+  above its own limits (PD-5).
+- **STR-11** The `Strategy` API MUST permit multiple concurrent open positions
+  across assets (spec 035 SWG-4). `Ctx::position(symbol)` is already
+  per-symbol; implementations MUST NOT collapse portfolio state into a single
+  position slot. (Amended 2026-08-20 by spec 035.)
 
 ## Acceptance criteria
 - [x] Compile-time isolation: strategies crate has no net/oms deps (STR-1) — enforced by `ops/ci/guardrails.sh` PD-4 check + crate manifest.
@@ -114,6 +123,9 @@ click (G3/G4).** Agents may prepare the evidence, never click the button.
 - [x] `funnel` CLI: register/promote/demote/kill/show on a state file; `--i-am-human` gates G3/G4; every transition journaled; kill writes `AUTOPSY.md` (STR-3/5/6). `str_3_funnel_cli_gates_human_promotions_and_writes_autopsy` (end-to-end against the built binary).
 - [x] Strategy trait + I/O-free Ctx surface pinned (STR-1). `str_1_strategy_trait_matches_design_and_ctx_exposes_no_io`.
 - [x] The three launch strategies carry real hypotheses (STR-8). `str_8_launch_strategies_have_written_hypotheses`.
+- [ ] Swing horizon metadata declarable (STR-10, spec 035 SWG-3): a strategy can override `holding_period_bars`/`rebalance_cadence`; defaults are `[1,MAX]`/`Daily`. `swg_3_*` in `strategies/tests/swing_focus.rs`.
+- [ ] Multiple concurrent positions across assets (STR-11, spec 035 SWG-4): per-symbol `Ctx::position` reflects each held asset. `swg_4_*` in `strategies/tests/swing_focus.rs`.
+- [ ] Freeze marker present for `liq-fade-v1` (spec 035 SWG-8). `swg_8_*` in `strategies/tests/swing_focus.rs`.
 
 ## Decisions
 - 2026-07-10: strategies consume features only (not raw events) in v1 —

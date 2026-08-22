@@ -64,3 +64,12 @@ private, compounding asset, not as disposable workspace:
   until a formal cold-store pipeline exists.
 - Keep OS-level sync/cleanup tools (OneDrive, disk cleanup, `cargo clean`) away
   from the data directories.
+
+## Swing (higher-timeframe) collection
+
+If you only trade daily/4h horizons, see [`docs/SWING_DATA_PLAN.md`](docs/SWING_DATA_PLAN.md).
+It describes the **swing-only** collector set (runs every market collector in
+`swing_only` mode — trades/funding/OI/liq, no L2 book — plus a scoped whale
+census and FRED macro), launched via [`swing_collectors.ps1`](swing_collectors.ps1).
+This set is for swing research/backtests and intentionally does NOT satisfy the
+Phase-0 promotion gate (which requires the `book` stream).

@@ -1,0 +1,11 @@
+# Swing-horizon materialization config (spec 035 SWG-2): daily bars.
+# Bar-only features only — bar_tf_ns drives the swing window semantics.
+# Windows in bar counts (daily): 20 bars = 20 days, 48 bars = ~2 months.
+bar_tf_ns = 86400000000000
+
+[swing]
+realized_vol_window = 20
+trend_lookback = 20
+value_area_window = 48
+value_area_bucket = 50.0
+rolling_vwap_bars = 48

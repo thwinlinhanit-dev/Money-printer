@@ -289,6 +289,8 @@ fn rsk_6_risk_toml_parses_rejects_unknown_keys_and_journals_changes() {
         max_orders_per_min = 30
         strategy_daily_loss_budget = 1000.0
         portfolio_daily_loss_budget = 3000.0
+        max_concurrent_positions = 32
+        max_corr_adjusted_portfolio = 500000.0
     "#;
     let cfg = RiskConfig::from_toml(toml).unwrap();
     assert_eq!(cfg.to_limits().max_order_notional, 500.0);

@@ -18,10 +18,25 @@ VENV_DIR="/opt/money-printer/.venv"
 # liquidation topic is the real live source for the `Liquidation` event from
 # this egress, and its recording carries the full required stream set (trade
 # book funding mark_price open_interest + liquidation).
-RECORDINGS="${RECORDINGS:-hyperliquid:BTC hyperliquid:ETH bybit:BTCUSDT}"
+RECORDINGS="${RECORDINGS:-hyperliquid:BTC hyperliquid:ETH bybit:BTCUSDT bybit:ETHUSDT bybit:SOLUSDT}"
 REQUIRED_STREAMS="${REQUIRED_STREAMS:-trade book funding mark_price open_interest}"
 
 cd "/opt/money-printer"
+
+# --- 0. PD guardrails (audit 2026-08-17): mechanical rulebook enforcement
+# (PD-1..4, W-7) before any number from the scorecard is trusted - same
+# semantics as the PowerShell port (daily_pipeline.ps1). Fail-closed: a
+# violation OR a missing guardrails script stops the pipeline.
+echo "[$(date -u)] Running ops/ci/guardrails.sh ..."
+if [ ! -f "/opt/money-printer/ops/ci/guardrails.sh" ]; then
+    echo "[$(date -u)] guardrails script MISSING - cannot verify PD-1..4/W-7; refusing to trust today's scorecard" >&2
+    exit 1
+fi
+if ! bash "/opt/money-printer/ops/ci/guardrails.sh"; then
+    echo "[$(date -u)] guardrails failed - the tree violates the rulebook (PD-1..4/W-7); fix before trusting today's scorecard" >&2
+    exit 1
+fi
+echo "[$(date -u)] guardrails: all checks passed"
 
 require_args=()
 for stream in ${REQUIRED_STREAMS}; do

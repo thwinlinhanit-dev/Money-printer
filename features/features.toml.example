@@ -71,3 +71,89 @@ weight = 0.25
 [[liq_est_bands.leverage_tiers]]
 leverage = 50.0
 weight = 0.20
+
+[microstructure]
+# Top-of-book microstructure features (research-driven edge): microprice
+# (qty-weighted mid, `microprice.{venue}`), quoted spread in bps of mid
+# (`spread.bp.{venue}`), and the wide-spread regime gate (`spread.regime.
+# {venue}` — 1 when the quoted spread ≥ wide_spread_bps; predictability
+# collapses in wide-spread regimes). Book-based: venues with a book stream.
+venues = ["hyperliquid"]
+# Default regime threshold: 2 bps of mid.
+wide_spread_bps = 2.0
+
+[swing]
+# HTF regime + value area + structural levels (spec 035 SWG-2). Bar-only —
+# none of these depend on L2 order book or trade-tape input (SWG-2 MUST NOT).
+# Windows are in bar counts on the engine's bar timeframe (bar_tf_ns).
+realized_vol_window = 20
+# sqrt(bars/year) annualization for swing.realized_vol. Default derives from
+# bar_tf_ns (≈725 for 60s bars); override to align with the materialized bar
+# timeframe (e.g. daily bars → √365 ≈ 19.1).
+sqrt_bars_per_year = 725.2
+trend_lookback = 20
+value_area_window = 48
+value_area_bucket = 50.0
+rolling_vwap_bars = 48
+# Liquidity structure (spec 036 SLQ): compressed-range sweep detection and
+# the HVN/LVN profile levels. All bar-only (SWG-2); defaults shown.
+sweep_range_n = 20        # range window (bars)
+sweep_compress_frac = 0.6 # mean TR of window < frac × pre-window baseline ATR
+sweep_atr_n = 20          # baseline ATR length, computed BEFORE the window
+sweep_atr_mult = 0.1      # wick must clear boundary by >= mult × baseline ATR
+sweep_reclaim_z = 2       # closes back inside allowed within z bars
+sweep_vol_mult = 1.5      # sweep-bar volume >= mult × window mean
+sweep_stop_buffer_atr = 0.5 # invalidation = extreme ∓ buffer × ATR (carried on the event)
+profile_window = 90       # HVN/LVN lookback (bars)
+profile_hvn_frac = 0.7    # local maxima above this fraction of POC volume
+profile_lvn_frac = 0.3    # local minima below this fraction of POC volume
+
+[options_greeks]
+# Options chain Greeks aggregation (spec 037 GRE) — global features
+# (gex.net.{u}, gex.max_pain.{u}, net.{delta,vega,theta}.{u}, vanna/volga/
+# charm.{u}). DISABLED when underlyings is empty; enable per underlying.
+# underlyings = ["BTC", "ETH"]
+# Contract multiplier: Deribit = 1.0 (1 BTC/ETH per contract). Spec 040 sets
+# 100 for IBIT (US equity standard).
+contract_multiplier = 1.0
+
+[options_iv]
+# IV surface analytics (spec 038 IVS): iv.atm.{u}, iv.term.{u}.{tenor},
+# iv.skew.{u}.rr25/wing25, iv.index.{u}, iv.percentile.{u}, iv.regime.{u}.
+# DISABLED when underlyings is empty.
+# underlyings = ["BTC", "ETH"]
+tenors = [
+    { name = "1w", days = 7.0 },
+    { name = "1m", days = 30.0 },
+    { name = "3m", days = 90.0 },
+    { name = "6m", days = 180.0 },
+]
+# Rolling percentile windows (days). Only OBSERVED days count (IVS-11) —
+# collector downtime never dilutes the denominator.
+percentile_window_days = 365
+# Regime lookback (IVS-6). Encoding is REVERSE-ORDINAL: 0=Rich, 1=Fair,
+# 2=Cheap (see spec 038 warning — do not flip after materialization).
+regime_lookback_days = 90
+
+[options_flow]
+# Options flow aggregation (spec 039 OFI): flow.*.{u}.{window} — emitted on
+# window close. DISABLED when underlyings is empty.
+# underlyings = ["BTC", "ETH"]
+windows_ns = [3600000000000, 14400000000000, 86400000000000]  # 1h/4h/24h
+contract_multiplier = 1.0
+# Block trade threshold, USD notional (OFI-2) — USD normalizes BTC vs ETH
+# vs IBIT contract sizes.
+block_threshold_usd = 100000.0
+# Whale threshold = max(floor, k × p95 of the window's notionals) (OFI-8).
+whale_floor_usd = 500000.0
+k_whale = 3.0
+# Kind-aware moneyness bands (OFI-5): ATM ±2%; ITM within 10% on the ITM
+# side; OTM within 50% on the OTM side; deeper trades excluded.
+atm_threshold = 0.02
+itm_cap = 0.10
+otm_cap = 0.50
+# Days-to-expiry tenor boundaries (OFI-6): ≤7 weekly, ≤45 monthly,
+# ≤180 quarterly, else leap.
+weekly_max_days = 7.0
+monthly_max_days = 45.0
+quarterly_max_days = 180.0

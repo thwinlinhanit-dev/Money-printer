@@ -33,6 +33,7 @@ pub const ALERTS: &[AlertSpec] = &[
     alert!("stream-gap", P2),
     alert!("collector-down", P2),
     alert!("disk-high", P2),
+    alert!("storage-budget", P2),
     alert!("determinism-diff", P2),
     alert!("clock-skew", P2),
     alert!("keyfile-perms", P2),

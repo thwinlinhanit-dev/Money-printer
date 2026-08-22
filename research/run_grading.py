@@ -44,7 +44,16 @@ def main(argv: list[str] | None = None) -> int:
     path, ran = run_weekly_grading(
         week, hits, prices, horizon_ns, baseline, args.out_dir
     )
-    print(json.dumps({"path": str(path), "ran": ran}, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "path": str(path),
+                "report": str(path.with_suffix(".md")),
+                "ran": ran,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 

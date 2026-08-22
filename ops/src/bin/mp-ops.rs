@@ -63,6 +63,28 @@
 //!           (fail-closed), never a fabricated verdict. With --telegram, a
 //!           fired P2 is sent immediately (P2 always breaks through quiet
 //!           hours, OPS-9).
+//!   storage-budget [--dir DIR] [--cap-bytes N] [--alert-at-days N]
+//!           [--trend-days N] [--dedupe-ns N] [--ts-ns N] [--manifest PATH]
+//!           [--telegram]
+//!           OPS-15 storage-budget watch (the spec 001 appendix's first
+//!           revisit trigger, wired): sums per-day corpus sizes from the
+//!           {YYYYMMDD}_*.log file names (read-only, W-6 — no state file),
+//!           takes the trailing-window mean daily addition rate (default
+//!           7 days), and raises storage-budget (P2) when the projection
+//!           puts the corpus at the budget cap within the alert horizon
+//!           (default 14 days) or it is already at/over the cap. The budget
+//!           is explicit config — --cap-bytes or MP_STORAGE_BUDGET_BYTES,
+//!           unset ⇒ exit 2 (fail-closed, never a silent skip). With
+//!           --manifest PATH (the vps_drain_manifest.jsonl), the watch ALSO
+//!           fires the same P2 when the relay is silently holding files:
+//!           any entry whose LATEST per-file record is action=landed with
+//!           release not in {released, no_release} (ssh_failed/skipped) —
+//!           the drain landed the file but never released the VPS copy.
+//!           Windows-side artifact; the VPS timer does not pass it.
+//!           Prints a JSON verdict {dir, current_bytes, growth_bytes_per_day,
+//!           days_to_cap, held_vps_files, held_vps_count, alert}; with
+//!           --telegram, a fired P2 is sent immediately (P2 breaks through
+//!           quiet hours, OPS-9).
 //!   telegram-send --id ID --detail TEXT [--severity p1|p2|p3] [--ts-ns N]
 //!           One-shot Telegram notification for a wrapper verdict (the daily
 //!           promotion-gate verdict in daily_pipeline.ps1): sends --detail
@@ -80,6 +102,7 @@
 //!   cargo run --package mp-ops --bin mp-ops -- band-accuracy-decay --trend research/band_accuracy/band_accuracy.jsonl --runs-dir runs --telegram
 //!   cargo run --package mp-ops --bin mp-ops -- telegram-flush --wait
 //!   cargo run --package mp-ops --bin mp-ops -- telegram-stale --telegram
+//!   cargo run --package mp-ops --bin mp-ops -- storage-budget --cap-bytes 500000000000 --telegram
 //!   cargo run --package mp-ops --bin mp-ops -- telegram-send --id daily-pipeline --detail 'day 2026-08-09: NOT promotable' --severity p2
 //!   MP_OPS_P1_WEBHOOK=https://hooks.example.com/alert cargo run --package mp-ops --bin mp-ops -- \
 //!     p1-webhook --id recon-diverged --detail 'BTCUSDT position mismatch'
@@ -87,10 +110,11 @@
 use mp_core::log::LogReader;
 use mp_core::{EventEnvelope, SymbolTable, TradingMode, Venue};
 use mp_ops::{
-    append_batch, append_run_record, band_accuracy_decay_alert, flush_batch,
-    load_band_accuracy_trend, load_telegram_batch, post_telegram, stale_batch_alert, Alert,
-    AlertRouter, Channel, Dispatch, KillLatch, LatchScope, QuietHours, RouteOutcome, Severity,
-    TelegramConfig,
+    append_batch, append_run_record, band_accuracy_decay_alert, flush_batch, held_drain_files,
+    load_band_accuracy_trend, load_telegram_batch, parse_drain_manifest_line, post_telegram,
+    project_storage, sample_daily_sizes, stale_batch_alert, storage_budget_alert, Alert,
+    AlertRouter, Channel, Dispatch, DrainManifestEntry, KillLatch, LatchScope, QuietHours,
+    RouteOutcome, Severity, TelegramConfig,
 };
 use mp_storage::promotion::check_promotion_determinism;
 use mp_storage::{
@@ -567,7 +591,10 @@ fn promotion_verdict(
     // window must carry a PASSING determinism artifact. check_promotion (the
     // plain numeric + window gate) runs first; the determinism overlay holds
     // the verdict back and names the failing days when the window passed.
-    (check_promotion_determinism(&scorecards, artifacts), scorecards)
+    (
+        check_promotion_determinism(&scorecards, artifacts),
+        scorecards,
+    )
 }
 
 fn cmd_promote(args: &[String]) -> Result<String, String> {
@@ -764,7 +791,9 @@ fn last_log_line(path: &str) -> serde_json::Value {
 ///   --latch PATH             kill-latch file (MP_OPS_KILL_LATCH overrides)
 fn cmd_status(args: &[String]) -> Result<String, String> {
     let score_dir = flag(args, "--scorecards-dir").unwrap_or_else(|| "data/scorecards".to_string());
-    let required = flags(args, "--required").into_iter().collect::<BTreeSet<_>>();
+    let required = flags(args, "--required")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let trend_days = match flag(args, "--trend-days") {
         Some(s) => s
             .parse::<usize>()
@@ -822,15 +851,17 @@ fn cmd_status(args: &[String]) -> Result<String, String> {
                 .rev()
                 .take(trend_days)
                 .rev()
-                .map(|f| serde_json::json!({
-                    "date": f.date,
-                    "recordings": f.recordings.iter().map(|r| serde_json::json!({
-                        "venue": r.venue,
-                        "symbol": r.symbol,
-                        "coverage": r.coverage,
-                        "clean": r.clean,
-                    })).collect::<Vec<_>>(),
-                }))
+                .map(|f| {
+                    serde_json::json!({
+                        "date": f.date,
+                        "recordings": f.recordings.iter().map(|r| serde_json::json!({
+                            "venue": r.venue,
+                            "symbol": r.symbol,
+                            "coverage": r.coverage,
+                            "clean": r.clean,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
                 .collect();
         }
     }
@@ -933,9 +964,7 @@ fn scorecard_from_root(data_root: &Path, args: &[String]) -> Result<String, Stri
         .ok()
         .and_then(|text| serde_json::from_str::<SourceManifest>(&text).ok())
         .unwrap_or_default();
-    if args.iter().any(|a| a == "--reuse-unchanged")
-        && !args.iter().any(|a| a == "--force")
-    {
+    if args.iter().any(|a| a == "--reuse-unchanged") && !args.iter().any(|a| a == "--force") {
         let mut req_sorted = required.clone();
         req_sorted.sort();
         let req_key = req_sorted.join(",");
@@ -954,17 +983,13 @@ fn scorecard_from_root(data_root: &Path, args: &[String]) -> Result<String, Stri
                 let raw_path = data_root
                     .join("raw")
                     .join(format!("{date}_{venue_name}_{symbol}.log"));
-                let recorded = manifest
-                    .days
-                    .get(&dashed)
-                    .and_then(|d| d.sources.get(item));
+                let recorded = manifest.days.get(&dashed).and_then(|d| d.sources.get(item));
                 match (recorded, std::fs::metadata(&raw_path)) {
                     (Some(f), Ok(md)) => {
                         let size = md.len();
-                        let mtime = md
-                            .modified()
-                            .ok()
-                            .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as i64);
+                        let mtime = md.modified().ok().map(|t| {
+                            t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as i64
+                        });
                         if f.size != size || f.mtime_ns != mtime || f.config != cfg_fp {
                             match_ok = false;
                             break;
@@ -981,7 +1006,10 @@ fn scorecard_from_root(data_root: &Path, args: &[String]) -> Result<String, Stri
             let text = std::fs::read_to_string(score_dir.join(format!("{dashed}.json")))
                 .map_err(|e| format!("read archived scorecard {dashed}.json: {e}"))?;
             let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
-            eprintln!("scorecard {dashed}: reused from unchanged sources ({} recording(s))", required.len());
+            eprintln!(
+                "scorecard {dashed}: reused from unchanged sources ({} recording(s))",
+                required.len()
+            );
             return Ok(text);
         }
     }
@@ -1031,10 +1059,9 @@ fn scorecard_from_root(data_root: &Path, args: &[String]) -> Result<String, Stri
                 item.clone(),
                 SourceEntry {
                     size: md.len(),
-                    mtime_ns: md
-                        .modified()
-                        .ok()
-                        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as i64),
+                    mtime_ns: md.modified().ok().map(|t| {
+                        t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as i64
+                    }),
                     config: cfg_fp.clone(),
                 },
             );
@@ -1331,6 +1358,182 @@ fn cmd_telegram_stale(args: &[String]) -> Result<String, String> {
     }
     serde_json::to_string(&verdict).map_err(|e| e.to_string())
 }
+/// OPS-15 storage-budget watch: projects when the corpus reaches the budget
+/// cap and raises `storage-budget` (P2) when the projection is within the
+/// alert horizon — operationalizing the spec 001 appendix's disk-budget
+/// revisit trigger. The trend is derived from the corpus's own per-day
+/// `{YYYYMMDD}_*.log` files (read-only, W-6 — no state file); the current
+/// partial day is excluded; growth is the trailing-window mean daily
+/// addition rate. The budget is explicit (`--cap-bytes` or
+/// `MP_STORAGE_BUDGET_BYTES`)
+/// and an unconfigured budget fails closed (exit 2) — a watch that cannot
+/// know the cap must not pretend it did.
+///
+/// Prints a JSON verdict — `{"dir", "current_bytes", "growth_bytes_per_day",
+/// "days_to_cap", "alert": {...}|null}` — and exits 0 either way. With
+/// `--telegram`, a fired P2 is routed through the Bot API edge and sent
+/// immediately (P2 always breaks through quiet hours, OPS-9).
+fn cmd_storage_budget(args: &[String]) -> Result<String, String> {
+    let dir = match flag(args, "--dir") {
+        Some(d) => PathBuf::from(d),
+        None => PathBuf::from(
+            std::env::var("MP_STORAGE_DIR").unwrap_or_else(|_| "data/raw".to_string()),
+        ),
+    };
+    let cap_bytes = match flag(args, "--cap-bytes") {
+        Some(s) => s
+            .parse::<u64>()
+            .map_err(|_| "--cap-bytes must be an integer (bytes)")?,
+        None => match std::env::var("MP_STORAGE_BUDGET_BYTES") {
+            Ok(s) => s
+                .parse::<u64>()
+                .map_err(|_| "MP_STORAGE_BUDGET_BYTES must be an integer (bytes)")?,
+            Err(_) => {
+                return Err(
+                    "storage-budget: no budget configured — set --cap-bytes or MP_STORAGE_BUDGET_BYTES (fail-closed: an unconfigured budget never silently skips)"
+                        .into(),
+                )
+            }
+        },
+    };
+    if cap_bytes == 0 {
+        return Err("--cap-bytes must be positive".into());
+    }
+    let alert_at_days = match flag(args, "--alert-at-days") {
+        Some(s) => s
+            .parse::<f64>()
+            .map_err(|_| "--alert-at-days must be a number")?,
+        None => 14.0,
+    };
+    if alert_at_days <= 0.0 {
+        return Err("--alert-at-days must be positive".into());
+    }
+    let trend_days = match flag(args, "--trend-days") {
+        Some(s) => s
+            .parse::<usize>()
+            .map_err(|_| "--trend-days must be an integer")?,
+        None => 7,
+    };
+    if trend_days < 2 {
+        return Err("--trend-days must be at least 2".into());
+    }
+    let dedupe_ns = match flag(args, "--dedupe-ns") {
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|_| "--dedupe-ns must be an integer")?,
+        None => 86_400_000_000_000, // one day — a daily check re-alerts daily while trending
+    };
+    if dedupe_ns <= 0 {
+        return Err("--dedupe-ns must be positive".into());
+    }
+    let now = match flag(args, "--ts-ns") {
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|_| "--ts-ns must be an integer (epoch ns)")?,
+        None => now_ns(),
+    };
+    let label = dir.to_string_lossy().into_owned();
+    let samples = sample_daily_sizes(&dir, now).map_err(|e| format!("storage-budget: {e}"))?;
+    let projection = project_storage(&samples, cap_bytes, trend_days);
+    let mut alert = storage_budget_alert(
+        &samples,
+        cap_bytes,
+        trend_days,
+        alert_at_days,
+        dedupe_ns,
+        &label,
+    );
+    // Optional drain-manifest scan: flag files that LANDED in the master
+    // corpus but were never released from the relay (action=landed with
+    // release not in {released, no_release} — ssh_failed/skipped). This is a
+    // Windows-side artifact (the VPS timer has no manifest), and an
+    // explicitly-given but unreadable manifest fails closed (CONV-8) — a
+    // check that cannot see its input must not pretend it did.
+    let held = match flag(args, "--manifest").map(PathBuf::from) {
+        Some(p) => {
+            let text = std::fs::read_to_string(&p)
+                .map_err(|e| format!("storage-budget: read manifest {}: {e}", p.display()))?;
+            let entries: Vec<DrainManifestEntry> =
+                text.lines().filter_map(parse_drain_manifest_line).collect();
+            held_drain_files(&entries)
+        }
+        None => Vec::new(),
+    };
+    // A silently held VPS file fires the same P2 regardless of the growth
+    // projection — the relay is not draining (the "VPS never accumulates"
+    // contract the storage-budget watch exists to police).
+    if !held.is_empty() {
+        let names = held
+            .iter()
+            .map(|(f, _)| f.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let held_detail = format!(
+            "{label}: {} held VPS file(s) after drain (landed but release not confirmed): {names} — the relay is still holding byte-verified files; check the vps_drain release leg",
+            held.len()
+        );
+        alert = Some(match alert {
+            Some(a) => Alert::new(
+                "storage-budget",
+                Severity::P2,
+                dedupe_ns,
+                format!("{}; {}", a.detail, held_detail),
+            ),
+            None => Alert::new("storage-budget", Severity::P2, dedupe_ns, held_detail),
+        });
+    }
+    let mut verdict = serde_json::json!({
+        "dir": label,
+        "current_bytes": projection.map(|p| p.current_bytes),
+        "growth_bytes_per_day": projection.and_then(|p| p.growth_bytes_per_day),
+        "days_to_cap": projection.and_then(|p| p.days_to_cap),
+        "held_vps_files": held.iter().map(|(f, r)| serde_json::json!({
+            "file": f,
+            "release": r,
+        })).collect::<Vec<_>>(),
+        "held_vps_count": held.len(),
+        "alert": alert.as_ref().map(|a| serde_json::json!({
+            "id": a.id,
+            "severity": a.severity.as_str(),
+            "detail": a.detail,
+            "runbook": a.runbook,
+            "dedupe_key": a.dedupe_key,
+        })),
+    });
+
+    if args.iter().any(|a| a == "--telegram") {
+        if let Some(alert) = alert {
+            if let (Some(token), Some(chat_id)) = (
+                std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+                std::env::var("TELEGRAM_CHAT_ID").ok(),
+            ) {
+                let cfg = TelegramConfig {
+                    url: std::env::var("MP_OPS_TELEGRAM_URL")
+                        .unwrap_or_else(|_| "https://api.telegram.org".to_string()),
+                    token,
+                    chat_id,
+                };
+                // P2 always breaks through quiet hours (OPS-9).
+                let mut router = AlertRouter::new(None);
+                match router.route(&alert, now) {
+                    RouteOutcome::Sent(d) => match post_telegram(&d, &cfg) {
+                        Ok(()) => verdict["telegram"] = serde_json::json!("sent"),
+                        Err(e) => return Err(format!("telegram send failed: {e}")),
+                    },
+                    RouteOutcome::Batched | RouteOutcome::Deduped => {
+                        unreachable!("a fresh no-quiet-hours router never batches or dedupes a P2")
+                    }
+                }
+            } else {
+                verdict["telegram"] = serde_json::json!("unconfigured");
+            }
+        } else {
+            verdict["telegram"] = serde_json::json!("none");
+        }
+    }
+    serde_json::to_string(&verdict).map_err(|e| e.to_string())
+}
+
 /// One-shot Telegram notification for a wrapper verdict (the daily
 /// promotion-gate verdict in `daily_pipeline.ps1`): sends `--detail`
 /// immediately through the Bot API edge. Unlike `band-accuracy-decay
@@ -1350,7 +1553,11 @@ fn cmd_telegram_send(args: &[String]) -> Result<String, String> {
         Some("p1") => Severity::P1,
         Some("p2") => Severity::P2,
         Some("p3") | None => Severity::P3,
-        Some(other) => return Err(format!("telegram-send: unknown --severity {other} (p1|p2|p3)")),
+        Some(other) => {
+            return Err(format!(
+                "telegram-send: unknown --severity {other} (p1|p2|p3)"
+            ))
+        }
     };
     let (Some(token), Some(chat_id)) = (
         std::env::var("TELEGRAM_BOT_TOKEN").ok(),
@@ -1411,9 +1618,7 @@ fn cmd_p1_webhook(args: &[String]) -> Result<String, String> {
             .to_string()
     })?;
     let ts_ns = match flag(args, "--ts-ns") {
-        Some(s) => s
-            .parse::<i64>()
-            .map_err(|_| "--ts-ns must be an integer")?,
+        Some(s) => s.parse::<i64>().map_err(|_| "--ts-ns must be an integer")?,
         None => now_ns(),
     };
     let dispatch = Dispatch::from_alert(&Alert::new(id, Severity::P1, 0, detail), ts_ns);
@@ -1457,8 +1662,7 @@ fn cmd_p1_webhook(args: &[String]) -> Result<String, String> {
 /// through the configured edges; unconfigured credentials are reported in
 /// the verdict, never silently dropped (CONV-8).
 fn cmd_pipeline_stale(args: &[String]) -> Result<String, String> {
-    let score_dir =
-        flag(args, "--scorecards-dir").unwrap_or_else(|| "data/scorecards".to_string());
+    let score_dir = flag(args, "--scorecards-dir").unwrap_or_else(|| "data/scorecards".to_string());
     let deadline_min = match flag(args, "--deadline-min") {
         Some(s) => s
             .parse::<u32>()
@@ -1478,9 +1682,7 @@ fn cmd_pipeline_stale(args: &[String]) -> Result<String, String> {
         return Err("--dedupe-ns must be positive".into());
     }
     let now = match flag(args, "--ts-ns") {
-        Some(s) => s
-            .parse::<i64>()
-            .map_err(|_| "--ts-ns must be an integer")?,
+        Some(s) => s.parse::<i64>().map_err(|_| "--ts-ns must be an integer")?,
         None => now_ns(),
     };
     let expected_date = utc_date_minus_days(now, 1);
@@ -1644,7 +1846,7 @@ fn main() -> ExitCode {
     if args.len() < 2 {
         eprintln!("Usage: mp-ops <subcommand> [options]");
         eprintln!(
-            "Subcommands: compact, audit, scorecard, promote, status, pipeline-stale, band-accuracy-decay, telegram-flush, telegram-stale, telegram-send, p1-webhook"
+            "Subcommands: compact, audit, scorecard, promote, status, pipeline-stale, band-accuracy-decay, telegram-flush, telegram-stale, storage-budget, telegram-send, p1-webhook"
         );
         return ExitCode::FAILURE;
     }
@@ -1659,6 +1861,7 @@ fn main() -> ExitCode {
         "pipeline-stale" => cmd_pipeline_stale(&args[2..]),
         "telegram-flush" => cmd_telegram_flush(&args[2..]),
         "telegram-stale" => cmd_telegram_stale(&args[2..]),
+        "storage-budget" => cmd_storage_budget(&args[2..]),
         "telegram-send" => cmd_telegram_send(&args[2..]),
         "p1-webhook" => cmd_p1_webhook(&args[2..]),
         other => Err(format!("unknown subcommand: {other}")),
@@ -1683,6 +1886,7 @@ fn main() -> ExitCode {
                 "band-accuracy-decay"
                     | "telegram-flush"
                     | "telegram-stale"
+                    | "storage-budget"
                     | "telegram-send"
                     | "p1-webhook"
                     | "pipeline-stale"
@@ -1775,7 +1979,10 @@ mod tests {
             "seven clean days must promote: {ok}"
         );
         let json: serde_json::Value = serde_json::from_str(&ok).unwrap();
-        assert_eq!(json["determinism_ok"], true, "gate must report determinism ok");
+        assert_eq!(
+            json["determinism_ok"], true,
+            "gate must report determinism ok"
+        );
     }
 
     /// promote: the Phase-0 window condition (spec 024, amendment
@@ -1820,7 +2027,10 @@ mod tests {
         ]);
         let _ = std::fs::remove_dir_all(&dir);
         let ok = verdict.expect("promote should succeed");
-        assert!(ok.contains("NOT YET"), "bursty window must not promote: {ok}");
+        assert!(
+            ok.contains("NOT YET"),
+            "bursty window must not promote: {ok}"
+        );
         assert!(
             ok.contains("2026-08-04"),
             "the burst day must be named in the why: {ok}"
@@ -1874,12 +2084,18 @@ mod tests {
         let verdict = cmd_promote(&["--scorecards-dir".into(), dir.to_string_lossy().into()]);
         let _ = std::fs::remove_dir_all(&dir);
         let ok = verdict.expect("promote should succeed");
-        assert!(ok.contains("PROMOTED"), "burst-free tail must qualify: {ok}");
+        assert!(
+            ok.contains("PROMOTED"),
+            "burst-free tail must qualify: {ok}"
+        );
         let json: serde_json::Value = serde_json::from_str(&ok).unwrap();
         assert_eq!(json["window_start"], "2026-08-02");
         assert_eq!(json["window_end"], "2026-08-08");
         assert!(json["burst_days"].as_array().unwrap().is_empty());
-        assert_eq!(json["determinism_ok"], true, "gate must report determinism ok");
+        assert_eq!(
+            json["determinism_ok"], true,
+            "gate must report determinism ok"
+        );
     }
 
     #[test]
@@ -2220,7 +2436,11 @@ mod tests {
         )
         .unwrap();
         let latch = root.join("kill.json");
-        std::fs::write(&latch, KillLatch::global("manual test", 42).to_json().unwrap()).unwrap();
+        std::fs::write(
+            &latch,
+            KillLatch::global("manual test", 42).to_json().unwrap(),
+        )
+        .unwrap();
 
         let out = cmd_status(&[
             "--scorecards-dir".into(),
@@ -2248,8 +2468,14 @@ mod tests {
         assert_eq!(s["promotion"]["consecutive_clean"], 1, "{out}");
         assert_eq!(s["promotion"]["first_failure"], "2026-08-10", "{out}");
         assert_eq!(s["latest_scorecard"]["date"], "2026-08-11", "{out}");
-        assert_eq!(s["latest_scorecard"]["recordings"][0]["stale_bursts"], 2, "{out}");
-        assert_eq!(s["latest_scorecard"]["recordings"][0]["worst_gap_ns"], 239_000_000_000i64);
+        assert_eq!(
+            s["latest_scorecard"]["recordings"][0]["stale_bursts"], 2,
+            "{out}"
+        );
+        assert_eq!(
+            s["latest_scorecard"]["recordings"][0]["worst_gap_ns"],
+            239_000_000_000i64
+        );
         // Coverage trend: oldest→newest, both days present.
         let trend = s["coverage_trend"].as_array().unwrap();
         assert_eq!(trend.len(), 2, "{out}");
@@ -2368,8 +2594,17 @@ mod tests {
         assert_eq!(v["expected_date"], "2026-08-12", "{out}");
         assert_eq!(v["alert"]["id"], "pipeline-stale", "{out}");
         assert_eq!(v["alert"]["severity"], "P1", "{out}");
-        assert_eq!(v["alert"]["runbook"], "ops/runbooks/pipeline-stale.md", "{out}");
-        assert!(v["alert"]["detail"].as_str().unwrap().contains("2026-08-12"), "{out}");
+        assert_eq!(
+            v["alert"]["runbook"], "ops/runbooks/pipeline-stale.md",
+            "{out}"
+        );
+        assert!(
+            v["alert"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("2026-08-12"),
+            "{out}"
+        );
         // Credentials absent ⇒ egress reported as unconfigured, never a fake send.
         assert_eq!(v["telegram"], "unconfigured", "{out}");
     }
@@ -2393,7 +2628,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["stale"], true, "{out}");
-        assert!(v["alert"]["detail"].as_str().unwrap().contains("unparseable"), "{out}");
+        assert!(
+            v["alert"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("unparseable"),
+            "{out}"
+        );
     }
 
     /// pipeline-stale: before the deadline (UTC minute < --deadline-min) the
@@ -2509,7 +2750,12 @@ mod tests {
             &std::fs::read_to_string(root.join("scorecards/.scorecard_sources.json")).unwrap(),
         )
         .unwrap();
-        assert!(manifest["days"]["2026-08-13"]["sources"]["hyperliquid:BTC"]["size"].as_u64().unwrap() > 0);
+        assert!(
+            manifest["days"]["2026-08-13"]["sources"]["hyperliquid:BTC"]["size"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

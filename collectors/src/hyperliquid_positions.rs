@@ -58,6 +58,16 @@ impl HyperliquidPositionsNormalizer {
     pub fn symbols_mut(&mut self) -> &mut SymbolTable {
         &mut self.symbols
     }
+
+    /// The census pseudo-symbol (`""`) referenced by every
+    /// [`census_detected`]/[`gap_detected`] event (WHL-7). Interning it on
+    /// first use guarantees the id always resolves and its symbol frame lands
+    /// in the log before the first census event (EVT-8) — the previous code
+    /// fell back to `SymbolId(0)` on an empty table, which mis-resolves on
+    /// replay (audit).
+    pub fn census_symbol(&mut self) -> SymbolId {
+        self.symbols.intern_default(Venue::Hyperliquid, "")
+    }
 }
 
 /// Build the `Status::GapDetected` event a missed poll window must emit

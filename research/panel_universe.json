@@ -1,0 +1,23 @@
+{
+  "universe_version": "binance-um-v1",
+  "downloader_version": "panel-py-1",
+  "source": "data.binance.vision USD-M futures klines",
+  "source_timezone": "UTC",
+  "fidelity_label": "external_archive:binance-um-klines-1m-v1",
+  "inclusion_rule": "binance USD-M perpetual; mean daily quote volume >= liquidity_threshold_usd over the panel window (measured from the panel itself; membership journaled per manifest row)",
+  "liquidity_threshold_usd": 100000000,
+  "daily_threshold_usd": 10000000,
+  "delisting_rule": "symbol drops out of membership when daily quote volume < daily threshold for 30 consecutive days; delisting/migration events also recorded in the instrument master (Phase 3.3)",
+  "partition": {
+    "train": ["2026-01-01", "2026-04-30"],
+    "validation": ["2026-05-01", "2026-06-30"],
+    "test": ["2026-07-01", "2026-08-18"],
+    "rule": "chronological and non-overlapping; the final test period remains untouched until hypothesis and parameters are frozen"
+  },
+  "notes": "External archive (roadmap 3.1): NOT evidence for queue position, maker fills, or sub-minute order-flow alpha. Slow-horizon research only. Panel currently covers the symbols the live corpus also records so the two namespaces are comparable.",
+  "symbols": [
+    {"venue": "binance", "symbol": "BTCUSDT", "start": "2026-01-01", "end": "2026-08-18"},
+    {"venue": "binance", "symbol": "ETHUSDT", "start": "2026-01-01", "end": "2026-08-18"},
+    {"venue": "binance", "symbol": "SOLUSDT", "start": "2026-01-01", "end": "2026-08-18"}
+  ]
+}

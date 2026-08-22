@@ -27,6 +27,8 @@ fn base<'a>(allowed: &'a [(Venue, SymbolId)]) -> GateInput<'a> {
         reduce_only: false,
         contract_multiplier: 1.0,
         allowed,
+        open_positions: 0,
+        corr_adjusted_exposure_notional: 0.0,
     }
 }
 

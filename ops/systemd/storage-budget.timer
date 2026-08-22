@@ -1,0 +1,14 @@
+# OPS-15: the storage-budget watch runs daily at 01:30 UTC — after the 00:05
+# daily pipeline (so compaction has happened) and clear of the 00:15
+# telegram-stale check and the Mon 06:00 grading run. Persistent: a missed
+# fire (host down) runs on the next boot; the check is read-only and
+# alert-only (W-6), so a re-fire is idempotent.
+[Unit]
+Description=Daily storage-budget growth watch timer
+
+[Timer]
+OnCalendar=*-*-* 01:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

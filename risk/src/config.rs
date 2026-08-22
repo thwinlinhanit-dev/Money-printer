@@ -24,6 +24,8 @@ pub struct RiskConfig {
     pub max_orders_per_min: u32,
     pub strategy_daily_loss_budget: f64,
     pub portfolio_daily_loss_budget: f64,
+    pub max_concurrent_positions: u32,
+    pub max_corr_adjusted_portfolio: f64,
 }
 
 impl RiskConfig {
@@ -40,6 +42,8 @@ impl RiskConfig {
             max_orders_per_min: self.max_orders_per_min,
             strategy_daily_loss_budget: self.strategy_daily_loss_budget,
             portfolio_daily_loss_budget: self.portfolio_daily_loss_budget,
+            max_concurrent_positions: self.max_concurrent_positions,
+            max_corr_adjusted_portfolio: self.max_corr_adjusted_portfolio,
         }
     }
 
@@ -84,6 +88,18 @@ impl RiskConfig {
             self.portfolio_daily_loss_budget,
             new.portfolio_daily_loss_budget,
         );
+        line(
+            "max_corr_adjusted_portfolio",
+            self.max_corr_adjusted_portfolio,
+            new.max_corr_adjusted_portfolio,
+        );
+        // The `line` closure above is dead here (NLL) — safe to push directly.
+        if self.max_concurrent_positions != new.max_concurrent_positions {
+            out.push(format!(
+                "{ts_ns}|{actor}|max_concurrent_positions: {} -> {}",
+                self.max_concurrent_positions, new.max_concurrent_positions
+            ));
+        }
         out
     }
 }

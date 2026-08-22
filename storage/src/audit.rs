@@ -286,10 +286,7 @@ pub fn audit_raw_log(path: &Path, config: &AuditConfig) -> RawLogAudit {
     if audit.event_count > 0 && audit.coverage < MIN_COVERAGE {
         audit.findings.push(finding(
             "low_coverage",
-            format!(
-                "coverage {:.4} < required {MIN_COVERAGE}",
-                audit.coverage
-            ),
+            format!("coverage {:.4} < required {MIN_COVERAGE}", audit.coverage),
         ));
     }
     audit
@@ -754,10 +751,7 @@ mod tests {
         // The gap and the stale events are reported, but they are warnings:
         // the day fails on the numeric bar (coverage ~0.15 < 0.995).
         assert!(
-            audit
-                .findings
-                .iter()
-                .any(|f| f.code == "low_coverage"),
+            audit.findings.iter().any(|f| f.code == "low_coverage"),
             "{:?}",
             audit.findings
         );

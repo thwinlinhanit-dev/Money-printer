@@ -1,0 +1,8 @@
+# Swing-only Bybit collector — ETHUSDT (spec 035 SWG-1 / spec 036 SLQ-D).
+# Keep: publicTrade + tickers (funding/mark/OI) + allLiquidation. Drop: book.
+venue = "bybit"
+symbol = "ETHUSDT"
+data_dir = "data"
+channel_capacity = 10000
+backpressure = "drop_oldest"
+swing_only = true

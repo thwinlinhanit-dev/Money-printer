@@ -85,6 +85,26 @@ snapshot channel or REST snapshot), mark/funding, open interest, liquidations.
   tests: scripted disconnects, gaps, throttles ⇒ assert reconnect/resync
   behavior (COL-1, COL-7).
 
+## Swing data contract (spec 035 SWG-1)
+
+The swing pipeline (spec 035) MUST be able to run on ONLY the following data
+types, WITHOUT any tick or L2/WebSocket subscription beyond what is already
+collected. Status verified against the codebase on 2026-08-20:
+
+| Data | Granularity | Source | Status |
+| :--- | :--- | :--- | :--- |
+| **OHLCV** | daily, 4h | derived from the collected trade tape | No kline REST collector exists; bars are derived offline via `features/src/bar.rs` `BarBuilder` or `mp-query bars --interval-secs 14400\|86400`; historical via `research/panel.py` (Binance Vision). No NEW subscription required. |
+| **Funding rate** | per 8h interval, per venue | WS mark/funding channels + REST premiumIndex (Binance) | Fully collected (`Funding` events, all venues). |
+| **Open interest** | daily snapshot minimum, 4h preferred | Binance REST `openInterest` (30s) + per-venue WS tickers | Fully collected (`OpenInterest` events, all venues). |
+| **Liquidation totals** | daily aggregate (not tick-level) | per-event liq streams | Events captured per venue (Binance WS forceOrder sample + REST `allForceOrders` census COL-29, Bybit `allLiquidation`, OKX `liquidation-orders`); daily totals derived offline (`mp-query liq --interval-secs 86400`, spec 029 `liq.agg`). |
+| **Cross-asset reference** (BTC, macro proxy) | daily | FRED REST daily (spec 030) + HIP-3 + BTC as a normal traded symbol | Implemented (`MacroPoint` events; BTC from the standard recordings). |
+
+All five rows are met by existing collection + offline derivation. Nothing in
+this table requires a new tick or L2 WebSocket subscription (the trade tape
+that feeds OHLCV bars is the existing recording set). This contract replaces
+the "likely already present" assumption in spec 035 §3 with the verified
+derivation paths above.
+
 ## Acceptance criteria
 - [~] One venue (Bybit) normalizes trades+book+funding+OI+liq through a simulated disconnect/gap cycle — done at the normalizer+driver level (`col_1_reconnects_after_disconnect_with_backoff`, `col_7_*`); end-to-end over a *live* socket awaits the transport.
 - [~] Fixture tests pass (COL-13) — `bybit_fixtures.rs` green, but fixtures are SYNTHETIC-representative, not real captures (see Decisions). Real-capture validation is the remaining COL-13 work.
@@ -127,6 +147,11 @@ snapshot channel or REST snapshot), mark/funding, open interest, liquidations.
   + `/metrics` HTTP (COL-10/11), graceful shutdown (COL-12), venue-wide
   connect/disconnect Status events (COL-3), and the `sampled` stream flag
   (COL-8) — all tracked, none silently dropped.
+- 2026-08-20 (impl, spec 035 SWG-1): swing data contract documented above
+  (daily/4h OHLCV, 8h funding, daily/4h OI, daily liq aggregates, daily
+  cross-asset reference). Verified against the collectors crate: no new
+  collector work is required — OHLCV bars derive from the existing trade tape,
+  funding/OI/liq/cross-asset are already collected or derivable offline.
 
 ## Open questions
 - NATS fan-out: required only when features run in a separate process — defer

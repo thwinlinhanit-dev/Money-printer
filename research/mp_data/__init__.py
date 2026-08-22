@@ -12,5 +12,27 @@ No Python on any live decision path (CONV-2): this package is research-only.
 from __future__ import annotations
 
 from .coverage import Coverage, CoverageGap, Interval
+from .eligibility import (
+    EligibilityReport,
+    EligibilityRule,
+    Exclusion,
+    Grade,
+    all_dates,
+    all_universe,
+    load_scorecards,
+    select,
+)
 
-__all__ = ["Coverage", "CoverageGap", "Interval"]
+__all__ = [
+    "Coverage",
+    "CoverageGap",
+    "Interval",
+    "Grade",
+    "EligibilityRule",
+    "EligibilityReport",
+    "Exclusion",
+    "load_scorecards",
+    "select",
+    "all_universe",
+    "all_dates",
+]

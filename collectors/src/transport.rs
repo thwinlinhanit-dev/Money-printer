@@ -26,9 +26,9 @@ pub trait Transport {
     fn poll(&mut self) -> Option<TransportEvent>;
 
     /// Consume the aggregated loss/high-water telemetry since the prior call.
-    /// The live WS transport implements this (BKP-3/INT-3); the mock and tee
-    /// wrappers report nothing. Default so `Box<dyn Transport>` stays usable
-    /// by every collector binary.
+    /// The live WS transport implements this (BKP-3/INT-3); the mock reports
+    /// nothing and the tee forwards its inner transport's metrics. Default so
+    /// `Box<dyn Transport>` stays usable by every collector binary.
     fn take_metrics(&mut self) -> TransportMetrics {
         TransportMetrics::default()
     }
@@ -114,5 +114,14 @@ impl<T: Transport> Transport for TeeTransport<T> {
             }
         }
         ev
+    }
+
+    /// The tee tracks no loss of its own (it consumes every frame its inner
+    /// yields), so forward the inner transport's backpressure telemetry
+    /// verbatim. Without this override, raw_capture mode zeroed out the
+    /// inner's drops and the collector never emitted
+    /// `Status::BackpressureDrop` (BKP-3/INT-1; audit).
+    fn take_metrics(&mut self) -> TransportMetrics {
+        self.inner.take_metrics()
     }
 }

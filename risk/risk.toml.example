@@ -8,3 +8,5 @@ max_px_dev_frac = 0.02
 max_orders_per_min = 30
 strategy_daily_loss_budget = 1000.0
 portfolio_daily_loss_budget = 3000.0
+max_concurrent_positions = 32
+max_corr_adjusted_portfolio = 500000.0

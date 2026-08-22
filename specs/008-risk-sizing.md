@@ -64,6 +64,33 @@ w(s)      = min(raw_w, kelly_cap(s)) , renormalized so Σw ≤ max_deployed (def
 `portfolio_daily_loss_budget` — computed from equity nightly, written to a
 limits file the gate hot-reloads (gate stays dumb, RSK does the thinking).
 
+### SWG-6 portfolio-level caps (amends spec 008 via spec 035)
+
+Swing portfolios hold several positions at once, so per-position limits alone
+are not enough (spec 035 §Risk/Sizing):
+
+- **Max concurrent positions** (`RG-12`): `max_concurrent_positions` caps the
+  number of distinct symbols with an open position. An order consumes a slot
+  ONLY when it OPENS a new symbol position (no existing qty, not reduce_only);
+  adds to a held symbol and reduces/closes never consume a slot.
+- **Correlation-adjusted exposure cap** (`RG-13`):
+  ```
+  corr_adj_exposure = sqrt( ΣᵢΣⱼ wᵢ wⱼ ρᵢⱼ )      (w = position notionals, ρ = pairwise corr)
+  ```
+  `max_corr_adjusted_portfolio` caps the resulting value. The caller computes
+  the value with `risk::portfolio::correlation_adjusted_exposure` (the gate
+  stays dumb); an identity correlation matrix reduces it to sqrt of sum of
+  squares (diversification buys a bigger book), perfect correlation to the
+  gross sum (RG-5's number), and a corrupt/ragged matrix fails closed to `+inf`.
+- **Funding drag in expected returns**: expected return must be net of
+  cumulative funding over the expected holding period (strategy's
+  `holding_period_bars` × bar interval), not just spot P&L:
+  ```
+  cumulative_funding_cost = ± rate_per_interval × intervals_held × notional   (+ = long pays, − = short receives)
+  expected_return_net_of_funding = gross_pnl − cumulative_funding_cost
+  ```
+  (`risk::portfolio::cumulative_funding_cost` / `expected_return_net_of_funding`.)
+
 ## Requirements
 - **RSK-1** Sizing formula MUST be implemented exactly as above, unit-tested
   against hand-computed fixtures including rounding and min_notional floor.
@@ -86,6 +113,12 @@ limits file the gate hot-reloads (gate stays dumb, RSK does the thinking).
   sizing surprises you, the trace answers why.
 - **RSK-9** Property tests: sizing is monotonic in u; g(dd) ∈ [0,1];
   Σ final weights ≤ max_deployed; no NaN for any finite input (CONV-8/22).
+- **RSK-10 (SWG-6)** The gate MUST enforce `max_concurrent_positions` (RG-12)
+  and `max_corr_adjusted_portfolio` (RG-13), both configurable in `risk.toml`
+  and journaled on change (RSK-6 spirit).
+- **RSK-11 (SWG-6)** Expected-return calculations MUST subtract cumulative
+  funding over the expected holding period (`holding_period_bars`), never spot
+  P&L alone; both functions fail closed on non-finite inputs.
 
 ## Acceptance criteria
 - [x] Hand-computed sizing incl. floor/rounding + zero-vol edge (RSK-1). `rsk_1_sizing_matches_hand_computation`, `rsk_1_min_notional_floor_zeroes_tiny_trades`, `rsk_1_zero_vol_is_no_trade_not_nan`.
@@ -98,6 +131,7 @@ limits file the gate hot-reloads (gate stays dumb, RSK does the thinking).
 - [x] `risk.toml` parses with deny_unknown_fields and journals every change old→new/ts/actor (RSK-6). `rsk_6_risk_toml_parses_rejects_unknown_keys_and_journals_changes` + `risk.toml.example`.
 - [x] Regime fit computed from live regime feature values, feeding the allocator (RSK-7). `rsk_7_regime_fit_reads_live_features_not_opinion`.
 - [x] SizingTrace recomposes the sizing formula term-by-term (RSK-8). `rsk_8_sizing_trace_exposes_every_term_of_the_formula`.
+- [x] RG-12/13 gate checks + portfolio math (RSK-10/11, spec 035 SWG-6). `swg_6_*` in `risk/tests/portfolio.rs`: correlation-adjusted exposure (single = notional, perfect corr = gross, uncorrelated = sqrt of sum of squares, empty = 0, corrupt matrix fails closed), funding cost long-pays/short-receives + negative-rate reversal, expected return net of funding, RG-12 rejects new slot above cap while adds/reduces pass, RG-13 cap breach + fail-closed NaN/negative input.
 
 ## Decisions
 - 2026-07-10: quarter-Kelly ceiling and live-trades-only estimation are
@@ -121,6 +155,16 @@ limits file the gate hot-reloads (gate stays dumb, RSK does the thinking).
   `regime.trend` encodings to the declared-mask fit that feeds
   `StrategyInput::regime_fit` — never an opinion field). All requirement IDs
   tested; status → `implemented`.
+- 2026-08-20 (impl, spec 035 SWG-6): RSK-10/11 landed — `risk/src/portfolio.rs`
+  (correlation-adjusted exposure, cumulative funding cost, expected return net
+  of funding) and gate checks RG-12 (`max_concurrent_positions`, new-slot only)
+  + RG-13 (`max_corr_adjusted_portfolio`, caller-computed resulting value).
+  `RiskConfig`/`risk.toml` gain both params with change journaling. The sim
+  wires breadth + corr-adjusted inputs (perfect-correlation worst case — it has
+  no cross-asset correlation model; live/paper callers with a matrix use
+  `correlation_adjusted_exposure`). Defaults: 32 concurrent, corr cap above
+  gross so the plain gross check binds first. Tests: `swg_6_*`
+  (`risk/tests/portfolio.rs`).
 
 ## Open questions
 - Correlation window (60d) vs strategy holding periods — calibrate during

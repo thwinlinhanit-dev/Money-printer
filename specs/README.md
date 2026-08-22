@@ -7,7 +7,7 @@ should be updated).
 ## Status
 
 | # | Spec | Area | Status |
-|---|------|------|--------|
+|---|------|------|--------| 
 | 000 | [Conventions](000-conventions.md) | engineering ground rules | 🔨 implementing |
 | 001 | [Event Schema](001-event-schema.md) | core types | ✅ implemented |
 | 002 | [Collectors](002-collectors.md) | data plane | 🔨 implementing |
@@ -19,13 +19,13 @@ should be updated).
 | 008 | [Risk & Sizing Engine](008-risk-sizing.md) | risk | ✅ implemented |
 | 009 | [Ops, Monitoring & Alerting](009-ops-alerting.md) | ops | 🔨 implementing |
 | 010 | [Research Workflow & LLM Agents](010-research-llm.md) | intelligence | ✅ implemented |
-| 011 | [WASM Terminal](011-terminal.md) | decision plane | 📝 draft |
+| 011 | [WASM Terminal](011-terminal.md) | decision plane | ✅ ready |
 | 012 | [Zero-Copy Event Pipeline](012-zero-copy-pipeline.md) | core | 📝 draft |
 | 013 | [WS Backpressure Policy](013-ws-backpressure.md) | collectors | 📝 draft |
 | 014 | [Event Log Fsync Policy](014-event-log-fsync.md) | core/storage | 📝 draft |
 | 015 | [carry-v1 Strategy](015-carry-v1.md) | intelligence | 🔨 implementing |
 | 016 | [Feature Materialization](016-feature-materialization.md) | intelligence | 📝 draft |
-| 017 | [Screener Hit Journal & Grading](017-screener-grading.md) | intelligence | 📝 draft |
+| 017 | [Screener Hit Journal & Grading](017-screener-grading.md) | intelligence | 🔨 implementing |
 | 018 | [One Runtime, Four Modes (Paper/Shadow/Live Mode Switch)](018-mode-switch.md) | ops | ✅ ready |
 | 019 | [Collector Binary & Systemd](019-collector-binary.md) | collectors | 📝 draft |
 | 020 | [Binance REST Snapshot](020-binance-snapshot.md) | collectors | 📝 draft |
@@ -40,6 +40,16 @@ should be updated).
 | 029 | [Liquidation Aggregation & Estimated Liq Bands](029-liquidation-features.md) | intelligence | ✅ implemented |
 | 030 | [Macro Data Collector (HIP-3 + FRED)](030-macro-collector.md) | data plane | ✅ implemented |
 | 031 | [Deribit Options Recorder](031-deribit-options-recorder.md) | data plane | ✅ implemented |
+| 032 | [Multi-Symbol Collector Fan-Out](032-multi-symbol-collectors.md) | data plane | 📝 draft |
+| 033 | [Wallet Identity in Trades (TradeWithAddr)](033-wallet-identity.md) | data plane | ✅ implemented |
+| 034 | [Exchange Netflow Indexer](034-exchange-netflow.md) | data plane | ✅ implemented |
+| 035 | [Swing Trading Focus](035-swing-focus.md) | architecture/pipeline | ✅ implemented |
+| 036 | [Volume-Profile Liquidity + Range-Reclaim](036-volume-profile-liquidity.md) | intelligence | ✅ implemented (MVP; §7 deferred) |
+| 037 | [Options Greeks Computation Engine](037-options-greeks-computation.md) | options analytics | 📝 draft |
+| 038 | [IV Surface Builder & Volatility Analytics](038-iv-surface-builder.md) | options analytics | 📝 draft |
+| 039 | [Cross-Exchange Options Flow Aggregator](039-options-flow-aggregator.md) | options analytics | 📝 draft |
+| 040 | [IBIT ETF Options Integration](040-ibit-etf-integration.md) | options analytics | 📝 draft |
+| 041 | [Real-Time Analytics Terminal](041-analytics-terminal.md) | frontend/UI | 📝 draft |
 
 Status values: `draft` → `ready` (implementable) → `implementing` →
 `implemented` → `superseded`. Update this table in the same commit as the work
@@ -48,6 +58,10 @@ Status values: `draft` → `ready` (implementable) → `implementing` →
 **Recommended implementation order:** 001 → 002 → 003 → 005(L0) → 004 → 006 →
 005(L1) → 008 → 007 → 009. Vertical slices beat horizontal completeness (W-4).
 Newer specs (012–023) are Phase 2+ and do not block Phase 0.
+
+**Options analytics pipeline:** 031 (recording, implemented) → 037 (Greeks) →
+038 (IV surface) → 039 (flow) → 040 (IBIT) → 041 (terminal). Each layer
+depends on the one before it; 037–039 can be built in parallel after 031.
 
 ## Spec format
 
@@ -65,7 +79,9 @@ Open questions — needs human input; do NOT guess these
 
 Requirement prefixes: CONV, EVT, COL, STO, FEA, SIM, STR, EXE, RSK, OPS,
 RES, UI, ZCP (012), BKP (013), FSP (014), MAT (016), GRD (017), MOD (018),
-INT (024), WHL (028), MAC (030), OPT (031), BDC (001 codec amendment).
+INT (024), WHL (028), MAC (030), OPT (031), BDC (001 codec amendment), MSC (032),
+WAL (033), NFL (034), SWG (035), SLQ (036), GRE (037), IVS (038), OFI (039),
+IBI (040), TER (041).
 
 ## How to implement a spec
 

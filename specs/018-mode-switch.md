@@ -102,12 +102,13 @@ path and the replay path are the same machine. Any diff raises the
 a live/backtest divergence is the exact failure mode the two-code-path sin
 creates, and the check makes it visible within 24h, not after a loss.
 
-The scaffolding exists: `sim/decision_log.rs` (decision records) and
-`sim/paper.rs` (paper fills). What remains is the input seam (replay
-yesterday's raw/feature inputs into the same engine entry point the live loop
-uses) and the byte-identity comparator. Determinism requirements: fixed seed
-(`SplitMix64`), sorted/deterministic iteration (CONV-10), no wall-clock reads
-in the decision path (PD-3).
+The daily determinism check is implemented in `sim/src/bin/mp-determinism.rs`
+(and `sim/src/determinism.rs`): it replays the previous day's recorded session
+through the same engine entry point the live loop uses and compares the
+decision-log hash with the live day's recorded hash. A diff (or a missing
+live log — fail closed) fails the check and blocks promotion
+(`storage/src/promotion.rs`). The pipeline runs it every morning after the
+scorecard (spec 024).
 
 ### Demotion
 
@@ -190,12 +191,18 @@ fails, mode drops to the previous level:
   `mod_7_backtest_and_live_share_event_core`.
 - [ ] `shadow` logs decisions with no fill sink (MOD-8). Test:
   `mod_8_shadow_never_fills`.
-- [ ] Daily determinism check: replay yesterday → byte-identical decision
+- [x] Daily determinism check: replay yesterday → byte-identical decision
   log; a planted diff raises `determinism-diff` and blocks promotion
-  (MOD-9..11). Tests: `mod_9_daily_determinism_replay`, `mod_10_decision_path_deterministic`,
-  `mod_11_determinism_diff_blocks_promotion`.
-- [ ] `MONEY_PRINTER_MODE=live` alone must NOT promote (MOD-12). Test:
-  `mod_12_live_requires_human_confirmation`.
+  (MOD-9..11). Tests: `mod_9_daily_determinism_replay_matches_live_summary`,
+  `mod_9_determinism_diff_fails_when_live_hash_differs`,
+  `mod_9_binary_writes_passing_artifact`, `mod_9_binary_fails_closed_on_missing_log`,
+  `mod_10_decision_path_deterministic_two_runs_byte_identical`,
+  `mod_10_emitting_strategy_is_deterministic_across_runs`,
+  `mod_11_determinism_config_rejects_unknown_keys`,
+  `mod_11_determinism_blocks_promotion_and_names_failures`.
+- [x] `MONEY_PRINTER_MODE=live` alone must NOT promote (MOD-12). Test:
+  `mod_12_live_requires_human_confirmation` (env override refuses live and
+  falls back to Sleep; development overrides below live remain available).
 
 ## Decisions
 
@@ -217,6 +224,13 @@ fails, mode drops to the previous level:
 - 2026-08-13: `determinism-diff` is already a registered P2 alert
   (`ops/src/registry.rs`) with a runbook; the check raises it through the
   existing framework (dedupe + quiet hours, spec 009).
+- 2026-08-17 (fix-all): MOD-9..11 are implemented (`sim/src/bin/mp-determinism.rs`
+  + `sim/src/determinism.rs` + the promotion block in `storage/src/promotion.rs`);
+  acceptance boxes checked with their real test names. MOD-12 enforced in
+  `core/src/mode.rs`: the `MONEY_PRINTER_MODE` env override refuses `live`
+  (development path only) and fails closed to Sleep — live requires the
+  operator-owned mode.toml and the funnel's human gate. MOD-6..8 (the
+  `mp run --mode` single binary and the shadow no-fill sink) remain open.
 
 ## Open questions
 

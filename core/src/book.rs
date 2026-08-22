@@ -94,7 +94,11 @@ impl BookMirror {
     ///
     /// Rules:
     /// - Fully-old update (`last_seq <= self.last_seq`): already applied, ignore.
-    /// - Contiguous (`first_seq <= self.last_seq + 1 <= last_seq + 1`): apply.
+    /// - Partial overlap (`first_seq <= self.last_seq < last_seq`): the window
+    ///   straddles the applied seq but the level entries span the whole window
+    ///   and cannot be split, so applying in full double-applies the covered
+    ///   part (stale removals on replay) — drop and mark stale (audit).
+    /// - Contiguous (`first_seq == self.last_seq + 1`): apply.
     /// - Gap (`first_seq > self.last_seq + 1`): mark stale, drop until snapshot.
     pub fn apply_delta(
         &mut self,
@@ -110,6 +114,16 @@ impl BookMirror {
         }
         if last_seq <= self.last_seq {
             return false; // stale/duplicate, harmless
+        }
+        if first_seq <= self.last_seq {
+            // Partial overlap: the window starts at/before the applied seq.
+            // The entries cannot be attributed to individual seqs, so a full
+            // apply would re-apply changes the book already holds (removals
+            // double-remove levels the snapshot re-added). Drop + mark stale —
+            // a book with a silent hole is worse than no book. The live path
+            // owns its own straddle handling (BinanceBookSync, spec 020).
+            self.stale = true;
+            return false;
         }
         if first_seq > self.last_seq + 1 {
             self.stale = true; // gap

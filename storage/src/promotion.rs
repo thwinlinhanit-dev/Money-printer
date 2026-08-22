@@ -162,8 +162,10 @@ pub fn check_promotion_determinism(
         // must not muddy the `why`.
         return verdict;
     }
-    let (Some(ws), Some(we)) = (verdict.window_start.as_deref(), verdict.window_end.as_deref())
-    else {
+    let (Some(ws), Some(we)) = (
+        verdict.window_start.as_deref(),
+        verdict.window_end.as_deref(),
+    ) else {
         return verdict;
     };
     let failures: Vec<String> = scorecards
@@ -331,9 +333,15 @@ mod tests {
             .collect();
         cards[3] = burst_card("20260704");
         let v = check_promotion(&cards);
-        assert!(!v.promoted, "a bursty day in the window must hold promotion");
+        assert!(
+            !v.promoted,
+            "a bursty day in the window must hold promotion"
+        );
         assert_eq!(v.consecutive_clean, 7, "the streak itself is intact");
-        assert!(v.first_failure.is_none(), "no clean-day break — bursts are the why");
+        assert!(
+            v.first_failure.is_none(),
+            "no clean-day break — bursts are the why"
+        );
         assert_eq!(v.burst_days.len(), 1);
         assert_eq!(v.burst_days[0].date, "20260704");
         assert_eq!(
@@ -389,11 +397,17 @@ mod tests {
             .collect();
         let plain = check_promotion(&cards);
         assert!(plain.promoted, "the numeric gate passes on its own");
-        assert!(plain.determinism_ok, "plain gate leaves determinism_ok true");
+        assert!(
+            plain.determinism_ok,
+            "plain gate leaves determinism_ok true"
+        );
 
         // No artifacts at all ⇒ every window day lacks proof ⇒ blocked.
         let v = check_promotion_determinism(&cards, &[]);
-        assert!(!v.promoted, "a window with no determinism proof must not promote");
+        assert!(
+            !v.promoted,
+            "a window with no determinism proof must not promote"
+        );
         assert_eq!(v.consecutive_clean, 7, "the streak itself is intact");
         assert!(!v.determinism_ok);
         assert_eq!(v.determinism_failures.len(), 7, "all window days named");

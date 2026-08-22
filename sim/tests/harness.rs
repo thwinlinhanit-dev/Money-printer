@@ -6,8 +6,8 @@ use mp_core::{EventEnvelope, MarketEvent, Side, SymbolId, Venue};
 use mp_features::catalog::Cvd;
 use mp_features::FeatureEngine;
 use mp_sim::{
-    evaluate_g1, monte_carlo, plateau_ok, walk_forward, Backtester, DecisionLog, G1Params,
-    RunRecord, SimConfig, WalkForwardParams,
+    evaluate_g1, monte_carlo, param_combinations, pick_best_eligible, plateau_ok, walk_forward,
+    Backtester, DecisionLog, G1Params, MetricsSummary, RunRecord, SimConfig, WalkForwardParams,
 };
 use mp_strategies::CoinFlipStrategy;
 
@@ -93,7 +93,7 @@ fn str_9_g1_passes_only_when_all_conditions_met() {
         m.record_trade(1.0); // 150 winning trades
     }
     let p = G1Params {
-        min_trades: 100,
+        min_trades: 100, // stricter than the wf CLI default (10) — tests the picker with a higher bar
         dd_budget: 1_000.0,
     };
     // Positive 2x-cost expectancy, enough trades, DD under budget, no maker P&L.
@@ -142,16 +142,23 @@ fn sim_9_walk_forward_rolls_windows_and_reports_oos() {
         train_ns: span / 4,
         test_ns: span / 8,
         step_ns: span / 8,
+        embargo_ns: 0,
     };
     let mut windows = 0;
-    let results = walk_forward(&events, wf, |train, test| {
-        windows += 1;
-        // Fit is a no-op for CoinFlip; we just run OOS on the test slice.
-        assert!(!test.is_empty());
-        let _ = train;
-        let bt = run(7, test);
-        bt.summary()
-    });
+    let results = walk_forward(
+        &events,
+        wf,
+        |_train_start, test_start, test_end, train, test| {
+            windows += 1;
+            // Fit is a no-op for CoinFlip; we just run OOS on the test slice.
+            assert!(!test.is_empty());
+            let _ = train;
+            let _ = test_start;
+            let _ = test_end;
+            let bt = run(7, test);
+            bt.summary()
+        },
+    );
     assert!(results.len() >= 2, "expected multiple rolling windows");
     assert_eq!(results.len(), windows);
     // Windows are contiguous and advance by the step.
@@ -159,6 +166,105 @@ fn sim_9_walk_forward_rolls_windows_and_reports_oos() {
         assert!(w.test_end_ns > w.test_start_ns);
         assert!(w.test_start_ns > w.train_start_ns);
     }
+}
+
+#[test]
+fn swg_5_walk_forward_purged_splits_embargo_gap() {
+    // SWG-5: a nonzero embargo purges the gap between train and test — the
+    // train slice must end at train_start + train_ns (NOT bleed into the
+    // embargo), and the test slice must start at train_end + embargo.
+    let events = feed(400); // spans 0 .. 399*100ms
+    let span = events.last().unwrap().recv_ts_ns;
+    let train_ns = span / 4;
+    let test_ns = span / 8;
+    let step_ns = span / 8;
+    let embargo_ns = span / 16;
+    let wf = WalkForwardParams {
+        train_ns,
+        test_ns,
+        step_ns,
+        embargo_ns,
+    };
+    let results = walk_forward(
+        &events,
+        wf,
+        |train_start, test_start, test_end, train, test| {
+            assert_eq!(train_start + train_ns, test_start - embargo_ns);
+            assert_eq!(test_start + test_ns, test_end);
+            assert!(train.is_empty() || train.last().unwrap().recv_ts_ns < test_start - embargo_ns);
+            assert!(
+                test.is_empty() || test.first().unwrap().recv_ts_ns >= test_start,
+                "test slice must not reach into the embargo"
+            );
+            MetricsSummary::default()
+        },
+    );
+    // Every window's recorded boundaries match the same train/train+embargo
+    // invariant the closure asserted.
+    for w in &results {
+        assert_eq!(w.train_start_ns + train_ns + embargo_ns, w.test_start_ns);
+        assert_eq!(w.test_start_ns + test_ns, w.test_end_ns);
+    }
+}
+
+#[test]
+fn sim_9_grid_selection_requires_min_trades_not_degenerate() {
+    // SIM-9 integrity: a 0-trade combo scoring 0.0 must NEVER beat a combo
+    // that trades and loses, nor count as a selection (the degeneracy seen on
+    // the first real-data walk-forward: argmax picked the first combo because
+    // every trading combo lost and every non-trading combo scored exactly 0).
+    use std::collections::BTreeMap;
+
+    let grid: BTreeMap<String, Vec<f64>> =
+        BTreeMap::from([("entry_vol".into(), vec![250_000.0, 500_000.0, 1_000_000.0])]);
+    let combos = param_combinations(&grid);
+    assert_eq!(combos.len(), 3);
+
+    let losing_trader = |_c: &BTreeMap<String, f64>| -> Option<MetricsSummary> {
+        // Trades, loses: expectancy -250 with 8 trades (>= min_trades=10? no).
+        Some(MetricsSummary {
+            trades: 8,
+            expectancy: -250.0,
+            stress_expectancy_2x: -320.0,
+            max_drawdown: 1000.0,
+            sharpe: None,
+        })
+    };
+    let (best, exp) = pick_best_eligible(&combos, 10, losing_trader);
+    assert!(best.is_none(), "under-trading combo must not be selectable");
+    assert_eq!(exp, f64::NEG_INFINITY);
+
+    // One combo trades enough (>= min_trades) and loses; the other two
+    // under-trade. The eligible loser is selected — an honest negative
+    // selection, not a vacuous 0.0 "don't trade" win.
+    let selective = |c: &BTreeMap<String, f64>| -> Option<MetricsSummary> {
+        let v = c["entry_vol"];
+        if v < 500_000.0 {
+            return Some(MetricsSummary {
+                trades: 12,
+                expectancy: -250.0,
+                stress_expectancy_2x: -320.0,
+                max_drawdown: 1000.0,
+                sharpe: None,
+            });
+        }
+        Some(MetricsSummary {
+            trades: 0,
+            expectancy: 0.0,
+            stress_expectancy_2x: 0.0,
+            max_drawdown: 0.0,
+            sharpe: None,
+        })
+    };
+    let (best, exp) = pick_best_eligible(&combos, 10, selective);
+    let best = best.expect("the losing trader must be selected over 0-trade combos");
+    assert_eq!(best["entry_vol"], 250_000.0);
+    assert_eq!(exp, -250.0);
+
+    // Errors (None) are ineligible like under-trades.
+    let failing = |_: &BTreeMap<String, f64>| -> Option<MetricsSummary> { None };
+    let (best, _) = pick_best_eligible(&combos, 10, failing);
+    assert!(best.is_none());
 }
 
 #[test]

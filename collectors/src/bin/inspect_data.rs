@@ -74,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let event_kind = match &ev.body {
                         MarketEvent::Trade { .. } => "Trade",
+                        MarketEvent::TradeWithAddr { .. } => "TradeWithAddr",
                         MarketEvent::BookDelta { .. } => "BookDelta",
                         MarketEvent::BookSnapshot { .. } => "BookSnapshot",
                         MarketEvent::Funding { .. } => "Funding",
@@ -87,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MarketEvent::OptionTrade { .. } => "OptionTrade",
                         MarketEvent::OptionBook { .. } => "OptionBook",
                         MarketEvent::OptionTicker { .. } => "OptionTicker",
+                        MarketEvent::NetflowSnapshot { .. } => "NetflowSnapshot",
                     };
                     *event_types.entry(event_kind).or_insert(0u64) += 1;
                     *global_event_types.entry(event_kind).or_insert(0u64) += 1;

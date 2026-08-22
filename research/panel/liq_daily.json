@@ -1,0 +1,132 @@
+[
+  {
+    "interval_ts_ns": 1786665600000000000,
+    "venue": "bybit",
+    "symbol": "BTCUSDT",
+    "buy_notional": 2262225.1494999994,
+    "sell_notional": 340292.02829999995,
+    "net_notional": 1921933.1211999995,
+    "n_buy": 339,
+    "n_sell": 80
+  },
+  {
+    "interval_ts_ns": 1786752000000000000,
+    "venue": "bybit",
+    "symbol": "BTCUSDT",
+    "buy_notional": 24576.704299999998,
+    "sell_notional": 16609.271200000003,
+    "net_notional": 7967.433099999995,
+    "n_buy": 13,
+    "n_sell": 13
+  },
+  {
+    "interval_ts_ns": 1786838400000000000,
+    "venue": "bybit",
+    "symbol": "BTCUSDT",
+    "buy_notional": 1958269.195,
+    "sell_notional": 828749.0863,
+    "net_notional": 1129520.1087000002,
+    "n_buy": 182,
+    "n_sell": 67
+  },
+  {
+    "interval_ts_ns": 1786838400000000000,
+    "venue": "bybit",
+    "symbol": "ETHUSDT",
+    "buy_notional": 737154.8249,
+    "sell_notional": 231868.52880000003,
+    "net_notional": 505286.2961,
+    "n_buy": 101,
+    "n_sell": 17
+  },
+  {
+    "interval_ts_ns": 1786838400000000000,
+    "venue": "bybit",
+    "symbol": "SOLUSDT",
+    "buy_notional": 784197.0379999998,
+    "sell_notional": 52030.884,
+    "net_notional": 732166.1539999999,
+    "n_buy": 180,
+    "n_sell": 10
+  },
+  {
+    "interval_ts_ns": 1786924800000000000,
+    "venue": "bybit",
+    "symbol": "BTCUSDT",
+    "buy_notional": 16664.7697,
+    "sell_notional": 10979970.382600002,
+    "net_notional": -10963305.612900002,
+    "n_buy": 16,
+    "n_sell": 624
+  },
+  {
+    "interval_ts_ns": 1786924800000000000,
+    "venue": "bybit",
+    "symbol": "ETHUSDT",
+    "buy_notional": 197840.32479999997,
+    "sell_notional": 970277.8798999992,
+    "net_notional": -772437.5550999993,
+    "n_buy": 27,
+    "n_sell": 184
+  },
+  {
+    "interval_ts_ns": 1786924800000000000,
+    "venue": "bybit",
+    "symbol": "SOLUSDT",
+    "buy_notional": 65608.969,
+    "sell_notional": 201852.28200000006,
+    "net_notional": -136243.31300000008,
+    "n_buy": 25,
+    "n_sell": 90
+  },
+  {
+    "interval_ts_ns": 1787011200000000000,
+    "venue": "bybit",
+    "symbol": "BTCUSDT",
+    "buy_notional": 99305.3013,
+    "sell_notional": 5037939.3251,
+    "net_notional": -4938634.0238,
+    "n_buy": 44,
+    "n_sell": 361
+  },
+  {
+    "interval_ts_ns": 1787011200000000000,
+    "venue": "bybit",
+    "symbol": "ETHUSDT",
+    "buy_notional": 363068.3637999999,
+    "sell_notional": 243750.45570000005,
+    "net_notional": 119317.90809999983,
+    "n_buy": 64,
+    "n_sell": 90
+  },
+  {
+    "interval_ts_ns": 1787011200000000000,
+    "venue": "bybit",
+    "symbol": "SOLUSDT",
+    "buy_notional": 126513.86600000002,
+    "sell_notional": 358514.223,
+    "net_notional": -232000.35699999996,
+    "n_buy": 55,
+    "n_sell": 141
+  },
+  {
+    "interval_ts_ns": 1787097600000000000,
+    "venue": "bybit",
+    "symbol": "ETHUSDT",
+    "buy_notional": 1746459.7651999986,
+    "sell_notional": 125550707.97859998,
+    "net_notional": -123804248.21339998,
+    "n_buy": 229,
+    "n_sell": 6761
+  },
+  {
+    "interval_ts_ns": 1787097600000000000,
+    "venue": "bybit",
+    "symbol": "SOLUSDT",
+    "buy_notional": 358071.98000000004,
+    "sell_notional": 19205541.15,
+    "net_notional": -18847469.169999998,
+    "n_buy": 144,
+    "n_sell": 2362
+  }
+]

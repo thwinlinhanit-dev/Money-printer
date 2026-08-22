@@ -277,6 +277,35 @@ impl Default for BookDepthParams {
     }
 }
 
+/// Params for the microstructure family (`microprice.{venue}`,
+/// `spread.bp.{venue}`, `spread.regime.{venue}`): top-of-book microprice,
+/// quoted spread in bps, and the wide-spread regime gate. Book-based, so
+/// only venues with a book stream make sense (default: hyperliquid).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MicrostructureParams {
+    /// Venues to compute the book microstructure features for.
+    #[serde(default = "default_whale_venues")]
+    pub venues: Vec<String>,
+    /// `spread.regime.{venue}` = 1 when the quoted spread is ≥ this many bps
+    /// of mid (wide-spread regimes destroy short-horizon predictability).
+    #[serde(default = "default_wide_spread_bps")]
+    pub wide_spread_bps: f64,
+}
+
+fn default_wide_spread_bps() -> f64 {
+    2.0
+}
+
+impl Default for MicrostructureParams {
+    fn default() -> Self {
+        Self {
+            venues: default_whale_venues(),
+            wide_spread_bps: default_wide_spread_bps(),
+        }
+    }
+}
+
 /// Params for the `tape.*` feature family (OpenMarket tape stats, spec 004
 /// §Order flow).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -354,6 +383,308 @@ impl Default for LiqDeltaParams {
     }
 }
 
+/// Params for the `swing.*` bar-aggregated family (spec 035 SWG-2): HTF
+/// regime + value area + structural levels computed from BARS only — never
+/// order book or trade-tape (SWG-2 MUST NOT require tick inputs). Each
+/// feature runs on the engine's bar timeframe; windows are in bar counts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwingParams {
+    /// Trailing window (bars) over which `swing.realized_vol` is computed.
+    #[serde(default = "default_swing_rv_window")]
+    pub realized_vol_window: usize,
+    /// Annualization factor (sqrt of bars/year) for `swing.realized_vol`.
+    /// Default derives from `bar_tf_ns` (525,960 one-minute bars/yr → ≈725);
+    /// override to align with the materialized bar timeframe.
+    #[serde(default)]
+    pub sqrt_bars_per_year: Option<f64>,
+    /// Lookback (bars) for `swing.trend_strength` (signed HTF trend).
+    #[serde(default = "default_swing_trend_lookback")]
+    pub trend_lookback: usize,
+    /// Window (bars) the `swing.value_area.*` levels are computed over.
+    #[serde(default = "default_swing_va_window")]
+    pub value_area_window: usize,
+    /// Bucket width (price units) for `swing.value_area.*` (POC / VA high/low).
+    #[serde(default = "default_swing_va_bucket")]
+    pub value_area_bucket: f64,
+    /// Window (bars) for `swing.rolling_vwap` (structural VWAP band).
+    #[serde(default = "default_swing_vwap_bars")]
+    pub rolling_vwap_bars: usize,
+    /// Range window (bars) for `swing.range.*` / `swing.sweep.*` (spec 036 SLQ-R).
+    #[serde(default = "default_swq_range_n")]
+    pub sweep_range_n: usize,
+    /// Compression gate: mean TR of the range window must be below this
+    /// fraction of the pre-window baseline ATR.
+    #[serde(default = "default_swq_compress_frac")]
+    pub sweep_compress_frac: f64,
+    /// Baseline ATR length (bars) computed BEFORE the range window.
+    #[serde(default = "default_swq_atr_n")]
+    pub sweep_atr_n: usize,
+    /// Sweep wick threshold: boundary violation ≥ this multiple of baseline ATR.
+    #[serde(default = "default_swq_atr_mult")]
+    pub sweep_atr_mult: f64,
+    /// Reclaim confirmation: closes-back-inside allowed within this many
+    /// subsequent bars (offset-0 same-bar confirm included by construction).
+    #[serde(default = "default_swq_reclaim_z")]
+    pub sweep_reclaim_z: u32,
+    /// Sweep-bar volume filter: volume ≥ this multiple of the range-window mean.
+    #[serde(default = "default_swq_vol_mult")]
+    pub sweep_vol_mult: f64,
+    /// Invalidation buffer carried on `swing.sweep.*.stop.*`: stop =
+    /// extreme ∓ this multiple of ATR. Feature-family config, never a
+    /// strategy parameter (spec 036 §2.3).
+    #[serde(default = "default_swq_stop_buffer")]
+    pub sweep_stop_buffer_atr: f64,
+    /// Profile window (bars) for HVN/LVN nearest levels (SLQ-V).
+    #[serde(default = "default_swq_profile_window")]
+    pub profile_window: usize,
+    /// HVN threshold: local maxima above this fraction of POC volume.
+    #[serde(default = "default_swq_hvn_frac")]
+    pub profile_hvn_frac: f64,
+    /// LVN threshold: local minima below this fraction of POC volume.
+    #[serde(default = "default_swq_lvn_frac")]
+    pub profile_lvn_frac: f64,
+}
+
+fn default_swing_rv_window() -> usize {
+    20
+}
+fn default_swing_trend_lookback() -> usize {
+    20
+}
+fn default_swing_va_window() -> usize {
+    48
+}
+fn default_swing_va_bucket() -> f64 {
+    50.0
+}
+fn default_swing_vwap_bars() -> usize {
+    48
+}
+fn default_swq_range_n() -> usize {
+    20
+}
+fn default_swq_compress_frac() -> f64 {
+    0.6
+}
+fn default_swq_atr_n() -> usize {
+    20
+}
+fn default_swq_atr_mult() -> f64 {
+    0.1
+}
+fn default_swq_reclaim_z() -> u32 {
+    2
+}
+fn default_swq_vol_mult() -> f64 {
+    1.5
+}
+fn default_swq_stop_buffer() -> f64 {
+    0.5
+}
+fn default_swq_profile_window() -> usize {
+    90
+}
+fn default_swq_hvn_frac() -> f64 {
+    0.7
+}
+fn default_swq_lvn_frac() -> f64 {
+    0.3
+}
+
+impl Default for SwingParams {
+    fn default() -> Self {
+        Self {
+            realized_vol_window: default_swing_rv_window(),
+            sqrt_bars_per_year: None,
+            trend_lookback: default_swing_trend_lookback(),
+            value_area_window: default_swing_va_window(),
+            value_area_bucket: default_swing_va_bucket(),
+            rolling_vwap_bars: default_swing_vwap_bars(),
+            sweep_range_n: default_swq_range_n(),
+            sweep_compress_frac: default_swq_compress_frac(),
+            sweep_atr_n: default_swq_atr_n(),
+            sweep_atr_mult: default_swq_atr_mult(),
+            sweep_reclaim_z: default_swq_reclaim_z(),
+            sweep_vol_mult: default_swq_vol_mult(),
+            sweep_stop_buffer_atr: default_swq_stop_buffer(),
+            profile_window: default_swq_profile_window(),
+            profile_hvn_frac: default_swq_hvn_frac(),
+            profile_lvn_frac: default_swq_lvn_frac(),
+        }
+    }
+}
+
+/// The whole catalog config (FEA-7). One file, all params, no unknown keys.
+/// One IV term-structure target tenor (spec 038 IVS-3). `days` is the target;
+/// emission falls back to the nearest listed expiry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenorDef {
+    /// Embedded in the feature id (`iv.term.{u}.{name}`), e.g. `1m`.
+    pub name: String,
+    /// Target tenor length in days.
+    pub days: f64,
+}
+
+fn default_iv_tenors() -> Vec<TenorDef> {
+    vec![
+        TenorDef { name: "1w".into(), days: 7.0 },
+        TenorDef { name: "1m".into(), days: 30.0 },
+        TenorDef { name: "3m".into(), days: 90.0 },
+        TenorDef { name: "6m".into(), days: 180.0 },
+    ]
+}
+
+fn default_opt_multiplier() -> f64 {
+    1.0 // Deribit: 1 BTC / 1 ETH per contract (IBIT would be 100 — spec 040)
+}
+
+/// Params for the options Greeks family (spec 037 GRE). Disabled when
+/// `underlyings` is empty (the default) — these are global tick features fed
+/// every event, so they must be explicitly enabled per underlying.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptionsGreeksParams {
+    #[serde(default)]
+    pub underlyings: Vec<String>,
+    /// Contract multiplier (GRE: Deribit 1.0; spec 040 sets 100 for IBIT).
+    #[serde(default = "default_opt_multiplier")]
+    pub contract_multiplier: f64,
+}
+
+impl Default for OptionsGreeksParams {
+    fn default() -> Self {
+        OptionsGreeksParams { underlyings: Vec::new(), contract_multiplier: default_opt_multiplier() }
+    }
+}
+
+/// Params for the IV surface family (spec 038 IVS).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptionsIvParams {
+    #[serde(default)]
+    pub underlyings: Vec<String>,
+    /// Term-structure tenor targets (IVS-3).
+    #[serde(default = "default_iv_tenors")]
+    pub tenors: Vec<TenorDef>,
+    /// Rolling percentile window for `iv.percentile.*` (IVS-11 gap handling:
+    /// only observed days count). Default 365.
+    #[serde(default = "default_percentile_days")]
+    pub percentile_window_days: i64,
+    /// Regime classifier lookback (IVS-6). Default 90.
+    #[serde(default = "default_regime_days")]
+    pub regime_lookback_days: i64,
+}
+
+fn default_percentile_days() -> i64 {
+    365
+}
+fn default_regime_days() -> i64 {
+    90
+}
+
+impl Default for OptionsIvParams {
+    fn default() -> Self {
+        OptionsIvParams {
+            underlyings: Vec::new(),
+            tenors: default_iv_tenors(),
+            percentile_window_days: default_percentile_days(),
+            regime_lookback_days: default_regime_days(),
+        }
+    }
+}
+
+/// Params for the options flow aggregator family (spec 039 OFI). Defaults per
+/// spec; USD thresholds normalize BTC vs ETH vs IBIT contract sizes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptionsFlowParams {
+    #[serde(default)]
+    pub underlyings: Vec<String>,
+    /// Aggregation windows in ns (features emit on window close).
+    #[serde(default = "default_flow_windows_ns")]
+    pub windows_ns: Vec<i64>,
+    #[serde(default = "default_opt_multiplier")]
+    pub contract_multiplier: f64,
+    /// Block trade threshold in USD notional (OFI-2). Default $100k.
+    #[serde(default = "default_block_threshold")]
+    pub block_threshold_usd: f64,
+    /// Whale floor (OFI-8). Default $500k.
+    #[serde(default = "default_whale_floor")]
+    pub whale_floor_usd: f64,
+    /// Whale p95 multiplier (OFI-8). Default 3.0.
+    #[serde(default = "default_k_whale")]
+    pub k_whale: f64,
+    /// ±band around spot counted as ATM (OFI-5). Default 0.02.
+    #[serde(default = "default_atm_threshold")]
+    pub atm_threshold: f64,
+    /// ITM distance cap beyond ATM band (OFI-5, kind-aware fix). Default 0.10.
+    #[serde(default = "default_itm_cap")]
+    pub itm_cap: f64,
+    /// OTM distance cap — deeper trades excluded (OFI-5). Default 0.50.
+    #[serde(default = "default_otm_cap")]
+    pub otm_cap: f64,
+    /// Tenor boundaries in days: ≤7 weekly, ≤45 monthly, ≤180 quarterly
+    /// (OFI-6).
+    #[serde(default = "default_weekly_max")]
+    pub weekly_max_days: f64,
+    #[serde(default = "default_monthly_max")]
+    pub monthly_max_days: f64,
+    #[serde(default = "default_quarterly_max")]
+    pub quarterly_max_days: f64,
+}
+
+fn default_flow_windows_ns() -> Vec<i64> {
+    vec![3_600_000_000_000, 14_400_000_000_000, 86_400_000_000_000]
+}
+fn default_block_threshold() -> f64 {
+    100_000.0
+}
+fn default_whale_floor() -> f64 {
+    500_000.0
+}
+fn default_k_whale() -> f64 {
+    3.0
+}
+fn default_atm_threshold() -> f64 {
+    0.02
+}
+fn default_itm_cap() -> f64 {
+    0.10
+}
+fn default_otm_cap() -> f64 {
+    0.50
+}
+fn default_weekly_max() -> f64 {
+    7.0
+}
+fn default_monthly_max() -> f64 {
+    45.0
+}
+fn default_quarterly_max() -> f64 {
+    180.0
+}
+
+impl Default for OptionsFlowParams {
+    fn default() -> Self {
+        OptionsFlowParams {
+            underlyings: Vec::new(),
+            windows_ns: default_flow_windows_ns(),
+            contract_multiplier: default_opt_multiplier(),
+            block_threshold_usd: default_block_threshold(),
+            whale_floor_usd: default_whale_floor(),
+            k_whale: default_k_whale(),
+            atm_threshold: default_atm_threshold(),
+            itm_cap: default_itm_cap(),
+            otm_cap: default_otm_cap(),
+            weekly_max_days: default_weekly_max(),
+            monthly_max_days: default_monthly_max(),
+            quarterly_max_days: default_quarterly_max(),
+        }
+    }
+}
+
 /// The whole catalog config (FEA-7). One file, all params, no unknown keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -378,11 +709,24 @@ pub struct FeaturesConfig {
     #[serde(default)]
     pub book_depth: BookDepthParams,
     #[serde(default)]
+    pub microstructure: MicrostructureParams,
+    #[serde(default)]
     pub tape: TapeParams,
     #[serde(default)]
     pub liq_flow: LiqFlowParams,
     #[serde(default)]
     pub liq_delta: LiqDeltaParams,
+    #[serde(default)]
+    pub swing: SwingParams,
+    /// Options Greeks family (spec 037) — disabled when `underlyings` empty.
+    #[serde(default)]
+    pub options_greeks: OptionsGreeksParams,
+    /// IV surface family (spec 038) — disabled when `underlyings` empty.
+    #[serde(default)]
+    pub options_iv: OptionsIvParams,
+    /// Options flow family (spec 039) — disabled when `underlyings` empty.
+    #[serde(default)]
+    pub options_flow: OptionsFlowParams,
 }
 
 fn default_bar_tf() -> i64 {
@@ -401,9 +745,14 @@ impl Default for FeaturesConfig {
             liq_agg: LiqAggParams::default(),
             liq_est_bands: LiqEstBandsParams::default(),
             book_depth: BookDepthParams::default(),
+            microstructure: MicrostructureParams::default(),
             tape: TapeParams::default(),
             liq_flow: LiqFlowParams::default(),
             liq_delta: LiqDeltaParams::default(),
+            swing: SwingParams::default(),
+            options_greeks: OptionsGreeksParams::default(),
+            options_iv: OptionsIvParams::default(),
+            options_flow: OptionsFlowParams::default(),
         }
     }
 }

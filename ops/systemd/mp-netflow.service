@@ -1,0 +1,27 @@
+# Ethereum exchange-reserve balance poller unit (spec 034, NFL-1..8): public
+# Etherscan REST -> {date}_netflow_ethereum.log (NetflowSnapshot events).
+# Requires MP_ETHERSCAN_KEY in venues.env (PD-2, fail-closed when missing).
+# Not a Phase-0 gate recording; ship disabled until the key is provisioned:
+#   systemctl enable --now mp-netflow
+[Unit]
+Description=Money Printer Ethereum exchange netflow snapshot poller (spec 034)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printer
+Group=printer
+EnvironmentFile=/etc/money-printer/venues.env
+WorkingDirectory=/opt/money-printer
+ExecStart=/opt/money-printer/bin/mp-netflow --config collectors/netflow.toml
+Restart=always
+RestartSec=2
+MemoryMax=256M
+CPUQuota=50%
+LimitNOFILE=65536
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/data
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

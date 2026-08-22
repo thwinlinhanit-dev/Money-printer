@@ -61,3 +61,27 @@ def test_res_4_run_study_produces_record_with_ci_and_summary():
     assert rec.ci_lo <= rec.ci_hi
     assert "liq-cluster" in rec.summary()
     assert "seed=7" in rec.summary()
+
+
+def test_res_4_run_study_reports_n_days_and_ci_unreliable_below_three():
+    # Both events are on the same UTC day (1970-01-01) => n_days=1 and the
+    # block-bootstrap CI is explicitly flagged unreliable (E2).
+    events = [Event(10), Event(20)]
+    rec = run_study("same-day", events, _excess(), 1, 1, 1, seed=7, n_boot=200)
+    assert rec.n_days == 1
+    assert rec.ci_reliable is False
+    assert "n_days=1" in rec.summary()
+    assert "block-bootstrap CI is unreliable" in rec.summary()
+
+
+def test_res_4_run_study_ci_reliable_across_three_distinct_days():
+    DAY = 86_400_000_000_000
+    ex = {}
+    for d in range(3):
+        for k in (-1, 0, 1):
+            ex[d * DAY + k * DAY] = 0.01
+    events = [Event(d * DAY) for d in range(3)]  # three distinct UTC days
+    rec = run_study("multi-day", events, ex, DAY, 1, 1, seed=7, n_boot=200)
+    assert rec.n_days == 3
+    assert rec.ci_reliable is True
+    assert "unreliable" not in rec.summary()

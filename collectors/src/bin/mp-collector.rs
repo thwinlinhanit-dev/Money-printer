@@ -1,10 +1,9 @@
-//! 24/7 live collector.  One process owns one `(venue, symbol)` recording;
-//! cross-venue observations must run as separate processes and merge only at
-//! replay (spec 024).
-//!
-//! Run:
-//!   cargo run -p mp-collectors --features live-ws --bin mp-collector -- --symbol BTCUSDT
-
+/// 24/7 live collector.  One process owns one `(venue, symbol)` recording;
+/// cross-venue observations must run as separate processes and merge only at
+/// replay (spec 024).
+///
+/// Run:
+///   cargo run -p mp-collectors --features live-ws --bin mp-collector -- --symbol BTCUSDT
 #[cfg(feature = "live-ws")]
 mod inner {
     use mp_collectors::binutil::{self, InstanceLock, PidFile};
@@ -92,6 +91,17 @@ mod inner {
         /// metadata (InstrumentKind::TradFiSynthetic).
         #[serde(default)]
         hip3_symbols: Option<Vec<String>>,
+        /// Swing focus (spec 035 SWG-1 / spec 036 SLQ-D): `true` = subscribe
+        /// ONLY the streams a higher-timeframe (daily/4h) strategy needs —
+        /// trades (OHLCV bar derivation), funding/mark/OI, and liquidations —
+        /// and DROP the L2 order-book depth stream, the dominant disk
+        /// consumer. Swing features must never depend on L2 or tick-tape
+        /// input (spec 035 Non-Goals), so the book stream is pure overhead for
+        /// a swing-only setup. Defaults `false` so full Phase-0 capture
+        /// (incl. `book`) stays the default and the promotion gate is
+        /// unaffected unless explicitly opted out.
+        #[serde(default)]
+        swing_only: Option<bool>,
     }
 
     /// Deribit instrument filter (spec 031 Decisions: near-expiry subset).
@@ -161,6 +171,7 @@ mod inner {
                     .filter(|c| !c.is_empty())
                     .collect()
             }),
+            swing_only: binutil::flag(args, "--swing-only").map(|v| v == "true" || v == "1"),
         })
     }
 
@@ -209,44 +220,66 @@ mod inner {
             .open(day.join(format!("{symbol}_frames.ndjson")))
     }
 
-    /// Hyperliquid channel set for one coin (trades + snapshot-only l2Book +
-    /// activeAssetCtx = mark/funding/OI). HIP-3 TradFi-synthetic coins get the
-    /// same channels (spec 030 MAC-1 — zero new code paths).
-    fn hl_channels(coin: &str) -> Vec<String> {
-        vec![
-            format!(
-                r#"{{"method":"subscribe","subscription":{{"type":"trades","coin":"{coin}"}}}}"#
-            ),
-            format!(
+    /// Hyperliquid channel set for one coin. Full set = trades + snapshot-only
+    /// l2Book + activeAssetCtx (mark/funding/OI). HIP-3 TradFi-synthetic coins
+    /// get the same channels (spec 030 MAC-1 — zero new code paths). In
+    /// `swing_only` mode the L2 order-book stream (`l2Book`) is dropped —
+    /// swing features never depend on it (spec 035 Non-Goals / spec 036
+    /// SLQ-D); trades + activeAssetCtx cover OHLCV, funding, mark, and OI.
+    fn hl_channels(coin: &str, swing_only: bool) -> Vec<String> {
+        let trades = format!(
+            r#"{{"method":"subscribe","subscription":{{"type":"trades","coin":"{coin}"}}}}"#
+        );
+        let ctx = format!(
+            r#"{{"method":"subscribe","subscription":{{"type":"activeAssetCtx","coin":"{coin}"}}}}"#
+        );
+        if swing_only {
+            vec![trades, ctx]
+        } else {
+            let book = format!(
                 r#"{{"method":"subscribe","subscription":{{"type":"l2Book","coin":"{coin}"}}}}"#
-            ),
-            format!(
-                r#"{{"method":"subscribe","subscription":{{"type":"activeAssetCtx","coin":"{coin}"}}}}"#
-            ),
-        ]
+            );
+            vec![trades, book, ctx]
+        }
     }
 
-    fn subscribe_for(venue: &str, symbol: &str, hip3_symbols: &[String]) -> Vec<String> {
+    pub(super) fn subscribe_for(
+        venue: &str,
+        symbol: &str,
+        hip3_symbols: &[String],
+        swing_only: bool,
+    ) -> Vec<String> {
         match venue {
             // Bybit v5 linear perp topics (public, no credentials):
             //   publicTrade.{symbol}  trades
             //   orderbook.50.{symbol}  book (depth 50; the audit gate requires
             //     the `book` stream on every recording — spec 024)
             //   tickers.{symbol}  funding/mark_price/open_interest
-            //   liquidation.{symbol}  liquidation (COL-29, the real liq source)
+            //   allLiquidation.{symbol}  liquidation (COL-29, the real liq
+            //     source) — the v5 topic; the legacy `liquidation.` topic is
+            //     DEAD (bybit rejects the whole subscribe with "handler not
+            //     found" — proven live 2026-08-13), so never regress to it.
+            //
+            // In `swing_only` mode the `orderbook.50.{symbol}` topic is
+            // dropped (swing never needs L2 depth — spec 035 Non-Goals); the
+            // rest are kept: publicTrade (OHLCV bars), tickers (funding/mark/
+            // OI), allLiquidation (daily liq aggregates).
+            "bybit" if swing_only => vec![format!(
+                r#"{{"op":"subscribe","args":["publicTrade.{symbol}","tickers.{symbol}","allLiquidation.{symbol}"]}}"#
+            )],
             "bybit" => vec![format!(
-                r#"{{"op":"subscribe","args":["publicTrade.{symbol}","orderbook.50.{symbol}","tickers.{symbol}","liquidation.{symbol}"]}}"#
+                r#"{{"op":"subscribe","args":["publicTrade.{symbol}","orderbook.50.{symbol}","tickers.{symbol}","allLiquidation.{symbol}"]}}"#
             )],
             // Binance uses combined-stream URL (streams baked into path) — no
             // SUBSCRIBE frame needed. Empty here on purpose.
             "binance" => vec![],
             "hyperliquid" => {
                 let coin = hl_coin(symbol);
-                let mut subs = hl_channels(&coin);
+                let mut subs = hl_channels(&coin, swing_only);
                 for h in hip3_symbols {
                     // HIP-3 coins carry the dex prefix in their venue name
                     // (e.g. "xyz:XYZ100") — used verbatim in the subscription.
-                    subs.extend(hl_channels(h));
+                    subs.extend(hl_channels(h, swing_only));
                 }
                 subs
             }
@@ -262,7 +295,13 @@ mod inner {
 
     /// Public WS URL for a venue. Binance is special: futures combined-stream
     /// URL with symbol streams embedded (reliable; avoids SUBSCRIBE race on /ws).
-    fn endpoint_for(venue: &str, symbol: &str) -> Result<String, String> {
+    /// `swing_only` drops the `depth@100ms` stream — swing never needs L2 depth
+    /// (spec 035 Non-Goals).
+    pub(super) fn endpoint_for(
+        venue: &str,
+        symbol: &str,
+        swing_only: bool,
+    ) -> Result<String, String> {
         Ok(match venue {
             "bybit" => endpoints::BYBIT_LINEAR.to_string(),
             "binance" => {
@@ -270,8 +309,10 @@ mod inner {
                 // depth@100ms = incremental depth update stream (U/u/pu continuity, Spec 020).
                 // markPrice@1s carries mark + funding rate. forceOrder = liqs.
                 // OI remains REST-only on Binance.
+                let depth = format!("{s}@depth@100ms/");
                 format!(
-                    "{base}?streams={s}@aggTrade/{s}@markPrice@1s/{s}@depth@100ms/{s}@forceOrder",
+                    "{base}?streams={s}@aggTrade/{s}@markPrice@1s/{}{s}@forceOrder",
+                    if swing_only { "" } else { &depth },
                     base = endpoints::BINANCE_FUTURES_COMBINED
                 )
             }
@@ -300,6 +341,9 @@ mod inner {
         /// HIP-3 TradFi-synthetic coins for the hyperliquid venue (spec 030
         /// MAC-1); recorded with `InstrumentKind::TradFiSynthetic` metadata.
         hip3_symbols: Vec<String>,
+        /// Swing focus (spec 035 SWG-1 / spec 036 SLQ-D): drop the L2
+        /// order-book depth stream (see `subscribe_for`/`endpoint_for`).
+        swing_only: bool,
         /// Deribit margin currency (spec 031 OPT-7), e.g. "BTC".
         deribit_currency: Option<String>,
         /// Deribit instrument subscription filter (OPT-7).
@@ -350,8 +394,9 @@ mod inner {
             opts: StreamOpts,
         ) -> Result<Self, String> {
             let venue = parse_venue(venue_str)?;
-            let url = endpoint_for(venue_str, symbol)?;
-            let mut subscribe = subscribe_for(venue_str, symbol, &opts.hip3_symbols);
+            let url = endpoint_for(venue_str, symbol, opts.swing_only)?;
+            let mut subscribe =
+                subscribe_for(venue_str, symbol, &opts.hip3_symbols, opts.swing_only);
 
             // Deribit (spec 031): discover the near-expiry option instrument
             // set via public REST and build the channel list (book + trades +
@@ -469,7 +514,7 @@ mod inner {
             snapshot_source: SnapshotSource,
         ) -> EventProvenance {
             let stream = match body {
-                MarketEvent::Trade { .. } => "trade",
+                MarketEvent::Trade { .. } | MarketEvent::TradeWithAddr { .. } => "trade",
                 MarketEvent::BookDelta { .. } | MarketEvent::BookSnapshot { .. } => "book",
                 MarketEvent::Funding { .. } => "funding",
                 MarketEvent::MarkPrice { .. } => "mark_price",
@@ -482,6 +527,7 @@ mod inner {
                 MarketEvent::OptionTrade { .. } => "option_trades",
                 MarketEvent::OptionBook { .. } => "option_books",
                 MarketEvent::OptionTicker { .. } => "option_tickers",
+                MarketEvent::NetflowSnapshot { .. } => "netflow",
             };
             EventProvenance {
                 stream: stream.to_owned(),
@@ -804,6 +850,20 @@ mod inner {
         if record_ticker && venue != "deribit" {
             return Err("record_ticker requires the deribit venue (spec 031 OPT-7)".into());
         }
+        let swing_only = config.swing_only.unwrap_or(false);
+        if swing_only && venue == "deribit" {
+            return Err(
+                "swing_only is not meaningful for the deribit venue (options only; spec 035 SWG-1)"
+                    .into(),
+            );
+        }
+        if swing_only {
+            tracing::info!(
+                venue = %venue,
+                symbol = %symbol,
+                "swing-only mode: L2 order-book depth stream dropped (spec 035 SWG-1; OHLCV from trade tape)"
+            );
+        }
         #[cfg(feature = "live-http")]
         let deribit_filter = mp_collectors::deribit::rest::InstrumentFilter {
             max_instruments: config
@@ -832,6 +892,7 @@ mod inner {
             config.proxy.clone(),
             StreamOpts {
                 hip3_symbols: hip3_symbols.clone(),
+                swing_only,
                 deribit_currency: deribit_currency.clone(),
                 #[cfg(feature = "live-http")]
                 deribit_filter,
@@ -1177,10 +1238,11 @@ mod inner {
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_nanos() as i64;
-                        let (fresh, skipped) = mp_collectors::binance::advance_force_order_watermark(
-                            &mut last_liq_order_id,
-                            batch,
-                        );
+                        let (fresh, skipped) =
+                            mp_collectors::binance::advance_force_order_watermark(
+                                &mut last_liq_order_id,
+                                batch,
+                            );
                         if let Some(last) = fresh.last() {
                             last_liq_time_ns = last.exch_ts_ns;
                         }
@@ -1258,11 +1320,12 @@ mod inner {
             }
 
             // COL-19: graceful shutdown — the current event_buffer is already
-            // flushed above; fsync via flush(), PID/lock freed by their Drops.
+            // flushed above; sync_data via the writer's shutdown hook (honours
+            // FsyncPolicy::on_sigterm), PID/lock freed by their Drops.
             if shutdown.load(Ordering::SeqCst) {
-                tracing::info!(venue = %venue, symbol = %symbol, "SIGTERM/Ctrl+C received; flushed and exiting (COL-19)");
+                tracing::info!(venue = %venue, symbol = %symbol, "SIGTERM/Ctrl+C received; flushing and exiting (COL-19)");
                 if let Some(ref mut w) = log_writer {
-                    let _ = w.flush();
+                    w.sync_on_shutdown()?;
                 }
                 return Ok(());
             }
@@ -1272,16 +1335,6 @@ mod inner {
             }
         }
     }
-}
-
-/// RUST_LOG-aware filter that falls back to `info` when the var is unset, so
-/// existing deployments (watchdog --trace-file) keep today's verbosity while a
-/// probe can raise the level (RUST_LOG=mp_collectors=debug) to see the
-/// keepalive pings (2026-08-12; vps-phase0-bringup.md sec 6 A-B).
-#[cfg(feature = "live-ws")]
-fn tracing_filter() -> tracing_subscriber::EnvFilter {
-    tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
 }
 
 fn main() {
@@ -1306,30 +1359,144 @@ fn main() {
             Some(path) => {
                 match mp_collectors::binutil::SharedLogFile::open(std::path::Path::new(&path)) {
                     Ok(sink) => {
-                        tracing_subscriber::fmt()
-                            .with_writer(sink)
-                            .with_env_filter(tracing_filter())
-                            .init();
+                        // Plain-text file sink (LOG-1): ANSI forced off via the
+                        // shared builder so trace files stay machine-parseable
+                        // (2026-08-15 investigation had to strip ESC codes).
+                        tracing::subscriber::set_global_default(
+                            mp_collectors::binutil::trace_subscriber(sink),
+                        )
+                        .expect("tracing already initialized");
                     }
                     Err(e) => {
                         eprintln!(
                             "warning: cannot open --trace-file {path}: {e}; tracing to stderr"
                         );
                         tracing_subscriber::fmt()
-                            .with_env_filter(tracing_filter())
+                            .with_env_filter(mp_collectors::binutil::tracing_filter())
                             .init();
                     }
                 }
             }
             None => {
                 tracing_subscriber::fmt()
-                    .with_env_filter(tracing_filter())
+                    .with_env_filter(mp_collectors::binutil::tracing_filter())
                     .init();
             }
         }
         if let Err(e) = inner::run() {
             tracing::error!(error = %e, "collector failed");
             std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "live-ws"))]
+mod tests {
+    use super::inner::endpoint_for;
+    use super::inner::subscribe_for;
+
+    /// COL-29 regression (2026-08-13, proven live): the bybit v5 subscribe
+    /// must use the `allLiquidation.` topic — the legacy `liquidation.` topic
+    /// is dead and bybit rejects the WHOLE subscribe frame ("error:handler not
+    /// found"), which silently starves every bybit stream. The normalizer
+    /// accepts both topic names, so this must be pinned at the subscribe
+    /// boundary, not the parse boundary.
+    #[test]
+    fn col_29_bybit_subscribe_uses_all_liquidation_topic() {
+        let frames = subscribe_for("bybit", "BTCUSDT", &[], false);
+        assert_eq!(frames.len(), 1);
+        let f = &frames[0];
+        assert!(
+            f.contains(r#""allLiquidation.BTCUSDT""#),
+            "subscribe must use the live allLiquidation topic, got: {f}"
+        );
+        assert!(
+            !f.contains(r#""liquidation.BTCUSDT""#),
+            "subscribe must NOT use the dead liquidation topic, got: {f}"
+        );
+        for t in [
+            "publicTrade.BTCUSDT",
+            "orderbook.50.BTCUSDT",
+            "tickers.BTCUSDT",
+            "allLiquidation.BTCUSDT",
+        ] {
+            assert!(
+                f.contains(&format!("\"{t}\"")),
+                "bybit subscribe missing topic {t}: {f}"
+            );
+        }
+    }
+
+    /// Swing-only (spec 035 SWG-1 / spec 036 SLQ-D): dropping the L2
+    /// order-book depth stream must NOT break the streams a higher-timeframe
+    /// strategy needs (trades, funding/mark via tickers, liq), and must
+    /// remove `orderbook.50` from the bybit frame.
+    #[test]
+    fn swing_only_bybit_subscribe_drops_order_book_keeps_swing_streams() {
+        let frames = subscribe_for("bybit", "BTCUSDT", &[], true);
+        assert_eq!(frames.len(), 1);
+        let f = &frames[0];
+        assert!(
+            !f.contains("orderbook.50.BTCUSDT"),
+            "swing-only bybit subscribe must drop orderbook.50, got: {f}"
+        );
+        for t in [
+            "publicTrade.BTCUSDT",
+            "tickers.BTCUSDT",
+            "allLiquidation.BTCUSDT",
+        ] {
+            assert!(
+                f.contains(&format!("\"{t}\"")),
+                "swing-only bybit subscribe must keep {t}: {f}"
+            );
+        }
+    }
+
+    /// Swing-only hyperliquid: the `l2Book` channel must be dropped while
+    /// `trades` and `activeAssetCtx` (mark/funding/OI) are kept.
+    #[test]
+    fn swing_only_hyperliquid_drops_l2_book_keeps_swing_channels() {
+        let full = subscribe_for("hyperliquid", "BTC", &[], false);
+        let full_str = full.join("\n");
+        assert!(
+            full_str.contains(r#""type":"l2Book","coin":"BTC""#),
+            "full: {full_str}"
+        );
+        let swing = subscribe_for("hyperliquid", "BTC", &[], true);
+        let swing_str = swing.join("\n");
+        assert!(
+            !swing_str.contains(r#""type":"l2Book""#),
+            "swing-only hyperliquid must drop l2Book, got: {swing_str}"
+        );
+        assert!(
+            swing_str.contains(r#""type":"trades""#),
+            "missing trades: {swing_str}"
+        );
+        assert!(
+            swing_str.contains(r#""type":"activeAssetCtx""#),
+            "missing activeAssetCtx (mark/funding/OI): {swing_str}"
+        );
+    }
+
+    /// Swing-only Binance: the combined-stream URL must drop the depth@100ms
+    /// stream while keeping aggTrade, markPrice@1s, and forceOrder.
+    #[test]
+    fn swing_only_binance_endpoint_drops_depth_keeps_swing_streams() {
+        let full = endpoint_for("binance", "BTCUSDT", false).unwrap();
+        assert!(
+            full.contains("depth@100ms"),
+            "full URL expected depth@100ms: {full}"
+        );
+        let swing = endpoint_for("binance", "BTCUSDT", true).unwrap();
+        assert!(
+            !swing.contains("depth@100ms"),
+            "swing-only binance URL must drop depth@100ms: {swing}"
+        );
+        for t in ["aggTrade", "markPrice@1s", "forceOrder"] {
+            assert!(
+                swing.contains(t),
+                "swing-only binance URL lost {t}: {swing}"
+            );
         }
     }
 }

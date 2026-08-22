@@ -19,11 +19,13 @@ pub mod bybit;
 pub mod coinbase;
 pub mod collector;
 pub mod deribit;
+pub mod etherscan;
 pub mod fred;
 pub mod hyperliquid;
 pub mod hyperliquid_positions;
 pub mod json;
 pub mod kraken;
+pub mod netflow;
 pub mod normalize;
 pub mod okx;
 pub mod rate;
@@ -41,6 +43,7 @@ pub use bybit::BybitNormalizer;
 pub use coinbase::CoinbaseNormalizer;
 pub use collector::{Collector, CollectorConfig, DriveOutcome};
 pub use deribit::DeribitNormalizer;
+pub use etherscan::EtherscanNormalizer;
 pub use fred::FredNormalizer;
 pub use hyperliquid::HyperliquidNormalizer;
 pub use hyperliquid_positions::HyperliquidPositionsNormalizer;
@@ -65,6 +68,9 @@ pub fn normalizer_for(venue: mp_core::Venue) -> Box<dyn Normalizer> {
         // FRED is a REST poller (mp-macro), not a WS normalizer; the entry
         // exists so `normalizer_for` stays total over `Venue`.
         Fred => Box::new(FredNormalizer::new()),
+        // Ethereum mainnet is a REST poller (mp-netflow), not a WS
+        // normalizer; the entry exists so `normalizer_for` stays total.
+        Ethereum => Box::new(EtherscanNormalizer::new()),
     }
 }
 

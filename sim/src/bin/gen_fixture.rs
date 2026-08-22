@@ -28,7 +28,7 @@ fn main() -> ExitCode {
         let noise = ((rng_state >> 33) as f64 / u32::MAX as f64 - 0.5) * 50.0;
         let price = (base_price + noise).max(60_000.0);
 
-        let side = if rng_state % 2 == 0 {
+        let side = if rng_state.is_multiple_of(2) {
             Side::Buy
         } else {
             Side::Sell

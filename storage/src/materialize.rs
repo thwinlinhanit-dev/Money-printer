@@ -31,14 +31,19 @@
 //! logs is checked against `MP_MATERIALIZE_MAX_BYTES` (default
 //! [`DEFAULT_MAX_BACKFILL_BYTES`]) and the run fails closed with guidance when
 //! exceeded — an accidental multi-week full-set backfill must not OOM the box.
-//! Slice per day, or raise the cap deliberately for a known-large run. A
-//! streaming merge is future work; until then the guard is the honest boundary.
+//! Slice per day, or raise the cap deliberately for a known-large run. (The
+//! streaming merge [`stream_logs_merged`] exists for the determinism replay,
+//! which cannot slice; the materializer itself stays eager under the guard.)
 //!
 //! Pure orchestration: no wall clock (PD-3); the only timestamps are event
 //! times from the logs.
 
 use crate::feature_store::{date_str, materialize, FeatureMeta, FeatureRow};
-use mp_core::{fnv1a_absorb, log::LogReader, MarketEvent, SymbolTable, Venue, FNV1A_OFFSET};
+use mp_core::{
+    fnv1a_absorb,
+    log::{LogError, LogReader},
+    EventEnvelope, MarketEvent, SymbolId, SymbolMeta, SymbolTable, Venue, FNV1A_OFFSET,
+};
 use mp_features::{engine_from_config, FeatureEngine, FeaturesConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -161,6 +166,122 @@ pub fn load_logs_merged(logs: &[PathBuf]) -> Result<LoadedLogs, String> {
         events,
         symbols,
         events_read,
+    })
+}
+
+/// Streaming variant of [`load_logs_merged`] — the same canonical order
+/// (MAT-5/EVT-5/EVT-8) without materializing the day into RAM. Reads each
+/// log's symbol header up front (cheap) to build the shared table, then
+/// k-way-merges the logs frame-by-frame: one event per [`next`], so a
+/// day-scale corpus streams through bounded memory. The daily determinism
+/// replay (`mp-determinism`, spec 018) is the consumer — its 952 MB VPS box
+/// OOM-killed the eager loader on a full day, and the replay cannot slice
+/// without changing the decision stream.
+pub struct StreamedMergedLogs {
+    /// The ONE shared symbol table every event was re-interned onto.
+    pub symbols: SymbolTable,
+    /// Events emitted so far (post remap/drop).
+    pub events_read: u64,
+    merged: mp_core::log::MergeReader<RemapReader>,
+}
+
+impl Iterator for StreamedMergedLogs {
+    type Item = Result<EventEnvelope, String>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.merged.next() {
+            Some(Ok(ev)) => {
+                self.events_read += 1;
+                Some(Ok(ev))
+            }
+            Some(Err(e)) => Some(Err(format!("stream: {e}"))),
+            None => None,
+        }
+    }
+}
+
+/// One log, streaming: decodes its own frames and re-interns log-local
+/// symbol ids onto the shared table (EVT-8), mirroring [`load_logs_merged`]'s
+/// remap and symbol-less-log rules. The lookup is built from the log's own
+/// header metas — the shared table interns in the same (log-sorted, per-log
+/// meta-order) sequence, so ids line up with the eager loader's.
+struct RemapReader {
+    reader: LogReader,
+    metas: Vec<SymbolMeta>,
+    lookup: BTreeMap<(Venue, String), SymbolId>,
+}
+
+impl Iterator for RemapReader {
+    type Item = Result<EventEnvelope, LogError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let ev = match self.reader.next()? {
+                Ok(ev) => ev,
+                Err(e) => return Some(Err(e)),
+            };
+            if self.metas.is_empty() {
+                if matches!(ev.body, MarketEvent::Status { .. }) {
+                    continue;
+                }
+                return Some(Err(LogError::CorruptSymbol(ev.symbol.0)));
+            }
+            let Some(meta) = self.metas.get(ev.symbol.0 as usize) else {
+                return Some(Err(LogError::CorruptSymbol(ev.symbol.0)));
+            };
+            let Some(shared) = self.lookup.get(&(meta.venue, meta.venue_symbol.clone())) else {
+                return Some(Err(LogError::CorruptSymbol(ev.symbol.0)));
+            };
+            return Some(Ok(EventEnvelope {
+                symbol: *shared,
+                ..ev
+            }));
+        }
+    }
+}
+
+pub fn stream_logs_merged(logs: &[PathBuf]) -> Result<StreamedMergedLogs, String> {
+    let mut logs: Vec<PathBuf> = logs.to_vec();
+    logs.sort();
+    logs.dedup();
+    if logs.is_empty() {
+        return Err("stream_logs_merged: log set is empty".into());
+    }
+    let mut symbols = SymbolTable::new();
+    let mut opened: Vec<(LogReader, Vec<SymbolMeta>)> = Vec::new();
+    for path in &logs {
+        let mut reader =
+            LogReader::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+        reader
+            .load_symbols()
+            .map_err(|e| format!("header {}: {e}", path.display()))?;
+        let metas = reader.symbols().to_vec();
+        for meta in &metas {
+            symbols.intern_default(meta.venue, &meta.venue_symbol);
+        }
+        opened.push((reader, metas));
+    }
+    // Shared-id lookup (venue, venue_symbol) → SymbolId, built from the shared
+    // table the eager loader interns identically (log-sorted, per-log meta
+    // order). Each remap reader resolves its local id → venue_symbol via its
+    // own header metas, then venue_symbol → SHARED id via this map (EVT-8).
+    let shared_lookup: BTreeMap<(Venue, String), SymbolId> = symbols
+        .metas()
+        .iter()
+        .map(|m| ((m.venue, m.venue_symbol.clone()), m.symbol_id))
+        .collect();
+    let merged = mp_core::log::MergeReader::new(
+        opened
+            .into_iter()
+            .map(|(reader, metas)| RemapReader {
+                reader,
+                lookup: shared_lookup.clone(),
+                metas,
+            })
+            .collect(),
+    );
+    Ok(StreamedMergedLogs {
+        symbols,
+        events_read: 0,
+        merged,
     })
 }
 

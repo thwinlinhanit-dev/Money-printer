@@ -102,6 +102,9 @@ pub struct ReplaySummary {
 pub struct DayReplay {
     pub summary: ReplaySummary,
     pub lines: Vec<String>,
+    /// Last event timestamp consumed (`recv_ts_ns`) — the replay's own
+    /// evidence time, derived from input, never the wall clock (PD-3).
+    pub max_recv_ts_ns: i64,
 }
 
 /// The check's verdict. `passed` = self-consistent AND (no live log OR replay
@@ -123,6 +126,8 @@ pub struct DeterminismVerdict {
     pub live_matches: Option<bool>,
     /// First diverging decision line index (any failing comparison).
     pub divergence_line: Option<usize>,
+    /// Last event timestamp the replay consumed (artifact evidence time).
+    pub max_recv_ts_ns: i64,
     pub passed: bool,
     pub reason: String,
 }
@@ -182,7 +187,60 @@ pub fn replay(
         fills: log.fill_count(),
         hash: log.hash(),
     };
-    Ok(DayReplay { summary, lines })
+    Ok(DayReplay {
+        summary,
+        lines,
+        max_recv_ts_ns: events.iter().map(|e| e.recv_ts_ns).max().unwrap_or(0),
+    })
+}
+
+/// Streaming [`replay`] over an event source that is never materialized — the
+/// check's RAM guard. `events` yields decoded envelopes on demand (e.g.
+/// `storage::stream_logs_merged`); the engine consumes them one at a time, so
+/// peak memory is feature/strategy state plus a single event, not the whole
+/// day (the eager `&[EventEnvelope]` path OOM-killed the 952 MB VPS box).
+/// Order and contents must match the eager path for byte-identical verdicts.
+pub fn replay_stream<I>(
+    date: &str,
+    events: I,
+    venues: &[Venue],
+    symbols: &[SymbolId],
+    cfg: &DeterminismConfig,
+    fe_cfg: &FeaturesConfig,
+) -> Result<DayReplay, String>
+where
+    I: IntoIterator<Item = Result<EventEnvelope, String>>,
+{
+    let fe = engine_from_config(fe_cfg).map_err(|e| format!("feature engine: {e}"))?;
+    let strat = strategy_for(cfg, venues, symbols)?;
+    let mut bt = Backtester::from_strategies(fe, vec![strat], check_sim_config(), cfg.seed);
+    let mut event_count = 0usize;
+    let mut max_recv_ts_ns = 0i64;
+    for item in events {
+        let ev = item?;
+        event_count += 1;
+        if ev.recv_ts_ns > max_recv_ts_ns {
+            max_recv_ts_ns = ev.recv_ts_ns;
+        }
+        bt.stream(std::iter::once(ev));
+    }
+    let log = bt.decision_log();
+    let lines = log.lines().to_vec();
+    let summary = ReplaySummary {
+        date: date.to_string(),
+        strategy: cfg.strategy.clone(),
+        seed: cfg.seed,
+        event_count,
+        lines: lines.len(),
+        intents: log.intent_count(),
+        fills: log.fill_count(),
+        hash: log.hash(),
+    };
+    Ok(DayReplay {
+        summary,
+        lines,
+        max_recv_ts_ns,
+    })
 }
 
 /// First index where `a` and `b` diverge (None when identical). Line
@@ -202,39 +260,36 @@ fn first_divergence(a: &[String], b: &[String]) -> Option<usize> {
     }
 }
 
-/// The check: two fresh runs over `events` (byte-identity, MOD-10), then —
-/// when a live summary exists — replay-vs-live identity (MOD-9).
-pub fn check_day(
+/// The shared verdict tail: byte-identity (MOD-10), then — when a live
+/// summary exists — replay-vs-live identity (MOD-9). `a` is the reference run.
+fn build_verdict(
     date: &str,
-    events: &[EventEnvelope],
-    venues: &[Venue],
-    symbols: &[SymbolId],
+    a: &DayReplay,
+    b: &DayReplay,
     cfg: &DeterminismConfig,
-    fe_cfg: &FeaturesConfig,
     live: Option<&ReplaySummary>,
-) -> Result<DeterminismVerdict, String> {
-    let a = replay(date, events, venues, symbols, cfg, fe_cfg)?;
-    let b = replay(date, events, venues, symbols, cfg, fe_cfg)?;
+) -> DeterminismVerdict {
     let divergence = first_divergence(&a.lines, &b.lines);
     let self_consistent = divergence.is_none();
     if !self_consistent {
-        return Ok(DeterminismVerdict {
+        return DeterminismVerdict {
             date: date.to_string(),
             strategy: cfg.strategy.clone(),
             seed: cfg.seed,
-            event_count: events.len(),
+            event_count: a.summary.event_count,
             self_consistent: false,
             replayed_hash: a.summary.hash,
             replayed_lines: a.summary.lines,
             live_present: live.is_some(),
             live_matches: None,
             divergence_line: divergence,
+            max_recv_ts_ns: a.max_recv_ts_ns,
             passed: false,
             reason: format!(
                 "run 1 and run 2 diverged at decision {} — the decision path is not deterministic (PD-3 breach? wall clock / unseeded RNG / map-order iteration)",
                 divergence.unwrap_or(0)
             ),
-        });
+        };
     }
 
     let (live_present, live_matches, live_div) = match live {
@@ -268,20 +323,60 @@ pub fn check_day(
             a.summary.hash
         ),
     };
-    Ok(DeterminismVerdict {
+    DeterminismVerdict {
         date: date.to_string(),
         strategy: cfg.strategy.clone(),
         seed: cfg.seed,
-        event_count: events.len(),
+        event_count: a.summary.event_count,
         self_consistent: true,
         replayed_hash: a.summary.hash,
         replayed_lines: a.summary.lines,
         live_present,
         live_matches,
         divergence_line: live_div,
+        max_recv_ts_ns: a.max_recv_ts_ns,
         passed,
         reason,
-    })
+    }
+}
+
+/// The check: two fresh runs over `events` (byte-identity, MOD-10), then —
+/// when a live summary exists — replay-vs-live identity (MOD-9).
+pub fn check_day(
+    date: &str,
+    events: &[EventEnvelope],
+    venues: &[Venue],
+    symbols: &[SymbolId],
+    cfg: &DeterminismConfig,
+    fe_cfg: &FeaturesConfig,
+    live: Option<&ReplaySummary>,
+) -> Result<DeterminismVerdict, String> {
+    let a = replay(date, events, venues, symbols, cfg, fe_cfg)?;
+    let b = replay(date, events, venues, symbols, cfg, fe_cfg)?;
+    Ok(build_verdict(date, &a, &b, cfg, live))
+}
+
+/// The check over a streamed corpus: two fresh runs, each re-opening its own
+/// event source via `open` (called once per run, so consumed streams are
+/// fine). Memory-bounded end to end — the daily pipeline's consumer is
+/// `storage::stream_logs_merged`, which yields the eager loader's exact
+/// canonical order without materializing the day.
+pub fn check_day_streamed<F, I>(
+    date: &str,
+    mut open: F,
+    venues: &[Venue],
+    symbols: &[SymbolId],
+    cfg: &DeterminismConfig,
+    fe_cfg: &FeaturesConfig,
+    live: Option<&ReplaySummary>,
+) -> Result<DeterminismVerdict, String>
+where
+    F: FnMut() -> Result<I, String>,
+    I: IntoIterator<Item = Result<EventEnvelope, String>>,
+{
+    let a = replay_stream(date, open()?, venues, symbols, cfg, fe_cfg)?;
+    let b = replay_stream(date, open()?, venues, symbols, cfg, fe_cfg)?;
+    Ok(build_verdict(date, &a, &b, cfg, live))
 }
 
 #[cfg(test)]
@@ -335,10 +430,7 @@ mod tests {
                 tag: "emitter".into(),
             }]
         }
-        fn with_params(
-            &self,
-            _: &std::collections::BTreeMap<String, f64>,
-        ) -> Box<dyn Strategy> {
+        fn with_params(&self, _: &std::collections::BTreeMap<String, f64>) -> Box<dyn Strategy> {
             Box::new(EmittingStrat { next: 0 })
         }
     }
@@ -363,7 +455,14 @@ mod tests {
         // Two symbols would need symbol remapping; the check runs on the
         // caller's already-shared ids, so one symbol suffices here.
         (1..=50)
-            .map(|i| trade(Venue::Hyperliquid, i as i64 * 1_000_000_000, i, 100.0 + i as f64))
+            .map(|i| {
+                trade(
+                    Venue::Hyperliquid,
+                    i as i64 * 1_000_000_000,
+                    i,
+                    100.0 + i as f64,
+                )
+            })
             .collect()
     }
 
@@ -383,13 +482,59 @@ mod tests {
     fn mod_10_decision_path_deterministic_two_runs_byte_identical() {
         let evs = events();
         let c = cfg();
-        let a = replay("2026-08-13", &evs, &[Venue::Hyperliquid], &[mp_core::SymbolId(0)], &c, &fe_cfg())
-            .unwrap();
-        let b = replay("2026-08-13", &evs, &[Venue::Hyperliquid], &[mp_core::SymbolId(0)], &c, &fe_cfg())
-            .unwrap();
+        let a = replay(
+            "2026-08-13",
+            &evs,
+            &[Venue::Hyperliquid],
+            &[mp_core::SymbolId(0)],
+            &c,
+            &fe_cfg(),
+        )
+        .unwrap();
+        let b = replay(
+            "2026-08-13",
+            &evs,
+            &[Venue::Hyperliquid],
+            &[mp_core::SymbolId(0)],
+            &c,
+            &fe_cfg(),
+        )
+        .unwrap();
         assert_eq!(a.lines, b.lines, "byte-identical decision logs");
         assert_eq!(a.summary.hash, b.summary.hash);
         assert_eq!(first_divergence(&a.lines, &b.lines), None);
+    }
+
+    #[test]
+    fn mod_10_streamed_check_matches_eager_check_byte_for_byte() {
+        // The RAM-guard path (a per-run event-source factory, e.g.
+        // storage::stream_logs_merged) must produce the IDENTICAL verdict to
+        // the eager slice path — the same two-run byte-identity proof over
+        // the same events, or the streamed gate would measure a different
+        // decision stream than materialization.
+        let c = cfg();
+        let fe = fe_cfg();
+        let venues = &[Venue::Hyperliquid];
+        let symbols = &[mp_core::SymbolId(0)];
+        let eager = check_day("2026-08-13", &events(), venues, symbols, &c, &fe, None).unwrap();
+        let streamed = check_day_streamed(
+            "2026-08-13",
+            || Ok(events().into_iter().map(Ok)),
+            venues,
+            symbols,
+            &c,
+            &fe,
+            None,
+        )
+        .unwrap();
+        assert!(streamed.passed, "{}", streamed.reason);
+        assert_eq!(streamed.passed, eager.passed);
+        assert_eq!(streamed.self_consistent, eager.self_consistent);
+        assert_eq!(streamed.replayed_hash, eager.replayed_hash);
+        assert_eq!(streamed.replayed_lines, eager.replayed_lines);
+        assert_eq!(streamed.event_count, eager.event_count);
+        assert_eq!(streamed.max_recv_ts_ns, eager.max_recv_ts_ns);
+        assert_eq!(streamed.divergence_line, eager.divergence_line);
     }
 
     #[test]
@@ -475,7 +620,10 @@ mod tests {
             "strategy validity is checked at runtime"
         );
         let c = DeterminismConfig::from_toml("strategy = \"nope\"").unwrap();
-        assert!(strategy_for(&c, &[], &[]).is_err(), "unknown strategy fails closed");
+        assert!(
+            strategy_for(&c, &[], &[]).is_err(),
+            "unknown strategy fails closed"
+        );
     }
 
     #[test]
@@ -494,6 +642,9 @@ mod tests {
         b.stream(evs.iter().cloned());
         assert_eq!(a.decision_log().lines(), b.decision_log().lines());
         assert_eq!(a.decision_log().hash(), b.decision_log().hash());
-        assert!(a.decision_log().intent_count() > 0, "the emitter must actually trade");
+        assert!(
+            a.decision_log().intent_count() > 0,
+            "the emitter must actually trade"
+        );
     }
 }

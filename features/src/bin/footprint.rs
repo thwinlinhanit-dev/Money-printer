@@ -15,7 +15,7 @@
 //! to each hit's event time (no wall clock anywhere, PD-3).
 
 use mp_core::log::LogReader;
-use mp_core::{EventEnvelope, MarketEvent, SimClock};
+use mp_core::{EventEnvelope, SimClock};
 use mp_features::catalog::{BarDelta, Cvd, FootprintDelta, FootprintImbalance, FundingRate};
 use mp_features::hit_journal::{HitJournal, HitRecord};
 use mp_features::{Cond, FeatureEngine, Op, Rule, Screener};
@@ -199,7 +199,7 @@ fn run() -> Result<ExitCode, String> {
     let tape: Vec<(i64, f64)> = events
         .iter()
         .filter_map(|e| {
-            if let MarketEvent::Trade { price, .. } = e.body {
+            if let Some((price, _, _, _, _)) = e.body.trade_view() {
                 Some((e.recv_ts_ns, price))
             } else {
                 None
@@ -253,10 +253,7 @@ fn run() -> Result<ExitCode, String> {
         let _ = (min, max);
     }
     for ev in &events {
-        if let MarketEvent::Trade {
-            price, qty, side, ..
-        } = ev.body
-        {
+        if let Some((price, qty, side, _, _)) = ev.body.trade_view() {
             let n = price * qty;
             for (name, min, max) in &buckets {
                 if n >= *min && n < *max {

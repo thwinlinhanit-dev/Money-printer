@@ -50,10 +50,10 @@ fn leg(kind: OptionKind) -> OptionLeg {
     }
 }
 
-/// One envelope per `MarketEvent` variant (all 14), plus the coverage the
+/// One envelope per `MarketEvent` variant (all 16), plus the coverage the
 /// spec's BDC-3 list demands: inline + spilled `Levels`, `Option` Some/None,
-/// `StatusKind::BackpressureDrop`, `Venue::{Deribit, Fred}`, every
-/// `SnapshotReason` / `SnapshotSource`, both `OptionKind`s, and empty +
+/// `StatusKind::BackpressureDrop`, `Venue::{Deribit, Fred, Ethereum}`,
+/// every `SnapshotReason` / `SnapshotSource`, both `OptionKind`s, and empty +
 /// non-empty strings. Order matters: `GOLDEN` mirrors it.
 pub fn envelopes() -> Vec<(&'static str, EventEnvelope)> {
     vec![
@@ -286,6 +286,31 @@ pub fn envelopes() -> Vec<(&'static str, EventEnvelope)> {
                     underlying_price: 61_000.0,
                     open_interest: 900.25,
                     greeks: None,
+                },
+            ),
+        ),
+        (
+            "trade_with_addr",
+            env(
+                Venue::Hyperliquid,
+                13,
+                MarketEvent::TradeWithAddr {
+                    price: 61_000.5,
+                    qty: 0.25,
+                    side: Side::Buy,
+                    trade_id: 7,
+                    taker_addr: "0xabc123".into(),
+                },
+            ),
+        ),
+        (
+            "netflow_snapshot",
+            env(
+                Venue::Ethereum,
+                14,
+                MarketEvent::NetflowSnapshot {
+                    address: "0xdeadbeef".into(),
+                    balance: 1_234_567.89,
                 },
             ),
         ),

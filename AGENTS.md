@@ -85,13 +85,13 @@ When the user requests a durable behavior change, record it here or in the relev
 | [collectors/AGENTS.md](collectors/AGENTS.md) | Market data collection crate — Binance, Bybit, Coinbase, HyperLiquid, Kraken, OKX WS/REST ingestion, normalization, event log writing |
 | [core/AGENTS.md](core/AGENTS.md) | Core types crate — event schema, arena allocator, book, codec, log, mode switch, symbols |
 | [sim/AGENTS.md](sim/AGENTS.md) | Backtesting engine crate — harness, fill models, account, decision log, metrics |
-| [strategies/AGENTS.md](strategies/AGENTS.md) | Strategy API crate — strategy trait, carry-v1, liq-fade-v1, trend-breadth-v1, funnel |
+| [strategies/AGENTS.md](strategies/AGENTS.md) | Strategy API crate — strategy trait, carry-v1, liq-fade-v1, swing-range-reclaim-v1, trend-breadth-v1, funnel |
 | [oms/AGENTS.md](oms/AGENTS.md) | Order management crate — state machine, reconciliation, execution tracking |
-| [risk/AGENTS.md](risk/AGENTS.md) | Risk management crate — Kelly sizing, allocator, killswitch, governor |
+| [risk/AGENTS.md](risk/AGENTS.md) | Risk management crate — Kelly sizing, allocator, killswitch, governor, portfolio caps (SWG-6), risk gates |
 | [storage/AGENTS.md](storage/AGENTS.md) | Parquet storage crate — compaction, SCD2, feature store, manifest, audit |
 | [features/AGENTS.md](features/AGENTS.md) | Feature engineering crate — bars, engine, screener, catalog, hit journal |
 | [llm/AGENTS.md](llm/AGENTS.md) | LLM provider abstraction crate — Anthropic, Cohere, Gemini, OpenAI compat |
 | [ops/AGENTS.md](ops/AGENTS.md) | Operations crate — alerting, bot journal, daemon, runbooks, systemd, CI |
-| [specs/AGENTS.md](specs/AGENTS.md) | Design specification documents (000–024) |
+| [specs/AGENTS.md](specs/AGENTS.md) | Design specification documents (000–036) |
 | [research/AGENTS.md](research/AGENTS.md) | Python research package — brief, grading, event studies, coverage reader |
 | [data/AGENTS.md](data/AGENTS.md) | Market data storage — raw event logs, cold Parquet, manifests |

@@ -1,5 +1,5 @@
-//! Liquidation-fade strategy (spec 004/006, `strategies/liq-fade-v1/
-//! hypothesis.md`). Fades a liquidation cascade AFTER exhaustion: when the
+//! Liquidation-fade strategy (frozen — spec 035 SWG-8). Fades a liquidation
+//! cascade AFTER exhaustion: when the
 //! rolling sell-side (or buy-side) liquidation notional (`liq.vol_*`) has
 //! spiked, the liquidation prints are STRETCHED from mid (`liq.dist`), and
 //! the rolling sum is DRAINING (flow stopped — exhaustion), we take the side
@@ -76,6 +76,9 @@ enum LiqFadeState {
         venue: Venue,
         symbol: SymbolId,
         direction: Side,
+        /// Timestamp of the SIGNAL, not of the eventual fill — hold/exit
+        /// checks count from signal time (the sim's latency_ns then shifts
+        /// the actual fill; entry_ts is not a fill timestamp).
         entry_ts_ns: i64,
     },
     Entered {
@@ -157,13 +160,9 @@ impl LiqFadeV1 {
             return Vec::new();
         };
         // Sell cascade (longs dumped) → we buy the reversion.
-        if let Some(candidate) = self.fade_candidate(
-            ss.vol_sell,
-            ss.peak_vol_sell,
-            ss.dist,
-            Side::Sell,
-            now_ns,
-        ) {
+        if let Some(candidate) =
+            self.fade_candidate(ss.vol_sell, ss.peak_vol_sell, ss.dist, Side::Sell, now_ns)
+        {
             self.state = LiqFadeState::EntrySignaled {
                 venue,
                 symbol,
@@ -173,13 +172,9 @@ impl LiqFadeV1 {
             return vec![self.make_intent(venue, symbol, candidate, "liq-fade-v1 entry")];
         }
         // Buy cascade (shorts squeezed) → we sell the reversion.
-        if let Some(candidate) = self.fade_candidate(
-            ss.vol_buy,
-            ss.peak_vol_buy,
-            ss.dist,
-            Side::Buy,
-            now_ns,
-        ) {
+        if let Some(candidate) =
+            self.fade_candidate(ss.vol_buy, ss.peak_vol_buy, ss.dist, Side::Buy, now_ns)
+        {
             self.state = LiqFadeState::EntrySignaled {
                 venue,
                 symbol,
@@ -294,7 +289,13 @@ impl Strategy for LiqFadeV1 {
         {
             return Vec::new();
         }
-        if u.venue != self.universe.venues.first().copied().unwrap_or(Venue::Hyperliquid)
+        if u.venue
+            != self
+                .universe
+                .venues
+                .first()
+                .copied()
+                .unwrap_or(Venue::Hyperliquid)
             || !self.universe.symbols.contains(&u.symbol)
         {
             return Vec::new();
@@ -316,7 +317,12 @@ impl Strategy for LiqFadeV1 {
                 "liq.dist" => ss.dist = Some((u.ts_ns, u.value)),
                 _ => return Vec::new(),
             }
-            (peaks.0, peaks.1, u.name == "liq.vol_sell", u.name == "liq.vol_buy")
+            (
+                peaks.0,
+                peaks.1,
+                u.name == "liq.vol_sell",
+                u.name == "liq.vol_buy",
+            )
         };
         let now = ctx.now_ns();
         let intents = match self.state {
@@ -370,8 +376,17 @@ impl Strategy for LiqFadeV1 {
 
     fn params(&self) -> ParamSpace {
         let mut p = ParamSpace::default();
-        p.grid.insert("entry_vol".into(), vec![500_000.0, 1_000_000.0, 2_000_000.0]);
-        p.grid.insert("entry_dist_bps".into(), vec![15.0, 30.0, 60.0]);
+        // entry_vol venue-calibrated for bybit (hypothesis doc 2026-08-15):
+        // the 08-14 full-day distribution showed max 5-min one-sided rolling
+        // flow at $513K, so the $1M floor was unreachable by construction.
+        // 250K/300K bracket p90 ($360K) and keep ~3 cascade events/day; the
+        // higher values remain for a future multi-venue v2 aggregate.
+        p.grid.insert(
+            "entry_vol".into(),
+            vec![250_000.0, 300_000.0, 500_000.0, 1_000_000.0, 2_000_000.0],
+        );
+        p.grid
+            .insert("entry_dist_bps".into(), vec![15.0, 30.0, 60.0]);
         p.grid.insert("exhaust_frac".into(), vec![0.6, 0.8, 0.9]);
         p
     }
@@ -451,7 +466,9 @@ mod tests {
     /// assert the fade fires long.
     fn sell_cascade_to_exhaustion(s: &mut LiqFadeV1, c: &mut TestCtx) -> Vec<OrderIntent> {
         // Cascade builds to $1.5M (peak), then drains to $1.1M (<= 0.8 x peak).
-        assert!(s.on_feature(&up("liq.vol_sell", 1_500_000.0, 100), c).is_empty());
+        assert!(s
+            .on_feature(&up("liq.vol_sell", 1_500_000.0, 100), c)
+            .is_empty());
         assert!(s.on_feature(&up("liq.dist", 40.0, 110), c).is_empty());
         // Exhaustion: drained below 0.8 x 1.5M = 1.2M.
         s.on_feature(&up("liq.vol_sell", 1_100_000.0, 200), c)
@@ -471,7 +488,9 @@ mod tests {
     fn lf_2_enters_short_after_buy_cascade_exhaustion() {
         let mut s = strat();
         let mut c = ctx(1_000);
-        assert!(s.on_feature(&up("liq.vol_buy", 1_500_000.0, 100), &mut c).is_empty());
+        assert!(s
+            .on_feature(&up("liq.vol_buy", 1_500_000.0, 100), &mut c)
+            .is_empty());
         assert!(s.on_feature(&up("liq.dist", 40.0, 110), &mut c).is_empty());
         let intents = s.on_feature(&up("liq.vol_buy", 1_100_000.0, 200), &mut c);
         assert_eq!(intents.len(), 1);
@@ -483,15 +502,25 @@ mod tests {
         let mut s = strat();
         let mut c = ctx(1_000);
         // Big cascade but NOT stretched from mid (dist 10 < 30) → no fade.
-        assert!(s.on_feature(&up("liq.vol_sell", 1_500_000.0, 100), &mut c).is_empty());
+        assert!(s
+            .on_feature(&up("liq.vol_sell", 1_500_000.0, 100), &mut c)
+            .is_empty());
         assert!(s.on_feature(&up("liq.dist", 10.0, 110), &mut c).is_empty());
-        assert!(s.on_feature(&up("liq.vol_sell", 1_100_000.0, 200), &mut c).is_empty());
+        assert!(s
+            .on_feature(&up("liq.vol_sell", 1_100_000.0, 200), &mut c)
+            .is_empty());
         // Small cascade but stretched → still no fade (vol below floor).
         let mut s2 = strat();
         let mut c2 = ctx(1_000);
-        assert!(s2.on_feature(&up("liq.vol_sell", 900_000.0, 100), &mut c2).is_empty());
-        assert!(s2.on_feature(&up("liq.dist", 40.0, 110), &mut c2).is_empty());
-        assert!(s2.on_feature(&up("liq.vol_sell", 700_000.0, 200), &mut c2).is_empty());
+        assert!(s2
+            .on_feature(&up("liq.vol_sell", 900_000.0, 100), &mut c2)
+            .is_empty());
+        assert!(s2
+            .on_feature(&up("liq.dist", 40.0, 110), &mut c2)
+            .is_empty());
+        assert!(s2
+            .on_feature(&up("liq.vol_sell", 700_000.0, 200), &mut c2)
+            .is_empty());
     }
 
     #[test]
@@ -500,15 +529,25 @@ mod tests {
         // the fade would catch a knife.
         let mut s = strat();
         let mut c = ctx(1_000);
-        assert!(s.on_feature(&up("liq.vol_sell", 1_500_000.0, 100), &mut c).is_empty());
+        assert!(s
+            .on_feature(&up("liq.vol_sell", 1_500_000.0, 100), &mut c)
+            .is_empty());
         assert!(s.on_feature(&up("liq.dist", 40.0, 110), &mut c).is_empty());
-        assert!(s.on_feature(&up("liq.vol_sell", 1_400_000.0, 200), &mut c).is_empty());
+        assert!(s
+            .on_feature(&up("liq.vol_sell", 1_400_000.0, 200), &mut c)
+            .is_empty());
         // Stale: the exhausted reading is 31s old (> vol_stale_ns 30s).
         let mut s2 = strat();
         let mut c2 = ctx(40_000_000_000);
-        assert!(s2.on_feature(&up("liq.vol_sell", 1_500_000.0, 100), &mut c2).is_empty());
-        assert!(s2.on_feature(&up("liq.dist", 40.0, 110), &mut c2).is_empty());
-        assert!(s2.on_feature(&up("liq.vol_sell", 1_100_000.0, 31_000_000_000), &mut c2).is_empty());
+        assert!(s2
+            .on_feature(&up("liq.vol_sell", 1_500_000.0, 100), &mut c2)
+            .is_empty());
+        assert!(s2
+            .on_feature(&up("liq.dist", 40.0, 110), &mut c2)
+            .is_empty());
+        assert!(s2
+            .on_feature(&up("liq.vol_sell", 1_100_000.0, 31_000_000_000), &mut c2)
+            .is_empty());
     }
 
     #[test]

@@ -146,6 +146,20 @@ the human reads it — the report is for the owner, not for the machine.
   siblings use. A missing binary or corrupt journal is a warning,
   never a study failure; the check itself refuses to fabricate a verdict
   (CONV-8). Alert-only (W-6): never mutates the journal.
+- **OPS-15** The `data/raw` storage budget MUST be watched forward-lookingly,
+  not only at current usage: `mp-ops storage-budget` derives the per-day
+  corpus sizes from the `{YYYYMMDD}_*.log` file names (read-only, W-6 — no
+  state file; the current partial day excluded), fits the trailing-window
+  growth rate (trailing-window mean daily addition, default 7 days), projects days-to-cap, and
+  raises a `storage-budget` P2 alert when the projection is within the alert
+  horizon (default 14 days) or the corpus already meets/exceeds the cap
+  (flat/shrinking data and projections beyond the horizon stay silent). The
+  budget is explicit config (`--cap-bytes` or `MP_STORAGE_BUDGET_BYTES`); an
+  unconfigured budget fails closed (exit 2, never a silent skip). The check
+  runs daily (`systemd/storage-budget.timer` on the VPS; best-effort hook in
+  `daily_pipeline.ps1` on the recording host) and the fired P2 breaks
+  through quiet hours (OPS-9). This is the spec 001 appendix's
+  "disk budget" revisit trigger, wired.
 - **OPS-14** The quiet-hours Telegram batch ledger MUST be watched
   near-real-time for a missed flush: when a dispatch has been queued longer
   than one full quiet window (default 24h), a `telegram-stale` P2 alert MUST
@@ -172,6 +186,8 @@ the human reads it — the report is for the owner, not for the machine.
 - [x] Band-accuracy drift/decay raises the `band-accuracy-decay` P3 alert on a sustained trailing-window quality loss and stays silent on healthy/young/never-good trends (OPS-13). `ops_13_band_accuracy_decay_alerts_on_sustained_quality_loss`, `ops_13_band_accuracy_decay_ignores_healthy_and_young_trends`.
 - [x] The weekly verdict is journaled to `runs/index.jsonl` as a `band_accuracy_decay` record line correlated to the study's run by `run_id` + `week` (clean verdicts journaled too; an empty trend writes nothing), and the wrapper passes `--runs-dir` to the decay check (OPS-13). `ops_13_mp_ops_decay_journals_verdict_to_runs_index`, `ops_13_weekly_wrapper_invokes_decay_check_after_study`.
 - [x] The batch ledger is watched near-real-time: `stale_batch_alert` raises `telegram-stale` (P2) when a dispatch sits queued ≥ 24h (oldest wins, per-entity dedupe key, detail names queued hours + remediation); `mp-ops telegram-stale` prints the JSON verdict, stays silent on fresh/missing ledgers, fails closed on a corrupt one (exit 2); with `--telegram` the P2 is SENT even inside quiet hours (OPS-9 breakthrough, verified against the Bot API stub); and the hourly `telegram-stale.timer`/`.service` pair is pinned read-only on the ledger with `WorkingDirectory=/opt/money-printer` so the relative `journal/telegram` resolves under the money-printer tree, not systemd's `/` (OPS-14). `ops_14_telegram_stale_alert_fires_on_missed_flush`, `ops_14_telegram_stale_subcommand_reports_verdict`, `ops_14_telegram_stale_p2_breaks_through_quiet_hours`, `ops_14_telegram_stale_timer_runs_hourly_and_reads_only_the_ledger`.
+- [x] The storage budget is watched forward-lookingly: a growing corpus whose projection lands within the horizon alerts `storage-budget` (P2, detail names size/growth/days-to-cap), flat/shrinking/too-young data and projections beyond the horizon stay silent, and an at/over-cap corpus fires regardless of trend (OPS-15). `ops_15_storage_budget_fires_when_growth_trends_to_cap`, `ops_15_storage_budget_silent_on_flat_shrinking_or_young`.
+- [x] The `storage-budget` CLI reports a JSON verdict over real per-day files (non-conforming names skipped, the current partial day excluded),  fails closed on an unconfigured budget (exit 2), and rejects bad flag values; the daily timer/service pair is pinned read-only on the corpus (OPS-15). `ops_15_storage_budget_subcommand_reports_verdict`, `ops_15_storage_budget_timer_runs_daily_and_reads_only_the_corpus`.
 - [x] Restore drill restores a real tarball into a scratch dir, refuses a backup missing the business records, and verifies via an injectable command (default: the sim golden fixture) (OPS-5). `ops_5_restore_drill_restores_a_backup_and_verifies`, `ops_5_restore_drill_script_exists_and_refuses_without_backup`.
 - [x] Bot command surface: exact commands parsed, single-owner allowlist, every command journaled, `/kill` one confirm and `/flatten` double confirm, latch reaches the real gate as RG-10 (OPS-3). `ops_3_bot_allowlists_owner_and_journals_every_command`, `ops_3_kill_needs_confirm_and_flatten_needs_double_confirm`.
 - [ ] The `opsd` binary (live heartbeat endpoint feeding `DeadMan`, host sampling feeding `watch.rs`, Telegram transport feeding `Bot`) and the once-per-host OPS-8 verbatim bring-up — the deterministic cores are all implemented and tested above; the long-running process wiring is the remaining work.
@@ -326,6 +342,37 @@ the human reads it — the report is for the owner, not for the machine.
   OPS-13/OPS-14 because OPS-11/OPS-12 belong to spec 021's bot journal.
 
 ## Decisions (continued)
+- 2026-08-16: OPS-15 extension — the storage-budget watch also flags a
+  SILENTLY HELD relay file. With `--manifest PATH` (the drain manifest
+  `data/vps_drain_manifest.jsonl`; the Windows pipeline hook passes it — the
+  VPS has no manifest), the watch scans entries and fires the same
+  `storage-budget` P2 when any file's LATEST per-file record is
+  `action=landed` with `release` not in {released, no_release}
+  (`ssh_failed`/`skipped` — the drain landed the byte-verified file into the
+  master corpus but never released the VPS copy). Per-file latest-entry
+  resolution is required because the manifest is append-only: a file that
+  failed one night but was released on a later run must not keep firing.
+  `held_drain_files`/`parse_drain_manifest_line` (`ops/src/storage.rs`,
+  pure) own the decision; the CLI reads the file (fail-closed on an
+  unreadable manifest — CONV-8, never a silent skip) and the verdict carries
+  `held_vps_files`/`held_vps_count`. This closes the gap where a release
+  failure was visible only in `vps_drain.log`, not the alert trail.
+- 2026-08-14: OPS-15 — the storage budget is watched forward-lookingly.
+  `storage_budget_alert`/`project_storage` (`ops/src/storage.rs`, pure,
+  clock-injected PD-3) derive the daily corpus sizes from the
+  `{YYYYMMDD}_*.log` file names — read-only, W-6, no state file, current
+  partial day excluded — take a trailing-window mean daily addition rate
+  (default 7 days), and fire `storage-budget` (P2) when the projection lands
+  within the alert horizon (default 14 days) or the corpus is already
+  at/over the cap; flat/shrinking data is never an alert. The budget is
+  explicit config (`--cap-bytes` / `MP_STORAGE_BUDGET_BYTES`): an
+  unconfigured budget fails closed (exit 2) rather than silently skipping.
+  This is the spec 001 appendix's "disk budget" revisit trigger, wired — the
+  current-usage `disk-high` (OPS-7) stays as-is; the two alerts are
+  complementary (now vs projected). Delivery mirrors OPS-14: P2 breaks
+  through quiet hours (OPS-9); daily cadence via
+  `systemd/storage-budget.timer` (VPS) and a best-effort hook in
+  `daily_pipeline.ps1` (the recording host).
 - 2026-08-06: **P1 webhook egress is WIRED but dead until credentials** (audit
   08-04 #3/#9 close): `post_p1_webhook` is reachable from a shipped binary via
   `mp-ops p1-webhook --id --detail [--ts-ns]` — with `MP_OPS_P1_WEBHOOK` set it

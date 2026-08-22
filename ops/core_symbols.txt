@@ -1,9 +1,12 @@
 # Core recordings for the Phase-0 promotion gate (SINGLE SOURCE OF TRUTH).
 #
-# One recording per line as `venue:SYMBOL`.  Loaded by BOTH the collector
-# watchdog (ops/watchdog_collectors.ps1) and the daily integrity pipeline
-# (ops/scripts/daily_pipeline.ps1), so the set that is recorded and the set
-# that is required on each day's scorecard can never drift out of sync.
+# One recording per line as `venue:SYMBOL`.  Loaded by the daily integrity
+# pipeline (ops/scripts/daily_pipeline.ps1) as the gate's REQUIRED set.  Since
+# the 2026-08-18 §6 handoff the Windows watchdog (ops/watchdog_collectors.ps1)
+# is retired and no Windows collector runs: hyperliquid files in the master
+# corpus now arrive via the 01:00 VPS drain, and the gate at 07:30 UTC audits
+# the drained copies (after the slow-link transfer's realistic completion).  (The VPS side records the bybit legs too — see its
+# daily_maintenance.sh RECORDINGS; they are not Windows-gate-required.)
 #
 # 2026-08-08: this host's egress is geo-filtered by Binance futures
 # (spec 024 incident) — Binance can never produce promotable days from this
@@ -35,6 +38,6 @@
 # Disk cost: keep recorded market data on a dedicated backed-up drive (W-6),
 # NOT under ~/Downloads.
 #
-# Edit freely, then restart the watchdog to pick up changes.
+# Edit freely (no watchdog to restart since the 2026-08-18 handoff).
 hyperliquid:BTC
 hyperliquid:ETH

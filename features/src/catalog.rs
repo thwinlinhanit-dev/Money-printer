@@ -105,10 +105,7 @@ impl TickFeature for FootprintDelta {
         format!("footprint.delta.{}.{}", tf_label(self.tf_ns), self.bucket)
     }
     fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
-        if let MarketEvent::Trade {
-            price, qty, side, ..
-        } = ev.body
-        {
+        if let Some((price, qty, side, _, _)) = ev.body.trade_view() {
             self.acc
                 .on_trade(ev.recv_ts_ns, price, qty, side)
                 .map(|(d, _, _)| d)
@@ -140,10 +137,7 @@ impl TickFeature for FootprintImbalance {
         format!("footprint.imb.{}.{}", tf_label(self.tf_ns), self.bucket)
     }
     fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
-        if let MarketEvent::Trade {
-            price, qty, side, ..
-        } = ev.body
-        {
+        if let Some((price, qty, side, _, _)) = ev.body.trade_view() {
             self.acc
                 .on_trade(ev.recv_ts_ns, price, qty, side)
                 .and_then(|(_, b, s)| {
@@ -174,7 +168,7 @@ impl TickFeature for Cvd {
         format!("cvd.{}", self.venue.slug())
     }
     fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
-        if let MarketEvent::Trade { qty, side, .. } = ev.body {
+        if let Some((_, qty, side, _, _)) = ev.body.trade_view() {
             self.cvd += match side {
                 Side::Buy => qty,
                 Side::Sell => -qty,
@@ -234,10 +228,7 @@ impl TickFeature for WhalePrint {
         if ev.venue != self.venue {
             return None;
         }
-        if let MarketEvent::Trade {
-            price, qty, side, ..
-        } = ev.body
-        {
+        if let Some((price, qty, side, _, _)) = ev.body.trade_view() {
             let notional = price * qty;
             if notional >= self.floor_usd {
                 let signed = match side {
@@ -580,6 +571,126 @@ impl TickFeature for BookDepth {
     }
 }
 
+/// `microprice.{venue}` — microprice of the top of book
+/// `(bid_qty × ask_price + ask_qty × bid_price) / (bid_qty + ask_qty)`: the
+/// qty-weighted mid the next trade is expected to land on (best-ask fills at
+/// bid price when ask qty dominates, and vice versa). Emits when the book
+/// changes; silent while the book is stale or one-sided (FEA-8).
+pub struct Microprice {
+    book: BookMirror,
+    venue: Venue,
+}
+impl Microprice {
+    pub fn for_venue(venue: Venue) -> Self {
+        Self {
+            book: BookMirror::new(),
+            venue,
+        }
+    }
+}
+impl TickFeature for Microprice {
+    fn id(&self) -> String {
+        format!("microprice.{}", self.venue.slug())
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if ev.venue != self.venue || !self.book.apply(&ev.body) {
+            return None;
+        }
+        if self.book.is_stale() {
+            return None; // FEA-8: never read a gapped book
+        }
+        let (bid_px, bid_qty) = self.book.best_bid()?;
+        let (ask_px, ask_qty) = self.book.best_ask()?;
+        let total = bid_qty + ask_qty;
+        if total > 0.0 {
+            Some((bid_qty * ask_px + ask_qty * bid_px) / total)
+        } else {
+            None
+        }
+    }
+}
+
+/// `spread.bp.{venue}` — top-of-book quoted spread in basis points of mid:
+/// `(ask − bid) / mid × 10_000`. Wide-spread regimes destroy short-horizon
+/// predictability (microstructure research, arXiv 2602.00776) — the regime
+/// feature below flags them for gating. Emits when the book changes; silent
+/// while stale or one-sided (FEA-8).
+pub struct SpreadBp {
+    book: BookMirror,
+    venue: Venue,
+}
+impl SpreadBp {
+    pub fn for_venue(venue: Venue) -> Self {
+        Self {
+            book: BookMirror::new(),
+            venue,
+        }
+    }
+}
+impl TickFeature for SpreadBp {
+    fn id(&self) -> String {
+        format!("spread.bp.{}", self.venue.slug())
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if ev.venue != self.venue || !self.book.apply(&ev.body) {
+            return None;
+        }
+        if self.book.is_stale() {
+            return None; // FEA-8: never read a gapped book
+        }
+        let (bid_px, _) = self.book.best_bid()?;
+        let (ask_px, _) = self.book.best_ask()?;
+        let mid = self.book.mid()?;
+        if mid > 0.0 {
+            Some((ask_px - bid_px) / mid * 10_000.0)
+        } else {
+            None
+        }
+    }
+}
+
+/// `spread.regime.{venue}` — wide-spread regime flag: 1.0 when the quoted
+/// spread (in bps of mid) is ≥ `wide_bps`, else 0.0. Pure feature-regime
+/// gate for strategies (microstructure predictability collapses in wide
+/// regimes); threshold is config (`microstructure.wide_spread_bps`).
+/// Emits when the book changes; silent while stale or one-sided (FEA-8).
+pub struct SpreadRegime {
+    book: BookMirror,
+    venue: Venue,
+    wide_bps: f64,
+}
+impl SpreadRegime {
+    pub fn for_venue(venue: Venue, wide_bps: f64) -> Self {
+        Self {
+            book: BookMirror::new(),
+            venue,
+            wide_bps: wide_bps.max(0.0),
+        }
+    }
+}
+impl TickFeature for SpreadRegime {
+    fn id(&self) -> String {
+        format!("spread.regime.{}", self.venue.slug())
+    }
+    fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
+        if ev.venue != self.venue || !self.book.apply(&ev.body) {
+            return None;
+        }
+        if self.book.is_stale() {
+            return None; // FEA-8: never read a gapped book
+        }
+        let (bid_px, _) = self.book.best_bid()?;
+        let (ask_px, _) = self.book.best_ask()?;
+        let mid = self.book.mid()?;
+        if mid > 0.0 {
+            let bp = (ask_px - bid_px) / mid * 10_000.0;
+            Some(if bp >= self.wide_bps { 1.0 } else { 0.0 })
+        } else {
+            None
+        }
+    }
+}
+
 /// `tape.bps_delta` — per-trade price change vs the previous trade on the
 /// symbol, in basis points. Emitted only when |Δ| ≥ `min_bps` (default 0.5) —
 /// OpenMarket's tape hides sub-half-bps ticks as noise; first trade of a
@@ -590,7 +701,10 @@ pub struct TapeBpsDelta {
 }
 impl TapeBpsDelta {
     pub fn new(min_bps: f64) -> Self {
-        Self { last: None, min_bps }
+        Self {
+            last: None,
+            min_bps,
+        }
     }
 }
 impl Default for TapeBpsDelta {
@@ -603,7 +717,7 @@ impl TickFeature for TapeBpsDelta {
         "tape.bps_delta".into()
     }
     fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64> {
-        if let MarketEvent::Trade { price, .. } = ev.body {
+        if let Some((price, _, _, _, _)) = ev.body.trade_view() {
             let d = match self.last {
                 Some(p) if p > 0.0 => (price - p) / p * 10_000.0,
                 _ => 0.0,

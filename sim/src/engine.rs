@@ -6,7 +6,7 @@ use crate::account::Accountant;
 use crate::decision_log::DecisionLog;
 use crate::error::SimError;
 use crate::fills::{FillModel, FillParams, Pending, PendingBook, PendingKind, ProducedFill};
-use crate::metrics::Metrics;
+use crate::metrics::{bars_per_year, Metrics};
 use mp_core::{
     BookMirror, Clock, EventEnvelope, Fill, IntentId, MarketEvent, OrderIntent, OrderKind, Side,
     SimClock, SizeUnit, SplitMix64, SymbolId, Venue,
@@ -26,6 +26,10 @@ pub struct SimConfig {
     pub fill_model: FillModel,
     pub latency_ns: i64,
     pub taker_fee: f64,
+    /// Fee on maker-priced fills (resting limits, L0 bar fills). Spec 005 cost
+    /// model: `fee = notional × fee_rate(venue, maker|taker)` — maker fills
+    /// were previously charged the taker fee (audit fix-all 2026-08-17).
+    pub maker_fee: f64,
     pub slip_frac: f64,
     pub participation: f64,
     pub queue_share: f64,
@@ -47,6 +51,7 @@ impl Default for SimConfig {
             fill_model: FillModel::default(),
             latency_ns: 150_000_000,
             taker_fee: 0.00055,
+            maker_fee: 0.0002,
             slip_frac: 0.0001,
             participation: 0.5,
             queue_share: 0.25,
@@ -72,6 +77,12 @@ impl Default for SimConfig {
                 // `risk.toml` (the gate's own `RiskLimits::default()` is finite).
                 strategy_daily_loss_budget: f64::INFINITY,
                 portfolio_daily_loss_budget: f64::INFINITY,
+                // SWG-6 (spec 035): simulator-loose breadth/correlation caps,
+                // same spirit as the INFINITE loss budgets above — the backtest
+                // measures the strategy's edge, not the portfolio thermostat.
+                // Live/paper sets finite values in `risk.toml`.
+                max_concurrent_positions: 1_000,
+                max_corr_adjusted_portfolio: 10_000_000.0,
             },
         }
     }
@@ -83,9 +94,13 @@ struct SimCtx {
     equity: f64,
     positions: BTreeMap<SymbolId, f64>,
     rng: SplitMix64,
-    queued_timers: Vec<(i64, TimerId)>,
+    /// (fire_at_ns, timer_id, owning strategy idx) — attribution lets the
+    /// engine defer a bar-close strategy's timer to the next bar boundary
+    /// (SWG-7) instead of silently dropping it.
+    queued_timers: Vec<(i64, TimerId, usize)>,
     next_timer: u64,
     logs: Vec<String>,
+    strat_idx: usize,
 }
 
 impl Ctx for SimCtx {
@@ -104,7 +119,8 @@ impl Ctx for SimCtx {
     fn set_timer(&mut self, after_ns: i64) -> TimerId {
         self.next_timer += 1;
         let id = TimerId(self.next_timer);
-        self.queued_timers.push((self.now + after_ns, id));
+        self.queued_timers
+            .push((self.now + after_ns, id, self.strat_idx));
         id
     }
     fn log(&mut self, msg: &str) {
@@ -140,7 +156,7 @@ pub struct Backtester {
     strat_rngs: Vec<SplitMix64>,
     seq: u64,
     next_intent: u128,
-    pending_timers: Vec<(i64, TimerId)>,
+    pending_timers: Vec<(i64, TimerId, usize)>,
     next_timer_id: u64,
     /// Venue contract multiplier ($ notional per contract) per symbol; 1.0 = spot/linear.
     contract_mult: BTreeMap<SymbolId, f64>,
@@ -153,6 +169,10 @@ pub struct Backtester {
     hold_start: BTreeMap<SymbolId, i64>,
     /// Strategy that produced each pending intent (fill log attribution, audit H2).
     intent_strategy: BTreeMap<u128, String>,
+    /// SWG-5: last observed bar epoch (`recv_ts_ns / bar_tf_ns`). Equity is
+    /// sampled for bar-return Sharpe once per bar boundary (the first event
+    /// seeds the baseline without contributing a return).
+    last_bar_epoch: i64,
 }
 
 impl Backtester {
@@ -207,6 +227,7 @@ impl Backtester {
             funding_count: BTreeMap::new(),
             hold_start: BTreeMap::new(),
             intent_strategy: BTreeMap::new(),
+            last_bar_epoch: i64::MIN,
         }
     }
 
@@ -257,6 +278,7 @@ impl Backtester {
             expectancy: self.metrics.expectancy(),
             stress_expectancy_2x: self.stress_expectancy_2x(),
             max_drawdown: self.metrics.max_drawdown,
+            sharpe: self.metrics.sharpe(bars_per_year(self.cfg.bar_tf_ns)),
         }
     }
 
@@ -288,6 +310,15 @@ impl Backtester {
             self.clock.set(ev.recv_ts_ns);
             self.on_event(&ev);
             self.metrics.sample_equity(self.acct.equity());
+            // SWG-5: sample equity once per bar boundary for bar-return Sharpe.
+            // Uses the same bar timeframe as the fill model so a daily/4h bar
+            // replay reports a daily/4h Sharpe, not an event-count one.
+            let bar_tf = self.cfg.bar_tf_ns.max(1);
+            let epoch = ev.recv_ts_ns.div_euclid(bar_tf);
+            if epoch != self.last_bar_epoch {
+                self.last_bar_epoch = epoch;
+                self.metrics.record_bar_return(self.acct.equity());
+            }
         }
     }
 
@@ -352,6 +383,9 @@ impl Backtester {
         match &ev.body {
             MarketEvent::Trade {
                 price, qty, side, ..
+            }
+            | MarketEvent::TradeWithAddr {
+                price, qty, side, ..
             } => {
                 self.latest_mark.insert(ev.symbol, *price);
                 self.acct.mark(ev.symbol, *price);
@@ -379,8 +413,10 @@ impl Backtester {
             self.acct.mark(ev.symbol, mid);
         }
 
-        if !matches!(ev.body, MarketEvent::Trade { .. })
-            && self.cfg.fill_model != FillModel::L0BarFill
+        if !matches!(
+            ev.body,
+            MarketEvent::Trade { .. } | MarketEvent::TradeWithAddr { .. }
+        ) && self.cfg.fill_model != FillModel::L0BarFill
         {
             let params = self.fill_params();
             let fills = self.pending.try_fill_market(
@@ -396,7 +432,12 @@ impl Backtester {
         }
 
         let now = ev.recv_ts_ns;
-        self.fire_timers(now);
+        // SWG-7: bar-boundary signal, same bar timeframe as the SWG-5 equity
+        // sampling (`last_bar_epoch` still holds the PREVIOUS event's epoch
+        // here — `stream()` updates it after `on_event`). Strategies with a
+        // bar-close cadence (`Daily`/`FourHour`) may act ONLY on bar close.
+        let at_bar_boundary = now.div_euclid(self.cfg.bar_tf_ns.max(1)) != self.last_bar_epoch;
+        self.fire_timers(now, at_bar_boundary);
 
         let ups = self.fe.on_event(ev);
         for u in ups {
@@ -411,6 +452,10 @@ impl Backtester {
             // feature name). Iteration order is registration order — deterministic
             // under an injected clock (PD-3).
             for i in 0..self.strats.len() {
+                if self.strats[i].rebalance_cadence().is_bar_close() && !at_bar_boundary {
+                    // SWG-7: a swing strategy evaluates on bar close ONLY.
+                    continue;
+                }
                 if !self.subscribed(i, &feat_name) {
                     continue;
                 }
@@ -445,24 +490,38 @@ impl Backtester {
         }
     }
 
-    fn fire_timers(&mut self, now: i64) {
-        self.pending_timers.sort_by_key(|&(t, _)| t);
+    fn fire_timers(&mut self, now: i64, at_bar_boundary: bool) {
+        self.pending_timers.sort_by_key(|&(t, _, _)| t);
         let mut still = Vec::new();
         let mut fired = Vec::new();
-        for (t, id) in self.pending_timers.drain(..) {
-            if t < now {
-                fired.push(id);
+        for (t, id, owner) in self.pending_timers.drain(..) {
+            // At-or-after semantics: a timer scheduled for `now` fires at this
+            // event, not the next one (audit fix-all 2026-08-17: `t < now` was
+            // an off-by-one that delayed every exact-time timer by one event).
+            if t <= now {
+                fired.push((t, id, owner));
             } else {
-                still.push((t, id));
+                still.push((t, id, owner));
             }
         }
         self.pending_timers = still;
-        for timer_id in fired {
+        let mut deferred = Vec::new();
+        for (_, id, owner) in fired {
+            if self.strats[owner].rebalance_cadence().is_bar_close() && !at_bar_boundary {
+                // SWG-7: a bar-close-cadence strategy's timer fired mid-bar —
+                // an execution decision is a bar decision, so defer it to the
+                // next bar boundary. NEVER silently dropped.
+                let bar_tf = self.cfg.bar_tf_ns.max(1);
+                let next_boundary = now.div_euclid(bar_tf) * bar_tf + bar_tf;
+                deferred.push((next_boundary, id, owner));
+                continue;
+            }
             // Dispatch the fired timer to every strategy; each only reacts to
             // its own opaque TimerIds, so there is no cross-strategy coupling.
-            let (mut intents, logs) = self.dispatch_all(now, |s, ctx| s.on_timer(timer_id, ctx));
+            let (mut intents, logs) = self.dispatch_all(now, |s, ctx| s.on_timer(id, ctx));
             self.record_dispatch(now, &mut intents, &logs);
         }
+        self.pending_timers.extend(deferred);
     }
 
     /// Deterministic, per-strategy dispatch of one event handler. Builds an
@@ -482,6 +541,7 @@ impl Backtester {
             queued_timers: Vec::new(),
             next_timer: self.next_timer_id,
             logs: Vec::new(),
+            strat_idx: idx,
         };
         let intents = f(self.strats[idx].as_mut(), &mut ctx);
         self.strat_rngs[idx] = SplitMix64::from_state(ctx.rng.state());
@@ -615,6 +675,33 @@ impl Backtester {
             .get(&intent.symbol)
             .copied()
             .unwrap_or(1.0);
+        // SWG-6 RG-12: distinct symbols currently holding a position (breadth
+        // slots). The gate counts only orders that OPEN a new slot.
+        let open_positions = self
+            .acct
+            .positions()
+            .values()
+            .filter(|q| q.abs() > 0.0)
+            .count() as u32;
+        // SWG-6 RG-13: correlation-adjusted exposure AFTER this order fills.
+        // The sim has no cross-asset correlation model (fixtures are
+        // single-asset), so it assumes the worst case — perfect correlation —
+        // under which the correlation-adjusted value equals the resulting gross
+        // notional (the same number RG-5 already guards). Live/paper callers
+        // with a correlation matrix use `mp_risk::correlation_adjusted_exposure`.
+        let mut resulting: BTreeMap<SymbolId, f64> = self.acct.positions().clone();
+        let signed = match intent.side {
+            Side::Buy => qty,
+            Side::Sell => -qty,
+        };
+        *resulting.entry(intent.symbol).or_insert(0.0) += signed;
+        let corr_adjusted_exposure_notional: f64 = resulting
+            .iter()
+            .map(|(s, q)| {
+                let m = self.contract_mult.get(s).copied().unwrap_or(1.0);
+                q.abs() * self.latest_mark.get(s).copied().unwrap_or(0.0) * m
+            })
+            .sum();
         let gate_input = GateInput {
             mode: Mode::Paper,
             venue: intent.venue,
@@ -633,6 +720,8 @@ impl Backtester {
             reduce_only: intent.reduce_only,
             contract_multiplier: mult,
             allowed: &self.allowed,
+            open_positions,
+            corr_adjusted_exposure_notional,
         };
         let verdict = evaluate(&self.cfg.limits, &self.kills, &gate_input);
         self.intent_ts.push(now);
@@ -663,12 +752,20 @@ impl Backtester {
 
     fn apply_produced_fill(&mut self, p: ProducedFill, now: i64) {
         let notional = p.price * p.qty;
-        let fee = notional * self.cfg.taker_fee;
+        // Spec 005 cost model: fee = notional × fee_rate(maker|taker) — maker
+        // fills are no longer charged the taker fee (audit fix-all 2026-08-17).
+        let fee = notional
+            * match p.liquidity {
+                mp_core::Liquidity::Maker => self.cfg.maker_fee,
+                mp_core::Liquidity::Taker => self.cfg.taker_fee,
+            };
         let signed = match p.side {
             Side::Buy => p.qty,
             Side::Sell => -p.qty,
         };
-        let outcome = self.acct.apply_fill(p.symbol, signed, p.price, fee);
+        let outcome = self
+            .acct
+            .apply_fill(p.symbol, signed, p.price, fee, p.optimism);
         let pos = self.acct.position(p.symbol);
         if pos != 0.0 {
             self.hold_start
@@ -677,9 +774,16 @@ impl Backtester {
         } else {
             self.hold_start.remove(&p.symbol);
         }
-        let net = outcome.realized_gross - outcome.attributed_fees;
+        // Per-trade NET P&L = gross − attributed fees − attributed funding
+        // (audit fix-all 2026-08-17: funding was invisible to expectancy —
+        // a carry edge paid out entirely in funding scored as flat).
+        let net = outcome.realized_gross - outcome.attributed_fees - outcome.attributed_funding;
         if outcome.closed_qty > 0.0 {
-            self.metrics.record_trade_with_optimism(net, p.optimism);
+            // Trade-level tag = worst-case across the position's legs, so a
+            // maker-optimistic entry is never re-tagged by a conservative
+            // exit (B4: the G1 gate must see entry-leg optimism).
+            self.metrics
+                .record_trade_with_optimism(net, outcome.optimism);
             self.trade_pnls.push((self.clock.now_ns(), net));
         }
 

@@ -3,8 +3,8 @@
 //! shapes — real captures replace them to close COL-13 (spec 002 Decisions).
 
 use mp_collectors::{
-    BinanceNormalizer, CoinbaseNormalizer, HyperliquidNormalizer, KrakenNormalizer, Normalizer,
-    OkxNormalizer,
+    BinanceNormalizer, CoinbaseNormalizer, EtherscanNormalizer, HyperliquidNormalizer,
+    KrakenNormalizer, Normalizer, OkxNormalizer,
 };
 use mp_core::{EventEnvelope, MarketEvent, Side, SnapshotReason, StatusKind};
 
@@ -15,10 +15,8 @@ fn norm(n: &mut dyn Normalizer, recv: i64, json: &str) -> Vec<EventEnvelope> {
 }
 
 fn trade_of(e: &EventEnvelope) -> (f64, f64, Side) {
-    match e.body {
-        MarketEvent::Trade {
-            price, qty, side, ..
-        } => (price, qty, side),
+    match e.body.trade_view() {
+        Some((price, qty, side, _, _)) => (price, qty, side),
         _ => panic!("expected Trade, got {:?}", e.body),
     }
 }
@@ -194,9 +192,28 @@ fn col_5_hyperliquid_trade_book_and_ctx() {
     let t = norm(
         &mut n,
         1,
-        r#"{"channel":"trades","data":[{"coin":"BTC","side":"A","px":"50000","sz":"0.3","time":1,"tid":42}]}"#,
+        r#"{"channel":"trades","data":[{"coin":"BTC","side":"A","px":"50000","sz":"0.3","time":1,"tid":42,"users":["0xabc123"]}]}"#,
     );
     assert_eq!(trade_of(&t[0]), (50000.0, 0.3, Side::Sell));
+    // spec 033 WAL-1: the taker wallet survives into TradeWithAddr.
+    match &t[0].body {
+        MarketEvent::TradeWithAddr { taker_addr, .. } => {
+            assert_eq!(taker_addr, "0xabc123")
+        }
+        other => panic!("expected TradeWithAddr, got {other:?}"),
+    }
+
+    // WAL-4: a payload without `users` records an empty address, never a
+    // synthetic one.
+    let t2 = norm(
+        &mut n,
+        2,
+        r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"50001","sz":"0.1","time":2,"tid":43}]}"#,
+    );
+    match &t2[0].body {
+        MarketEvent::TradeWithAddr { taker_addr, .. } => assert_eq!(taker_addr, ""),
+        other => panic!("expected TradeWithAddr, got {other:?}"),
+    }
 
     let b = norm(
         &mut n,
@@ -225,4 +242,115 @@ fn col_5_hyperliquid_trade_book_and_ctx() {
     assert!(c
         .iter()
         .any(|e| matches!(e.body, MarketEvent::OpenInterest { .. })));
+}
+
+// ---- spec 033 wallet identity (WAL-1..5) ------------------------------------
+// Hyperliquid's `trades` channel carries `users[]`; the first element is the
+// taker wallet (opaque 0x id). Venues without wallet identity keep emitting
+// plain `Trade`.
+
+#[test]
+fn wal_1_hyperliquid_trades_emit_tradewithaddr() {
+    let mut n = HyperliquidNormalizer::new();
+    let t = norm(
+        &mut n,
+        1,
+        r#"{"channel":"trades","data":[{"coin":"BTC","side":"A","px":"50000","sz":"0.3","time":1,"tid":42,"users":["0xabc123"]}]}"#,
+    );
+    assert!(matches!(t[0].body, MarketEvent::TradeWithAddr { .. }));
+}
+
+#[test]
+fn wal_2_users_first_element_is_taker_wallet() {
+    let mut n = HyperliquidNormalizer::new();
+    let t = norm(
+        &mut n,
+        1,
+        r#"{"channel":"trades","data":[{"coin":"BTC","side":"A","px":"50000","sz":"0.3","time":1,"tid":42,"users":["0xabc123","0xdef456"]}]}"#,
+    );
+    match &t[0].body {
+        MarketEvent::TradeWithAddr { taker_addr, .. } => {
+            assert_eq!(
+                taker_addr, "0xabc123",
+                "users[0] is the taker wallet (WAL-2)"
+            )
+        }
+        other => panic!("expected TradeWithAddr, got {other:?}"),
+    }
+}
+
+#[test]
+fn wal_3_taker_addr_stays_opaque_0x_identifier() {
+    let mut n = HyperliquidNormalizer::new();
+    let t = norm(
+        &mut n,
+        1,
+        r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"50001","sz":"0.2","time":2,"tid":43,"users":["0xdeadbeef"]}]}"#,
+    );
+    match &t[0].body {
+        MarketEvent::TradeWithAddr { taker_addr, .. } => {
+            assert_eq!(
+                taker_addr, "0xdeadbeef",
+                "opaque identifier passes verbatim (WAL-3)"
+            )
+        }
+        other => panic!("expected TradeWithAddr, got {other:?}"),
+    }
+}
+
+#[test]
+fn wal_4_no_users_in_frame_records_empty_address() {
+    let mut n = HyperliquidNormalizer::new();
+    let t = norm(
+        &mut n,
+        1,
+        r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"50002","sz":"0.1","time":3,"tid":44}]}"#,
+    );
+    match &t[0].body {
+        MarketEvent::TradeWithAddr { taker_addr, .. } => {
+            assert_eq!(
+                taker_addr, "",
+                "no users ⇒ empty address, never invented (WAL-4)"
+            )
+        }
+        other => panic!("expected TradeWithAddr, got {other:?}"),
+    }
+}
+
+#[test]
+fn wal_5_venues_without_wallet_identity_emit_plain_trade() {
+    let mut n = OkxNormalizer::new();
+    let t = norm(
+        &mut n,
+        1,
+        r#"{"arg":{"channel":"trades","instId":"BTC-USDT-SWAP"},"data":[{"instId":"BTC-USDT-SWAP","tradeId":"9","px":"50000","sz":"0.5","side":"buy","ts":"1699999999999"}]}"#,
+    );
+    assert!(matches!(t[0].body, MarketEvent::Trade { .. }));
+    let (_, _, _, _, addr) = t[0].body.trade_view().unwrap();
+    assert_eq!(addr, None, "no wallet identity ⇒ None address (WAL-5)");
+}
+
+// ---- spec 034 exchange netflow (NFL-5) --------------------------------------
+
+#[test]
+fn nfl_5_snapshots_only_no_synthesized_flows() {
+    let mut n = EtherscanNormalizer::new();
+    let a = norm(
+        &mut n,
+        1,
+        r#"{"address":"0x1","asset":"USDT","result":"100"}"#,
+    );
+    let b = norm(
+        &mut n,
+        2,
+        r#"{"address":"0x1","asset":"USDT","result":"90"}"#,
+    );
+    assert_eq!(a.len(), 1);
+    assert_eq!(b.len(), 1);
+    for e in a.iter().chain(&b) {
+        assert!(
+            matches!(e.body, MarketEvent::NetflowSnapshot { .. }),
+            "every payload yields exactly one snapshot, never a synthesized flow/delta (NFL-5)"
+        );
+    }
 }

@@ -10,6 +10,7 @@ Wants=network-online.target
 User=printer
 Group=printer
 EnvironmentFile=/etc/money-printer/venues.env
+WorkingDirectory=/opt/money-printer
 ExecStart=/opt/money-printer/bin/mp-collector --venue bybit --symbol %I
 Restart=always
 RestartSec=5

@@ -1,0 +1,24 @@
+# Swing-scoped Hyperliquid whale census (spec 028 WHL-8, spec 029 liq-est bands).
+# Higher-timeframe context: whale positioning + liquidation-distance bands are
+# a slow-moving, low-cadence signal — not tick data. Coin-filtered to the swing
+# universe (BTC/ETH/SOL) to bound volume. Public REST, no auth.
+# Run via .\swing_collectors.ps1 (supervised), or manually:
+#   cargo run -p mp-collectors --features live-http --bin mp-whale -- \
+#     --config collectors/swing/whale_positions.toml
+# Writes data/raw/{date}_hyperliquid_positions.log. Opaque 0x ids only (WHL-3).
+data_dir = "data"
+
+top_n = 50
+top_poll_interval_s = 60
+leaderboard_refresh_s = 3600
+
+watchlist = []
+watch_poll_interval_s = 30
+
+leaderboard_window = "7d"
+
+# Swing universe only — bound volume to the symbols we actually trade/study.
+symbols = ["BTC", "ETH", "SOL"]
+
+# Pacing between per-address REST fetches (Hyperliquid rate limits, WHL-1).
+min_poll_gap_ms = 150

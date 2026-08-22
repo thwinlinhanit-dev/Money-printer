@@ -1,7 +1,8 @@
 //! Provider construction and API-key resolution. Keys come **only** from the
 //! environment (PD-2: no secrets in the repo); this module reads them at the
 //! binary edge, off any decision path. See `providers.example.toml` for the
-//! model/env-var map an operator fills in.
+//! model/env-var map — an operator reference only; the crate loads no config
+//! file, the models/env vars are the constants in this module's providers.
 
 use crate::error::LlmError;
 use crate::provider::{LlmProvider, Provider};

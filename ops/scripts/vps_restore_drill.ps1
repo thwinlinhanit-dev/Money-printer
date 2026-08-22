@@ -86,14 +86,28 @@ if (Test-Path $scFile) {
 # ---- 2. byte identity vs the live VPS -----------------------------------------
 function Get-RemoteHashPrefix {
     param([string]$RemotePath, [int64]$Bytes)
+    # PS 5.1 EAP hazard (audit 2026-08-17): native stderr is a TERMINATING
+    # error under EAP=Stop even with 2>$null - override around the ssh call
+    # and check the exit code so a transient ssh stderr line cannot abort the
+    # drill mid-way.
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $out = & $ssh -i $SshKey -o BatchMode=yes -o StrictHostKeyChecking=accept-new `
         "$SshUser@$VpsHost" "head -c $Bytes $RemotePath | sha256sum" 2>$null
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $oldEap
+    if ($code -ne 0) { Fail "remote hash failed for $RemotePath (ssh exit $code)"; return "" }
     return ($out -join "").Trim().Split(" ")[0]
 }
 function Get-RemoteHash {
     param([string]$RemotePath)
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $out = & $ssh -i $SshKey -o BatchMode=yes -o StrictHostKeyChecking=accept-new `
         "$SshUser@$VpsHost" "sha256sum $RemotePath" 2>$null
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $oldEap
+    if ($code -ne 0) { Fail "remote hash failed for $RemotePath (ssh exit $code)"; return "" }
     return ($out -join "").Trim().Split(" ")[0]
 }
 

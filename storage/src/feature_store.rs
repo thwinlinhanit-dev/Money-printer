@@ -290,9 +290,8 @@ pub fn resolve_version(
             // whose `ver` component already equals this `feature_ver` (all
             // markers written before this change are ver=1-equivalent, so a
             // legacy marker is only "the same" when the version also matches).
-            let legacy_match = !existing.contains(':')
-                && existing == params_hash
-                && n == feature_ver;
+            let legacy_match =
+                !existing.contains(':') && existing == params_hash && n == feature_ver;
             if existing == key || legacy_match {
                 return Ok(n); // same params+version ⇒ reuse this version (idempotent)
             }

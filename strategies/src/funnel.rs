@@ -84,9 +84,12 @@ pub struct Transition {
 }
 
 impl Transition {
-    /// One JSONL journal line (`journal/funnel.log`).
+    /// One JSONL journal line (`journal/funnel.log`). A serialize failure is
+    /// journaled as an explicit error line rather than panicking (audit
+    /// fix-all 2026-08-17: no `expect` in non-test code).
     pub fn to_jsonl(&self) -> String {
-        serde_json::to_string(self).expect("transition serializes")
+        serde_json::to_string(self)
+            .unwrap_or_else(|e| format!("{{\"error\": \"transition serialize failed: {e}\"}}"))
     }
 }
 

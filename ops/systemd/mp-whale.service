@@ -1,0 +1,26 @@
+# Hyperliquid whale-position census unit (spec 028, WHL-1..WHL-7): public
+# REST leaderboard + watchlist polls -> {date}_hyperliquid_positions.log.
+# Not a Phase-0 gate recording (feeds whale.net/delta features + liq-est
+# research). Public data only (PD-1) - no order path, no auth.
+[Unit]
+Description=Money Printer hyperliquid whale-position census (spec 028)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printer
+Group=printer
+EnvironmentFile=/etc/money-printer/venues.env
+WorkingDirectory=/opt/money-printer
+ExecStart=/opt/money-printer/bin/mp-whale --config collectors/whale_positions.toml
+Restart=always
+RestartSec=2
+MemoryMax=512M
+CPUQuota=50%
+LimitNOFILE=65536
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/data
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

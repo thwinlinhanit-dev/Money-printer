@@ -1,0 +1,15 @@
+﻿{
+    "artifacts":  [
+                      {
+                          "size":  2000000,
+                          "rel":  "ops\\offhost-drill-src\\raw\\20260812_hyperliquid_BTC.log"
+                      },
+                      {
+                          "size":  199,
+                          "rel":  "journal\\telegram\\delivered.jsonl"
+                      }
+                  ],
+    "skipped":  [
+
+                ]
+}

@@ -12,7 +12,8 @@ Unified LLM provider abstraction for research brief generation and analysis. Sup
 - `src/gemini.rs` — Gemini API client
 - `src/openai_family.rs` — OpenAI-compatible client
 - `src/openai_compat.rs` — OpenAI compatibility layer
-- `src/config.rs` — provider configuration
+- `src/config.rs` — provider construction and key resolution (no config file)
+- `providers.example.toml` — operator reference for the provider model/env map (NOT loaded by the crate; mirrors the compile-time constants in `src/*.rs`; no secrets — PD-2)
 - `src/error.rs` — error types
 - `src/grounding.rs` — response grounding/validation
 - `src/http.rs` — HTTP transport

@@ -20,11 +20,10 @@
 
 use mp_core::Venue;
 use mp_features::FeaturesConfig;
-use mp_sim::{check_day, DeterminismConfig, ReplaySummary};
-use mp_storage::{app_version, load_logs_merged, write_determinism, DeterminismArtifact};
+use mp_sim::{check_day_streamed, DeterminismConfig, ReplaySummary};
+use mp_storage::{app_version, stream_logs_merged, write_determinism, DeterminismArtifact};
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
@@ -39,23 +38,13 @@ fn flags(args: &[String], name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Evidence timestamp for the artifact (the check is an ops edge; the stamp
-/// is metadata, never a decision input — PD-3).
-fn now_ns() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as i64
-}
-
 fn run_args(args: &[String]) -> Result<ExitCode, String> {
     if args.iter().any(|a| a == "--version") {
         println!("{}", app_version("mp-determinism"));
         return Ok(ExitCode::SUCCESS);
     }
-    let date_raw = flag(args, "--date").ok_or(
-        "usage: mp-determinism --date YYYY-MM-DD --required venue:symbol ... [--write]",
-    )?;
+    let date_raw = flag(args, "--date")
+        .ok_or("usage: mp-determinism --date YYYY-MM-DD --required venue:symbol ... [--write]")?;
     let date = date_raw.replace('-', "");
     if date.len() != 8 {
         return Err("--date must be YYYY-MM-DD or YYYYMMDD".into());
@@ -82,18 +71,24 @@ fn run_args(args: &[String]) -> Result<ExitCode, String> {
         req_pairs.push((v.to_string(), s.to_string()));
     }
 
-    // 2. Load + remap + merge — the materializer's EXACT loader, so the replay
-    //    consumes the same canonical event stream the feature store does.
-    let loaded = load_logs_merged(&log_paths)?;
-    if loaded.events.is_empty() {
-        return Err(format!("no events recorded for {dashed} in the required set"));
+    // 2. Streaming load — the materializer's EXACT loader semantics (same
+    //    canonical sort/merge/remap) but frame-by-frame, never materializing
+    //    the day: on the 952 MB VPS box the eager merge OOM-killed this
+    //    binary mid-replay, and the check cannot slice the day without
+    //    changing the decision stream. Each replay run re-opens the logs and
+    //    re-streams them, so the two fresh runs share nothing.
+    let mut probe = stream_logs_merged(&log_paths)?;
+    if probe.next().is_none() {
+        return Err(format!(
+            "no events recorded for {dashed} in the required set"
+        ));
     }
 
     // 3. Universe = the required (venue, symbol) pairs resolved onto the
     //    SHARED table (ids were re-interned across logs, EVT-8).
     let mut venues: Vec<Venue> = Vec::new();
     let mut symbols: Vec<mp_core::SymbolId> = Vec::new();
-    for m in loaded.symbols.metas() {
+    for m in probe.symbols.metas() {
         if req_pairs
             .iter()
             .any(|(v, s)| m.venue.slug() == *v && m.venue_symbol == *s)
@@ -120,7 +115,8 @@ fn run_args(args: &[String]) -> Result<ExitCode, String> {
         }
         None => DeterminismConfig::defaults(),
     };
-    let fe_cfg_path = flag(args, "--features-config").unwrap_or_else(|| "features/features.toml".into());
+    let fe_cfg_path =
+        flag(args, "--features-config").unwrap_or_else(|| "features/features.toml".into());
     let fe_text = std::fs::read_to_string(&fe_cfg_path)
         .map_err(|e| format!("read features config {fe_cfg_path}: {e}"))?;
     let fe_cfg = FeaturesConfig::from_toml(&fe_text).map_err(|e| e.to_string())?;
@@ -131,8 +127,8 @@ fn run_args(args: &[String]) -> Result<ExitCode, String> {
     //    check proves self-determinism only).
     let live = match flag(args, "--live-log") {
         Some(p) => {
-            let text = std::fs::read_to_string(&p)
-                .map_err(|e| format!("read live log {p}: {e}"))?;
+            let text =
+                std::fs::read_to_string(&p).map_err(|e| format!("read live log {p}: {e}"))?;
             Some(
                 serde_json::from_str::<ReplaySummary>(&text)
                     .map_err(|e| format!("parse live log {p}: {e}"))?,
@@ -141,8 +137,17 @@ fn run_args(args: &[String]) -> Result<ExitCode, String> {
         None => None,
     };
 
-    // 6. The check (two fresh runs + optional live identity).
-    let v = check_day(&dashed, &loaded.events, &venues, &symbols, &dcfg, &fe_cfg, live.as_ref())?;
+    // 6. The check (two fresh runs + optional live identity). Each run
+    //    re-opens and re-streams the logs — fresh, independent event sources.
+    let v = check_day_streamed(
+        &dashed,
+        || stream_logs_merged(&log_paths),
+        &venues,
+        &symbols,
+        &dcfg,
+        &fe_cfg,
+        live.as_ref(),
+    )?;
 
     // 7. Write the gate artifact (the promotion gate reads `passed` + `date`).
     if args.iter().any(|a| a == "--write") {
@@ -158,7 +163,7 @@ fn run_args(args: &[String]) -> Result<ExitCode, String> {
             replayed_lines: Some(v.replayed_lines as u64),
             replayed_hash: Some(v.replayed_hash),
             reason: Some(v.reason.clone()),
-            ts_ns: Some(now_ns()),
+            ts_ns: Some(v.max_recv_ts_ns),
         };
         let path = write_determinism(&Path::new(&data_dir).join("scorecards"), &artifact)?;
         eprintln!("wrote {}", path.display());

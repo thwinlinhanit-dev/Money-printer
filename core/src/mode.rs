@@ -26,7 +26,18 @@ impl TradingMode {
     /// Overridable via `MONEY_PRINTER_MODE` env var.
     pub fn from_config() -> Self {
         if let Ok(val) = std::env::var("MONEY_PRINTER_MODE") {
-            return Self::from_str(&val);
+            let mode = Self::from_str(&val);
+            if mode == TradingMode::Live {
+                // MOD-12: the env var is a development override and can NEVER
+                // select live by itself (PD-1: human confirmation only, via the
+                // operator-owned mode.toml and the funnel's human gate).
+                // Fail closed: refuse and fall back to Sleep, loudly.
+                tracing::warn!(
+                    "MONEY_PRINTER_MODE=live refused: live requires human confirmation (MOD-12); defaulting to Sleep"
+                );
+                return TradingMode::Sleep;
+            }
+            return mode;
         }
         #[cfg(target_os = "windows")]
         let path = {
@@ -128,5 +139,23 @@ mod tests {
         // Verify that string parsing is case-insensitive.
         assert_eq!(TradingMode::from_str("LIVE"), TradingMode::Live);
         assert_eq!(TradingMode::from_str("Paper"), TradingMode::Paper);
+    }
+
+    #[test]
+    fn mod_12_live_requires_human_confirmation() {
+        // MOD-12: an env var ALONE must never select Live (PD-1) — the env
+        // override is a development path; live requires the operator-owned
+        // mode.toml (outside the repo) plus the funnel's human gate.
+        std::env::set_var("MONEY_PRINTER_MODE", "live");
+        assert_eq!(
+            TradingMode::from_config(),
+            TradingMode::Sleep,
+            "env var alone must not select live (MOD-12)"
+        );
+        std::env::remove_var("MONEY_PRINTER_MODE");
+        // Development overrides below live remain available.
+        std::env::set_var("MONEY_PRINTER_MODE", "paper");
+        assert_eq!(TradingMode::from_config(), TradingMode::Paper);
+        std::env::remove_var("MONEY_PRINTER_MODE");
     }
 }

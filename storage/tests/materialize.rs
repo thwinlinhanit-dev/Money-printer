@@ -3,12 +3,14 @@
 //! verifying layout, round-trip, determinism, W-6 versioning, multi-log
 //! symbol remap + EVT-5 merge, and the `mp-materialize` CLI.
 
-use mp_core::event::{EventEnvelope, MarketEvent, Side, Venue};
+use mp_core::event::{EventEnvelope, MarketEvent, Side, StatusKind, Venue};
 use mp_core::log::EventLogWriter;
 use mp_core::{SymbolId, SymbolTable};
 use mp_features::FeaturesConfig;
 use mp_storage::feature_store::{read_feature_meta, read_features};
-use mp_storage::{materialize_logs, materialize_logs_limited};
+use mp_storage::{
+    load_logs_merged, materialize_logs, materialize_logs_limited, stream_logs_merged,
+};
 use std::path::{Path, PathBuf};
 
 /// One Bybit day (2026-07-11) with trades/funding/OI in recv order.
@@ -188,10 +190,13 @@ fn mat_6_liq_flow_features_materialize_from_liquidation_log() {
             reason: mp_core::SnapshotReason::Init,
         },
     )];
-    for (i, (price, qty, side)) in
-        [(100.0, 2.0, Side::Buy), (101.0, 3.0, Side::Sell), (99.0, 1.0, Side::Buy)]
-            .into_iter()
-            .enumerate()
+    for (i, (price, qty, side)) in [
+        (100.0, 2.0, Side::Buy),
+        (101.0, 3.0, Side::Sell),
+        (99.0, 1.0, Side::Buy),
+    ]
+    .into_iter()
+    .enumerate()
     {
         evs.push((
             DAY0 + (i as i64 + 1) * 1_000_000_000,
@@ -291,7 +296,7 @@ fn mat_6_cross_venue_liq_delta_materializes_from_two_logs() {
         files.iter().any(|p| p.to_string_lossy().contains(feat)),
         "{feat} parquet missing: {files:?}"
     );
-// One row per venue's liquidation, each stamped with the divergence AS OF
+    // One row per venue's liquidation, each stamped with the divergence AS OF
     // that event: bybit buy (t+1s, okx hasn't sold yet) → (500-0)-(0-0) =
     // 500; okx sell (t+2s) → (500-0)-(0-300) = 800. The cross-venue state
     // lives in ONE global instance across both symbols — the FEA-20 seam.
@@ -671,5 +676,189 @@ fn mat_5_ram_guard_rejects_oversized_corpus_before_reading() {
     assert!(err.contains("MP_MATERIALIZE_MAX_BYTES"), "{err}");
     assert!(err.to_lowercase().contains("slice"), "{err}");
     assert!(walk_parquet(&out).is_empty(), "guard must write nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- streaming loader (spec 018 determinism RAM guard) ----
+
+/// The streaming loader (frame-by-frame, never materializing) must emit the
+/// EXACT canonical stream the eager loader does — same order, same shared-id
+/// remap, same drop rules — or the determinism replay would measure a
+/// different decision stream than materialization (MAT-5 / EVT-8).
+#[test]
+fn evt_8_stream_merge_matches_eager_merge_order_and_remap() {
+    let dir = tmpdir("stream");
+    // Two logs whose LOCAL id 0 means different things (EVT-8 collision):
+    // A: BTCUSDT=0, ETHUSDT=1; B: BTCUSDT=0, SOLUSDT=1. Canonical sort (A < B)
+    // interns BTC=0, ETH=1, then SOL=2 — local ids must land on shared ids.
+    let mut ta = SymbolTable::new();
+    ta.intern_default(Venue::Bybit, "BTCUSDT");
+    ta.intern_default(Venue::Bybit, "ETHUSDT");
+    let mut tb = SymbolTable::new();
+    tb.intern_default(Venue::Bybit, "BTCUSDT");
+    tb.intern_default(Venue::Bybit, "SOLUSDT");
+    let log_a = dir.join("20260818_a.log");
+    let log_b = dir.join("20260818_b.log");
+    let t = |price: f64, id: u64| MarketEvent::Trade {
+        price,
+        qty: 1.0,
+        side: Side::Buy,
+        trade_id: id,
+    };
+    // Interleaved timestamps so the k-way merge actually interleaves sources.
+    write_log_at(
+        &log_a,
+        &ta,
+        &[
+            (DAY0 + 1_000_000_000, SymbolId(0), t(1.0, 1)), // BTC -> shared 0
+            (DAY0 + 3_000_000_000, SymbolId(1), t(2.0, 2)), // ETH -> shared 1
+        ],
+        Venue::Bybit,
+    );
+    write_log_at(
+        &log_b,
+        &tb,
+        &[
+            (DAY0 + 2_000_000_000, SymbolId(0), t(3.0, 3)), // BTC -> shared 0
+            (DAY0 + 4_000_000_000, SymbolId(1), t(4.0, 4)), // SOL -> shared 2
+        ],
+        Venue::Bybit,
+    );
+
+    let eager = load_logs_merged(&[log_a.clone(), log_b.clone()]).unwrap();
+    let mut streamed = stream_logs_merged(&[log_a, log_b]).unwrap();
+    let mut got = Vec::new();
+    while let Some(item) = streamed.next() {
+        let ev = item.unwrap();
+        got.push((ev.recv_ts_ns, ev.stream_seq, ev.symbol.0, ev.body));
+    }
+    let want: Vec<(i64, u64, u32, MarketEvent)> = eager
+        .events
+        .iter()
+        .map(|e| (e.recv_ts_ns, e.stream_seq, e.symbol.0, e.body.clone()))
+        .collect();
+    assert_eq!(
+        got, want,
+        "streamed order + remap must equal the eager loader"
+    );
+    assert!(
+        got.iter().any(|(_, _, id, _)| *id == 2),
+        "SOL's local id 1 must land on shared id 2 (EVT-8 remap)"
+    );
+    assert_eq!(streamed.events_read, got.len() as u64);
+    assert_eq!(eager.events_read, got.len() as u64);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A symbol-less log carrying only control/Status events streams to empty
+/// (same rule as the eager loader: drop control events, do not fail).
+#[test]
+fn stream_merge_symbol_less_log_drops_control_events() {
+    let dir = tmpdir("stream-nosym");
+    let log = dir.join("20260818_whale.log");
+    write_log_at(
+        &log,
+        &SymbolTable::new(),
+        &[
+            (
+                DAY0 + 1,
+                SymbolId(0),
+                MarketEvent::Status {
+                    kind: StatusKind::GapDetected,
+                    detail: String::new(),
+                },
+            ),
+            (
+                DAY0 + 2,
+                SymbolId(0),
+                MarketEvent::Status {
+                    kind: StatusKind::VenueHalt,
+                    detail: String::new(),
+                },
+            ),
+        ],
+        Venue::Hyperliquid,
+    );
+    let mut streamed = stream_logs_merged(&[log]).unwrap();
+    assert!(streamed.next().is_none(), "status-only log streams empty");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A symbol-less log carrying a DATA event fails closed, never silently
+/// drops (MAT-5 parity with the eager loader).
+#[test]
+fn stream_merge_fails_closed_on_data_event_without_symbols() {
+    let dir = tmpdir("stream-nosym-data");
+    let log = dir.join("20260818_whale.log");
+    write_log_at(
+        &log,
+        &SymbolTable::new(),
+        &[(
+            DAY0 + 1,
+            SymbolId(0),
+            MarketEvent::Trade {
+                price: 1.0,
+                qty: 1.0,
+                side: Side::Buy,
+                trade_id: 1,
+            },
+        )],
+        Venue::Hyperliquid,
+    );
+    let mut streamed = stream_logs_merged(&[log]).unwrap();
+    let err = streamed.next().unwrap().unwrap_err();
+    assert!(err.contains("corrupt log"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The merge writer path (mp-query merge) re-interns symbols onto a shared
+/// table and emits the same canonical event sequence as the eager loader —
+/// the merged log is the sim's multi-day replay input, so it must round-trip
+/// through `load_logs_merged` with identical events and a resolvable symbol
+/// table (MAT-5/EVT-8 parity).
+#[test]
+fn mat_5_merge_round_trips_shared_symbol_table() {
+    use mp_core::log::LogReader;
+
+    let dir = tmpdir("merge-roundtrip");
+    let log_a = dir.join("20260711_bybit_BTCUSDT.log");
+    let log_b = dir.join("20260712_bybit_ETHUSDT.log");
+    let mut ta = SymbolTable::new();
+    ta.intern_default(Venue::Bybit, "BTCUSDT");
+    write_log(&log_a, &ta, &trades(3, DAY0, 1.0));
+    let mut tb = SymbolTable::new();
+    tb.intern_default(Venue::Bybit, "ETHUSDT");
+    write_log(&log_b, &tb, &trades(3, DAY0 + 1_000_000_000, 1.0));
+
+    // Write the merged log exactly as mp-query merge does: shared table header
+    // + streamed canonical-order events.
+    let merged_log = dir.join("merged.log");
+    {
+        let merged = stream_logs_merged(&[log_a.clone(), log_b.clone()]).unwrap();
+        let mut w = EventLogWriter::open(&merged_log).unwrap().0;
+        w.write_symbols(merged.symbols.metas()).unwrap();
+        for ev in merged {
+            w.append(&ev.unwrap()).unwrap();
+        }
+        w.sync().unwrap();
+    }
+
+    // Round-trip through the eager loader: same events, same symbol count,
+    // ids resolve to the shared table (BTCUSDT id 0, ETHUSDT id 1).
+    let loaded = load_logs_merged(&[merged_log.clone()]).unwrap();
+    assert_eq!(loaded.events.len(), 6);
+    assert_eq!(loaded.symbols.metas().len(), 2);
+    assert_eq!(loaded.symbols.metas()[0].venue_symbol, "BTCUSDT");
+    assert_eq!(loaded.symbols.metas()[1].venue_symbol, "ETHUSDT");
+
+    // Re-opening as a plain log yields the same events (the writer produced a
+    // readable log, not a symbol-table-only header).
+    let mut reader = LogReader::open(&merged_log).unwrap();
+    reader.load_symbols().unwrap();
+    let replayed: Vec<_> = reader.collect::<Result<_, _>>().unwrap();
+    assert_eq!(replayed.len(), 6);
+    assert_eq!(replayed[0].recv_ts_ns, DAY0);
+    assert_eq!(replayed[5].recv_ts_ns, DAY0 + 3 * 1_000_000_000);
+
     let _ = std::fs::remove_dir_all(&dir);
 }

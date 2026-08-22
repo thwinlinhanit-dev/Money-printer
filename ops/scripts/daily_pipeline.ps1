@@ -2,9 +2,17 @@
 # Windows port of ops/scripts/daily_maintenance.sh, so the promotion gate can
 # advance on the native Windows host that actually runs the collectors.
 #
-# At 00:05 UTC the collectors have rotated yesterday's log (rotation happens at
-# UTC midnight), so the 00:05 window is the first moment yesterday is a closed,
-# auditable file.
+# The gate runs at 07:30 UTC — AFTER the 01:00 VPS drain has landed the closed
+# day's files into the master corpus. Since the 2026-08-18 §6 handoff the
+# hyperliquid recordings are VPS-canonical: the Windows host no longer records
+# them, so the drained VPS copies ARE the audited files. The gate must sit
+# past the slow-link transfer's realistic completion (a full closed day is
+# ~2.3 GiB and the 08-17 drain of the 08-16 files took ~4 h; the drain task
+# allows 8 h before it is killed and the per-file resume re-attempts next
+# run). The drain pulls the gate-required hyperliquid files FIRST so they
+# land earliest; a night where the drain still runs past the gate audits a
+# partially-landed day (honest DIRTY — the VPS gate at 00:05 UTC remains the
+# promotion authority, and the drain's resume completes the corpus next run).
 #
 # Flow (mirrors daily_maintenance.sh):
 #   1. scorecard  yesterday's recording matrix (all required streams and
@@ -21,7 +29,7 @@
 # Usage:
 #   .\ops\scripts\daily_pipeline.ps1                # run for yesterday (UTC)
 #   .\ops\scripts\daily_pipeline.ps1 -Date 2026-08-04   # backfill/re-check
-#   .\ops\scripts\daily_pipeline.ps1 -RegisterTask  # schedule at 00:05 UTC daily
+#   .\ops\scripts\daily_pipeline.ps1 -RegisterTask  # schedule at 07:30 UTC daily
 #   .\ops\scripts\daily_pipeline.ps1 -SkipCompact   # scorecard + verdict only
 
 param(
@@ -114,24 +122,31 @@ function Invoke-Native {
 #    so its output is captured and logged (audit 08-08: the scheduled task's
 #    window is hidden - a failure must be visible in pipeline.log).
 $guardrails = Join-Path $root "ops\ci\guardrails.ps1"
-if (Test-Path $guardrails) {
-    $gr = Invoke-Native -FilePath "powershell.exe" -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $guardrails)
-    foreach ($gline in @($gr[0])) {
-        $gs = ($gline | Out-String).Trim()
-        if ($gs -ne "") { Log $gs "INFO" }
-    }
-    if ($gr[1] -ne 0) {
-        Log "guardrails failed - the tree violates the rulebook (PD-1..4/W-7); fix before trusting today's scorecard" "ERROR"
-        Exit 1
-    }
-    Log "guardrails: all checks passed" "INFO"
+# Fail-closed (audit 2026-08-17): a MISSING guardrails script must not
+# silently skip the check - an unverifiable tree is an untrusted tree.
+if (-not (Test-Path $guardrails)) {
+    Log "guardrails script MISSING at $guardrails - cannot verify PD-1..4/W-7; refusing to trust today's scorecard" "ERROR"
+    Exit 1
 }
+$gr = Invoke-Native -FilePath "powershell.exe" -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $guardrails)
+foreach ($gline in @($gr[0])) {
+    $gs = ($gline | Out-String).Trim()
+    if ($gs -ne "") { Log $gs "INFO" }
+}
+if ($gr[1] -ne 0) {
+    Log "guardrails failed - the tree violates the rulebook (PD-1..4/W-7); fix before trusting today's scorecard" "ERROR"
+    Exit 1
+}
+Log "guardrails: all checks passed" "INFO"
 
 # ---- task registration ------------------------------------------------------
 if ($RegisterTask) {
-    # Schedule at the LOCAL wall-clock time that corresponds to 00:05 UTC, so
-    # the task really fires right after the collector's UTC-midnight rotation.
-    $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddMinutes(5), [DateTimeKind]::Utc)
+    # Schedule at the LOCAL wall-clock time that corresponds to 07:30 UTC.
+    # Handoff 2026-08-18: the audit moved from 00:05 to AFTER the 01:00 VPS
+    # drain (hyperliquid is VPS-canonical now; the drained files are what the
+    # gate audits), and a full day's transfer takes hours on the slow link,
+    # so the gate sits past its realistic completion (drain task limit 8 h).
+    $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(7).AddMinutes(30), [DateTimeKind]::Utc)
     $localAt = $utcTarget.ToLocalTime()
     # -At wants a DateTime (the date is ignored); passing the full local time
     # keeps the trigger pinned to the local wall-clock of 00:05 UTC.
@@ -147,8 +162,8 @@ if ($RegisterTask) {
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
             -Settings $settings -User $env:USERNAME -Force -ErrorAction Stop | Out-Null
         Write-Host "[OK] Registered $TaskName daily at $($localAt.ToString('HH:mm')) local (=$($utcTarget.ToString('HH:mm')) UTC)." -ForegroundColor Green
-        Write-Host "     DST note: after a clock change, re-run -RegisterTask to keep the 00:05 UTC window." -ForegroundColor Gray
-        Write-Host "     The script self-guards: it only runs the audit when UTC hour is 0-2." -ForegroundColor Gray
+        Write-Host "     DST note: after a clock change, re-run -RegisterTask to keep the 07:30 UTC window." -ForegroundColor Gray
+        Write-Host "     The script self-guards: it only runs the audit when UTC hour is 0-9." -ForegroundColor Gray
     } catch {
         Write-Host "[!!] Register-ScheduledTask failed: $($_.Exception.Message)" -ForegroundColor Red
         Exit 1
@@ -157,16 +172,38 @@ if ($RegisterTask) {
 }
 
 # ---- dead-man for the gate itself (OPS-17, runbook pipeline-stale) ----------
-# The 00:05 gate is one scheduled task; if THAT job silently dies, the streak
+# The 02:30 gate is one scheduled task; if THAT job silently dies, the streak
 # goes blind (blueprint failure-mode #6). Register a separate 00:15 UTC task
 # running `mp-ops pipeline-stale` — a P1 when yesterday's scorecard has not
 # landed. It is deliberately NOT part of this script: a watchdog must be
 # independent of the thing it watches.
 if ($RegisterStaleTask) {
-    $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddMinutes(15), [DateTimeKind]::Utc)
+    # Probe (audit 2026-08-17): a dead-man task registered against an mp-ops
+    # binary that predates the pipeline-stale subcommand (OPS-17) would error
+    # hourly while the P1 stays silent - the exact hole pipeline_stale_check.sh
+    # probes for. Mirror it: skip registration with a log line (safe to
+    # register once the tree is rebuilt).
+    if (-not (Test-Path $mpOps)) {
+        Log "pipeline-stale task NOT registered: mp-ops.exe missing (build it, then re-run -RegisterStaleTask)" "WARN"
+        Exit 0
+    }
+    $ErrorActionPreference = "Continue"
+    $staleUsage = (& $mpOps 2>&1 | Out-String)
+    $ErrorActionPreference = "Stop"
+    if ($staleUsage -notmatch "pipeline-stale") {
+        Log "pipeline-stale task NOT registered: mp-ops.exe predates the pipeline-stale subcommand (OPS-17) - rebuild, then re-run -RegisterStaleTask" "WARN"
+        Exit 0
+    }
+    # 08:15 UTC — after the 07:30 gate (handoff 2026-08-18: the gate moved
+    # after the 01:00 drain, so the stale deadline moved with it).
+    $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(8).AddMinutes(15), [DateTimeKind]::Utc)
     $localAt = $utcTarget.ToLocalTime()
     $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
-    $staleArgs = "-ExecutionPolicy Bypass -WindowStyle Hidden -Command & `"$mpOps`" pipeline-stale --telegram --webhook *>> `"$logFile`""
+        # Absolute --scorecards-dir (audit 2026-08-18): the task has no working
+    # directory, and pipeline-stale's default is CWD-relative — the dead-man
+    # false-fired a P1 every day even when the gate landed (reproduced from
+    # the task's default CWD: stale=true "no scorecard for YYYY-MM-DD").
+    $staleArgs = "-ExecutionPolicy Bypass -WindowStyle Hidden -Command & `"$mpOps`" pipeline-stale --scorecards-dir `"$scoreDir`" --telegram --webhook *>> `"$logFile`""
     $action  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $staleArgs
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -186,12 +223,13 @@ if ($RegisterStaleTask) {
 
 # ---- DST / clock-drift guard ------------------------------------------------
 # The daily trigger fires at a fixed local wall-clock; after a DST shift that
-# can land an hour away from 00:05 UTC. Only audit when we're within the UTC
-# midnight window; otherwise no-op (the next day's run catches up).
-# An explicit -Date is a manual/backfill run - the guard does not apply.
+# can land an hour away from 07:30 UTC. Only audit when we're within the UTC
+# 00:00-09:00 window (the 07:30 gate plus DST tolerance); otherwise no-op
+# (the next day's run catches up). An explicit -Date is a manual/backfill run
+# - the guard does not apply.
 $utcHour = (Get-Date).ToUniversalTime().Hour
-if (-not $Date -and $utcHour -gt 2) {
-    Log "Skipped: UTC hour $utcHour is outside the 00:00-02:00 window (clock drift / DST?). Re-run -RegisterTask after a DST change." "WARN"
+if (-not $Date -and $utcHour -gt 9) {
+    Log "Skipped: UTC hour $utcHour is outside the 00:00-09:00 window (clock drift / DST?). Re-run -RegisterTask after a DST change." "WARN"
     Exit 0
 }
 
@@ -441,6 +479,34 @@ if ($tgResult[1] -ne 0) {
     Log "Telegram verdict sent: $tgOut"
 }
 
+# ---- 2.2 storage-budget watch (2026-08-14, spec 009 OPS-15) --------------
+# The spec 001 appendix's first revisit trigger, wired: projects when
+# data/raw growth hits the budget cap (--cap-bytes or MP_STORAGE_BUDGET_BYTES)
+# and sends the storage-budget P2 via Telegram. Best-effort by design: a
+# missing budget config or a failed send is logged (WARN) and NEVER changes
+# the pipeline's exit code - the gate verdict is the pipeline's job. Runs
+# even on non-promotable days (this block sits before the promotable exit).
+$sbCap = $env:MP_STORAGE_BUDGET_BYTES
+if ($sbCap) {
+    $sbArgs = @("storage-budget", "--dir", (Join-Path $root "data\raw"), "--cap-bytes", $sbCap, "--telegram")
+    # Drain-manifest scan (2026-08-16): the watch also fires the storage-budget
+    # P2 when the relay is silently holding files (action=landed but release
+    # not in {released, no_release}) - a byte-verified file the drain never
+    # released. Windows-side artifact (the VPS timer has no manifest); passed
+    # only when the manifest exists (no drain runs yet = nothing to scan).
+    $sbManifest = Join-Path $root "data\vps_drain_manifest.jsonl"
+    if (Test-Path $sbManifest) { $sbArgs += @("--manifest", $sbManifest) }
+    $sbResult = Invoke-Native -FilePath $mpOps -Arguments $sbArgs
+    $sbOut = ($sbResult[0] | Out-String).Trim()
+    if ($sbResult[1] -ne 0) {
+        Log "storage-budget check failed (exit $($sbResult[1])): $sbOut" "WARN"
+    } else {
+        Log "storage-budget: $sbOut"
+    }
+} else {
+    Log "storage-budget: skipped (no MP_STORAGE_BUDGET_BYTES - set the budget to arm the OPS-15 watch)" "WARN"
+}
+
 if (-not $promotable) {
     foreach ($rec in $card.recordings) {
         Log (Get-RecordingLine $rec)
@@ -482,8 +548,19 @@ if (-not $SkipMaterialize) {
         }
     }
     $gitSha = "unknown"
-    $shaOut = (& git rev-parse HEAD 2>&1 | Out-String)
-    if ($LASTEXITCODE -eq 0 -and $shaOut.Trim()) { $gitSha = $shaOut.Trim() }
+    # Audit 2026-08-17: `git rev-parse HEAD 2>&1` under EAP=Stop turns a git
+    # failure (non-repo cwd, no git on PATH, corrupt HEAD) into an unhandled
+    # terminating error mid-materialize. Route through Invoke-Native (EAP is
+    # Continue inside) and default to "unknown" on failure; run from $root so
+    # the sha resolves to this tree.
+    Push-Location $root
+    try {
+        $gitRes = Invoke-Native -FilePath "git" -Arguments @("rev-parse", "HEAD")
+    } finally {
+        Pop-Location
+    }
+    $gitOut = ($gitRes[0] | Out-String).Trim()
+    if ($gitRes[1] -eq 0 -and $gitOut) { $gitSha = $gitOut }
     $matArgs += "--config"; $matArgs += $cfgPath
     $matArgs += "--out";  $matArgs += (Join-Path $root "data\features")
     $matArgs += "--git-sha"; $matArgs += $gitSha
@@ -502,7 +579,10 @@ if (-not $SkipMaterialize) {
         }
         $matOut = $matResult[0]; $matExit = $matResult[1]
         if ($matExit -ne 0) { Log "mp-materialize failed (exit $matExit): $matOut" "ERROR"; Exit 1 }
-        Log "  $($matOut | Out-String).Trim()"
+        # Materialize the trimmed output FIRST (the trap at line ~437: inside
+        # a PS string `$($x | Out-String).Trim()` prints the literal text).
+        $matLog = ($matOut | Out-String).Trim()
+        Log "  $matLog"
     }
 } else {
     Log "SkipMaterialize set - no feature-store writes."
@@ -525,7 +605,8 @@ if (-not $SkipCompact) {
         }
         $compactOut = $compactResult[0]; $compactExit = $compactResult[1]
         if ($compactExit -ne 0) { Log "compact failed for $venue/$sym (exit $compactExit): $compactOut" "ERROR"; Exit 1 }
-        Log "  $($compactOut | Out-String).Trim()"
+        $compactLog = ($compactOut | Out-String).Trim()
+        Log "  $compactLog"
     }
 } else {
     Log "SkipCompact set - no cold writes."

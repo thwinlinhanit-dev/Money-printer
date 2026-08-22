@@ -4,7 +4,7 @@
 Prevent data loss from crashes by adding automatic, configurable fsync to `EventLogWriter`. Currently `sync()` exists but is never called automatically.
 
 ## Scope
-In: `FsyncPolicy` config struct, auto-fsync on event count and time thresholds, `sync_data()` (faster) vs `sync_all()`, SIGTERM graceful shutdown hook. Out: CRC/torn-write detection (already handled by EVT-4), filesystem-level durability beyond `fsync`.
+In: `FsyncPolicy` config struct, auto-fsync on event count and time thresholds, `sync_data()` (faster) vs `sync_all()`, SIGTERM graceful shutdown hook. Out: CRC-32 (IEEE, via crc32fast) torn-write detection (already handled by EVT-4), filesystem-level durability beyond `fsync`.
 
 ## Design
 

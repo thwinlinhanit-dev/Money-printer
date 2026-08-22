@@ -1,50 +1,54 @@
-# mp-llm provider config — EXAMPLE (PD-2: no real secrets in the repo).
+# mp-llm provider map — EXAMPLE / operator reference ONLY (PD-2: no real
+# secrets in the repo).
 #
-# API keys are NEVER stored here. Each provider reads its key from the env var
-# named below; set them in your shell / systemd unit / secret store, off the
-# repo. This file only records model choices and which env var each provider
-# uses, so an operator can see the full map at a glance.
+# IMPORTANT: this file is NOT loaded by the crate. `mp-llm` has no config
+# file: each provider's default model and API-key env var are compile-time
+# constants in llm/src (see `default_model()` / `api_key_env()` per provider,
+# and `Provider::from_slug` / `config::provider_for` for selection). This
+# file exists so an operator can see the full model/env map at a glance and
+# set the env vars off the repo (shell / systemd unit / secret store).
 #
+# API keys are NEVER stored here. Each provider reads its key from the env
+# var named below, at the binary edge, off any decision path (PD-2, spec 010).
 # LLM output is human-read only and never touches a decision path (spec 010).
+#
+# The schema below mirrors the crate's constants exactly: `model` is the
+# default used when a `ChatRequest` leaves `model` unset, `api_key_env` is
+# the env var holding the key (empty = keyless, e.g. local Ollama). If a
+# config file is ever introduced, it must adopt this schema.
 
-[default]
-# Which provider the research agents use by default.
-provider = "anthropic"
-
-# provider slug -> { model override, api_key_env }. Model is optional; when
-# omitted the crate's built-in default (shown) is used.
 [providers.anthropic]
-model   = "claude-opus-4-8"     # repo default; most capable: claude-fable-5
+model       = "claude-opus-4-8"     # llm/src/anthropic.rs
 api_key_env = "ANTHROPIC_API_KEY"
 
 [providers.openai]
-model   = "gpt-4o"
+model       = "gpt-4o"              # llm/src/openai_family.rs
 api_key_env = "OPENAI_API_KEY"
 
 [providers.gemini]
-model   = "gemini-1.5-pro"
+model       = "gemini-1.5-pro"      # llm/src/gemini.rs
 api_key_env = "GEMINI_API_KEY"
 
 [providers.mistral]
-model   = "mistral-large-latest"
+model       = "mistral-large-latest"
 api_key_env = "MISTRAL_API_KEY"
 
 [providers.cohere]
-model   = "command-r-plus"
+model       = "command-r-plus"
 api_key_env = "COHERE_API_KEY"
 
 [providers.deepseek]
-model   = "deepseek-chat"
+model       = "deepseek-chat"
 api_key_env = "DEEPSEEK_API_KEY"
 
 [providers.groq]
-model   = "llama-3.3-70b-versatile"
+model       = "llama-3.3-70b-versatile"
 api_key_env = "GROQ_API_KEY"
 
 [providers.xai]
-model   = "grok-2-latest"
+model       = "grok-2-latest"
 api_key_env = "XAI_API_KEY"
 
 [providers.ollama]
-model   = "llama3.1"
-api_key_env = ""                # local, keyless; default host localhost:11434
+model       = "llama3.1"            # local, keyless
+api_key_env = ""                    # default host localhost:11434

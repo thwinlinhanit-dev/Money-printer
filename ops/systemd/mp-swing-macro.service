@@ -1,0 +1,25 @@
+# Swing-scoped FRED macro collector unit (spec 030 MAC-2/7; Option 1 rollout,
+# docs/SWING_DATA_PLAN.md). Enabled by ops/scripts/deploy_swing.sh ONLY when
+# FRED_API_KEY is present in /etc/money-printer/venues.env (fail-closed, same
+# pattern as mp-netflow). Writes data/raw/{date}_fred_macro.log.
+[Unit]
+Description=Money Printer swing FRED macro collector (spec 030)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printer
+Group=printer
+EnvironmentFile=/etc/money-printer/venues.env
+WorkingDirectory=/opt/money-printer
+ExecStart=/opt/money-printer/bin/mp-macro --config collectors/swing/macro.toml
+Restart=always
+RestartSec=10
+MemoryMax=256M
+LimitNOFILE=65536
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/data
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -24,6 +24,11 @@ pub enum Venue {
     /// FRED (St. Louis Fed) economic series (spec 030). Not a trading venue;
     /// used as the envelope venue for [`MarketEvent::MacroPoint`] events.
     Fred,
+    /// Ethereum mainnet (spec 034 exchange-netflow). Not a trading venue;
+    /// used as the envelope venue for [`MarketEvent::NetflowSnapshot`]
+    /// events. Appended (schema 3→4) so old bincode frames keep their
+    /// variant indices (CONV-20).
+    Ethereum,
 }
 
 impl Venue {
@@ -38,6 +43,7 @@ impl Venue {
             Venue::KrakenFutures => "kraken",
             Venue::Deribit => "deribit",
             Venue::Fred => "fred",
+            Venue::Ethereum => "ethereum",
         }
     }
 
@@ -54,6 +60,7 @@ impl Venue {
             "kraken" | "krakenfutures" | "kraken_futures" => Venue::KrakenFutures,
             "deribit" => Venue::Deribit,
             "fred" => Venue::Fred,
+            "ethereum" => Venue::Ethereum,
             _ => return None,
         })
     }
@@ -292,6 +299,60 @@ pub enum MarketEvent {
         open_interest: f64,
         greeks: Option<OptionGreeks>,
     },
+    // ---- spec 033/034 additions (schema 3→4, append-only — old bincode
+    // frames keep their variant indices; the log reader accepts schema-3
+    // frames unchanged, see `core::log::LogReader`).
+    /// Venue-identified trade with the aggressor wallet address (spec 033,
+    /// WAL-1). Same fields as [`MarketEvent::Trade`] plus the taker's opaque
+    /// 0x address — the foundation of wallet-markout tracking (WAL-2). The
+    /// address is `""` when the venue payload omits it (WAL-4 — record
+    /// nothing, never invent). Hyperliquid's `trades` channel is the current
+    /// producer; venues without wallet identity keep emitting [`Trade`].
+    TradeWithAddr {
+        price: f64,
+        qty: f64,
+        /// Aggressor side.
+        side: Side,
+        trade_id: u64,
+        /// Opaque taker wallet address (WHL-3 style — no external labels).
+        taker_addr: String,
+    },
+    /// Exchange-reserve balance snapshot (spec 034, NFL-2). Envelope venue is
+    /// [`Venue::Ethereum`], symbol is the asset (e.g. "USDT"). The envelope
+    /// carries the observation time; `balance` is the recorded token balance
+    /// of one known exchange wallet. Research derives netflows from balance
+    /// deltas (NFL-5) — the snapshot itself is the honest primitive.
+    NetflowSnapshot {
+        /// Opaque wallet address (opaque identifier only, WHL-3 style).
+        address: String,
+        /// Token balance in base units at observation time.
+        balance: f64,
+    },
+}
+
+impl MarketEvent {
+    /// Unify the trade variants — schema-3 [`MarketEvent::Trade`] and
+    /// schema-4 [`MarketEvent::TradeWithAddr`] — into one view so consumers
+    /// that only need price/qty/side match a single arm (WAL-6). `taker_addr`
+    /// is `None` for legacy frames and venues without wallet identity.
+    pub fn trade_view(&self) -> Option<(f64, f64, Side, u64, Option<&str>)> {
+        match self {
+            MarketEvent::Trade {
+                price,
+                qty,
+                side,
+                trade_id,
+            } => Some((*price, *qty, *side, *trade_id, None)),
+            MarketEvent::TradeWithAddr {
+                price,
+                qty,
+                side,
+                trade_id,
+                taker_addr,
+            } => Some((*price, *qty, *side, *trade_id, Some(taker_addr.as_str()))),
+            _ => None,
+        }
+    }
 }
 
 /// Envelope wrapping every event with routing + timing metadata (EVT-1).

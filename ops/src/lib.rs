@@ -19,6 +19,7 @@ pub mod journal;
 pub mod latch;
 pub mod registry;
 pub mod report;
+pub mod storage;
 pub mod telegram;
 pub mod watch;
 
@@ -32,6 +33,11 @@ pub use report::{
     append_run_record, band_accuracy_decay_alert, load_band_accuracy_trend,
     parse_band_accuracy_trend, write_monthly_report, BandAccuracyRow, Benchmark, CostBreakdown,
     FunnelEvent, MonthlyReport, StrategyRow, TrackingRow,
+};
+pub use storage::{
+    days_from_yyyymmdd, growth_rate_per_day, held_drain_files, parse_drain_manifest_line,
+    project_storage, sample_daily_sizes, storage_budget_alert, DrainManifestEntry,
+    StorageProjection,
 };
 pub use telegram::{
     append_batch, append_delivered, flush_batch, load_telegram_batch, load_telegram_delivered,

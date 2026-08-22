@@ -56,6 +56,8 @@ pub enum LogError {
     UnsupportedSchema(u16),
     #[error("unknown frame kind {0}")]
     BadFrameKind(u8),
+    #[error("symbol id {0} has no metadata (corrupt log?)")]
+    CorruptSymbol(u32),
 }
 
 // ---- frame primitives -------------------------------------------------------
@@ -226,6 +228,11 @@ impl EventLogWriter {
             // subsequent appends produce a readable log.
             file.write_all(MAGIC)?;
             file.write_all(&FORMAT_VER.to_le_bytes())?;
+            // Belt-and-braces (EVT-4): a crash right after creation could
+            // otherwise leave an empty file. Readers self-heal that case via
+            // scan_valid_len, but fsync makes the header durable as soon as
+            // it exists.
+            file.sync_data()?;
         }
         Ok((
             Self {
@@ -283,6 +290,18 @@ impl EventLogWriter {
         Ok(())
     }
 
+    /// Flush + fsync the final buffered events on graceful shutdown (FSP-4 /
+    /// COL-19). Honours `FsyncPolicy::on_sigterm`: when false, only the
+    /// userspace flush runs — the operator opted out of shutdown durability.
+    pub fn sync_on_shutdown(&mut self) -> Result<(), LogError> {
+        self.file.flush()?;
+        if self.fsync_policy.on_sigterm {
+            self.file.get_ref().sync_data()?;
+            self.events_since_fsync = 0;
+        }
+        Ok(())
+    }
+
     /// Flush and fsync with sync_data (fast path, FSP-5).
     pub fn sync(&mut self) -> Result<(), LogError> {
         self.file.flush()?;
@@ -306,6 +325,9 @@ pub struct LogReader {
     reader: BufReader<File>,
     symbols: Vec<SymbolMeta>,
     done: bool,
+    /// A raw event payload buffered by [`LogReader::load_symbols`] (the first
+    /// event behind the header) so peeking the symbol table never loses events.
+    peeked: Option<Vec<u8>>,
 }
 
 impl LogReader {
@@ -326,6 +348,7 @@ impl LogReader {
             reader,
             symbols: Vec::new(),
             done: false,
+            peeked: None,
         })
     }
 
@@ -334,7 +357,100 @@ impl LogReader {
         &self.symbols
     }
 
+    /// Read frames until the symbol table is loaded — or until the first
+    /// event / end-of-log, whichever comes first — buffering any event frame
+    /// so it is not lost. The writer emits the symbol frame before any event
+    /// frame, so this costs one header read and lets a caller resolve symbols
+    /// BEFORE streaming events (the streaming merge's EVT-8 remap needs the
+    /// shared table up front). Symbol-less logs (whale census, GapDetected
+    /// statuses) stop at the first event with an empty table — the caller's
+    /// symbol-less rule applies.
+    pub fn load_symbols(&mut self) -> Result<(), LogError> {
+        while !self.done && self.peeked.is_none() && self.symbols.is_empty() {
+            match read_frame(&mut self.reader)? {
+                FrameRead::Eof | FrameRead::Torn => {
+                    self.done = true;
+                    return Ok(());
+                }
+                FrameRead::Frame { kind, payload } => match kind {
+                    FRAME_SYMBOLS => {
+                        self.symbols = codec::decode_symbols(&payload)?;
+                        return Ok(());
+                    }
+                    FRAME_EVENT => {
+                        self.peeked = Some(payload);
+                        return Ok(());
+                    }
+                    _ => continue,
+                },
+            }
+        }
+        Ok(())
+    }
+
+    /// Decode one event frame payload (`schema_ver:u16 || bincode(envelope)`)
+    /// into the current envelope. `None` = malformed frame (payload < 2
+    /// bytes) — the caller treats it as the log's end.
+    fn decode_event_payload(payload: Vec<u8>) -> Result<Option<EventEnvelope>, LogError> {
+        if payload.len() < 2 {
+            return Ok(None);
+        }
+        let schema_ver = u16::from_le_bytes([payload[0], payload[1]]);
+        let e = match schema_ver {
+            crate::SCHEMA_VER => codec::decode_event(&payload[2..])?,
+            // Schema-2: byte-identical envelope layout to the
+            // current one (provenance included). The 2→3 bump
+            // (specs 028/030/031) only *appended* enum variants
+            // to `MarketEvent`/`Venue`/`InstrumentKind`, which
+            // bincode maps by index, so old frames decode with
+            // the current types — no shape change, no legacy
+            // struct needed. Historical schema-2 recordings
+            // stay readable and promotable (W-6 / CONV-20).
+            2 => codec::decode_event(&payload[2..])?,
+            // Schema-3: byte-identical envelope layout to the
+            // current one. The 3→4 bump (specs 033/034) only
+            // *appended* enum variants to `MarketEvent`/`Venue`,
+            // which bincode maps by index, so old frames decode
+            // with the current types — no shape change, no
+            // legacy struct needed. Historical schema-3
+            // recordings (2026-08-05..08-18) stay readable and
+            // promotable (W-6 / CONV-20).
+            3 => codec::decode_event(&payload[2..])?,
+            // Schema-1 (pre-provenance): decode the historical
+            // layout and normalize to the current envelope with
+            // synthetic provenance. All market data is
+            // preserved; the audit layer flags the synthetic
+            // provenance as `missing_provenance` (INT-1), so
+            // legacy recordings are readable for research but
+            // never promoted to cold as live-attributable.
+            1 => {
+                let legacy: EnvelopeV1 = codec::decode_envelope_v1(&payload[2..])?;
+                EventEnvelope {
+                    schema_ver: legacy.schema_ver,
+                    venue: legacy.venue,
+                    symbol: legacy.symbol,
+                    exch_ts_ns: legacy.exch_ts_ns,
+                    recv_ts_ns: legacy.recv_ts_ns,
+                    stream_seq: legacy.stream_seq,
+                    provenance: EventProvenance::synthetic(),
+                    body: legacy.body,
+                }
+            }
+            other => return Err(LogError::UnsupportedSchema(other)),
+        };
+        Ok(Some(e))
+    }
+
     fn next_event(&mut self) -> Result<Option<EventEnvelope>, LogError> {
+        if let Some(payload) = self.peeked.take() {
+            return match Self::decode_event_payload(payload)? {
+                Some(ev) => Ok(Some(ev)),
+                None => {
+                    self.done = true;
+                    Ok(None)
+                }
+            };
+        }
         loop {
             if self.done {
                 return Ok(None);
@@ -359,48 +475,13 @@ impl LogReader {
                         self.symbols = codec::decode_symbols(&payload)?;
                         continue;
                     }
-                    FRAME_EVENT => {
-                        // payload = schema_ver:u16 || bincode(envelope)
-                        if payload.len() < 2 {
+                    FRAME_EVENT => match Self::decode_event_payload(payload)? {
+                        Some(ev) => return Ok(Some(ev)),
+                        None => {
                             self.done = true;
                             return Ok(None);
                         }
-                        let schema_ver = u16::from_le_bytes([payload[0], payload[1]]);
-                        let e = match schema_ver {
-                            crate::SCHEMA_VER => codec::decode_event(&payload[2..])?,
-                            // Schema-2: byte-identical envelope layout to the
-                            // current one (provenance included). The 2→3 bump
-                            // (specs 028/030/031) only *appended* enum variants
-                            // to `MarketEvent`/`Venue`/`InstrumentKind`, which
-                            // bincode maps by index, so old frames decode with
-                            // the current types — no shape change, no legacy
-                            // struct needed. Historical schema-2 recordings
-                            // stay readable and promotable (W-6 / CONV-20).
-                            2 => codec::decode_event(&payload[2..])?,
-                            // Schema-1 (pre-provenance): decode the historical
-                            // layout and normalize to the current envelope with
-                            // synthetic provenance. All market data is
-                            // preserved; the audit layer flags the synthetic
-                            // provenance as `missing_provenance` (INT-1), so
-                            // legacy recordings are readable for research but
-                            // never promoted to cold as live-attributable.
-                            1 => {
-                                let legacy: EnvelopeV1 = codec::decode_envelope_v1(&payload[2..])?;
-                                EventEnvelope {
-                                    schema_ver: legacy.schema_ver,
-                                    venue: legacy.venue,
-                                    symbol: legacy.symbol,
-                                    exch_ts_ns: legacy.exch_ts_ns,
-                                    recv_ts_ns: legacy.recv_ts_ns,
-                                    stream_seq: legacy.stream_seq,
-                                    provenance: EventProvenance::synthetic(),
-                                    body: legacy.body,
-                                }
-                            }
-                            other => return Err(LogError::UnsupportedSchema(other)),
-                        };
-                        return Ok(Some(e));
-                    }
+                    },
                     other => return Err(LogError::BadFrameKind(other)),
                 },
             }

@@ -1,0 +1,11 @@
+# Swing-only Hyperliquid collector — BTC (spec 035 SWG-1 / spec 036 SLQ-D).
+# Recorded under data/raw/{date}_hyperliquid_BTC.log.
+# Keep: trades (OHLCV) + activeAssetCtx (mark/funding/OI). Drop: l2Book.
+# Start via .\swing_collectors.ps1 (supervised), or manually:
+#   cargo run -p mp-collectors --features live-ws --bin mp-collector -- --config collectors/swing/hyperliquid-btc.toml
+venue = "hyperliquid"
+symbol = "BTC"
+data_dir = "data"
+channel_capacity = 10000
+backpressure = "drop_oldest"
+swing_only = true

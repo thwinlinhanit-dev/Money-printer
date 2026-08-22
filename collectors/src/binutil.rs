@@ -242,6 +242,25 @@ impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for SharedLogFile {
     }
 }
 
+/// Plain-text fmt subscriber over a [`SharedLogFile`] sink (LOG-1): ANSI
+/// forced OFF and a UTC timestamp so trace files stay machine-parseable —
+/// the 2026-08-15 outage traces were polluted with ESC[..m codes that broke
+/// timestamp parsing (enforced by `ops/ci/check_log_hygiene.sh`).
+pub fn trace_subscriber(sink: SharedLogFile) -> impl tracing::Subscriber + Send + Sync + 'static {
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(sink)
+        .with_timer(tracing_subscriber::fmt::time::SystemTime)
+        .finish()
+}
+
+/// `RUST_LOG`-driven filter for the fmt builders (`tracing-filter` default
+/// falls back to `info` when the env var is unset).
+pub fn tracing_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::SharedLogFile;
@@ -259,6 +278,35 @@ mod tests {
         assert_eq!(
             std::fs::read(&path).expect("read trace file"),
             b"reconnect diagnostic\\n"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn trace_subscriber_emits_ansi_free_timestamped_lines() {
+        // LOG-1: trace files are machine input — the fmt subscriber must emit
+        // plain text (no ESC[..m codes) with a parseable UTC timestamp.
+        let path = std::env::temp_dir().join(format!("mp-trace-fmt-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let sink = SharedLogFile::open(&path).expect("open trace sink");
+        let subscriber = super::trace_subscriber(sink);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(venue = "hyperliquid", "test trace line");
+        });
+
+        let text = std::fs::read_to_string(&path).expect("read trace file");
+        assert!(
+            !text.contains('\u{1b}'),
+            "ANSI escape leaked into trace: {text:?}"
+        );
+        assert!(
+            text.contains("test trace line"),
+            "event body missing: {text:?}"
+        );
+        assert!(
+            text.starts_with("2026-") || text.contains("INFO"),
+            "expected timestamped INFO line, got: {text:?}"
         );
         let _ = std::fs::remove_file(path);
     }

@@ -61,10 +61,25 @@ trades, hit rate, avg win/loss, **expectancy**, profit factor, max DD
 fees paid, funding paid/earned, exposure %, and regime slicing by
 `regime.vol × regime.trend` (FEA catalog).
 
+Implementation status (audit fix-all 2026-08-17, L9 — the spec letter vs
+`sim/src/metrics.rs`): implemented — trades, hit rate, avg win/loss (gross
+win/loss + counts), expectancy, profit factor, max DD magnitude,
+2×-cost stress expectancy (SIM-8), SIM-12 maker/tape optimism buckets,
+fees paid & funding paid (accountant totals). SWG-5 (2026-08-20): Sharpe
+(bar-return, annualized) and the Deflated Sharpe Ratio (Bailey & López de
+Prado, 2014) are implemented in `metrics.rs` (bar returns sampled once per
+bar boundary at `bar_tf_ns`) and reported per window by `sim wf`.
+**Not implemented (deferred, must be added before this section is claimed
+complete):** max DD duration, Sortino, turnover, funding earned split,
+exposure %, regime slicing.
+
 ### Harnesses
 - **Walk-forward:** rolling (train `T`, test `t`) windows (default 90d/30d,
   step 30d); params fit in-window (grid from strategy's param space), applied
   out-of-window; report per-window OOS metrics + param stability table.
+  SWG-5 purged splits: `sim wf` accepts `--embargo-ns` — the gap between the
+  train slice's end and the test slice's start is purged from BOTH slices,
+  blocking leakage from labels that straddle the boundary.
 - **Parameter plateau:** for each param, re-run at ±10%, ±30%; flag if OOS
   expectancy sign flips within ±30% (curve-fit detector).
 - **Monte Carlo:** resample trade sequence (block bootstrap, block = 1 day)
@@ -115,6 +130,7 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
 - [x] Clock driven purely by event timestamps (SIM-1). `sim_1_clock_is_driven_by_events`.
 - [x] Taker fill applies fee + slippage; latency-deferred against the trade tape (SIM-2, partial). `sim_2_taker_fill_applies_fee_and_slippage`.
 - [x] Accounting identity holds through a full run and a hand-computed realized+funding case (SIM-13). `sim_13_*`.
+- [x] Funding paid while holding is attributed to the closed trade's NET P&L (expectancy prices carry costs, audit fix-all 2026-08-17). `sim_13_funding_attributed_to_closed_trade`.
 - [x] L0/L1/L2 fill models incl. trade-print limit rule and participation/queue-share caps (SIM-2). `sim_2_l1_market_buy_is_capped_by_top_of_book_participation`, `sim_2_l1_limit_trade_print_rule_bans_touch_fills`, `sim_2_l2_market_buy_walks_multiple_levels_and_pays_impact`, `sim_2_l2_limit_fill_capped_by_queue_share_needs_multiple_prints`.
 - [x] Funding-missing and low-coverage run refusals (SIM-4/6). `sim_4_missing_funding_refuses_to_report_a_held_perp_position`, `sim_4_funding_event_present_lets_the_run_report`, `sim_6_low_manifest_coverage_refuses_the_run`, `sim_6_full_coverage_runs_normally`.
 - [x] 2x-cost stress column and optimistic-maker split (SIM-8/12). `sim_8_stress_expectancy_2x_is_never_better_than_base_when_fees_positive`, `sim_12_optimistic_maker_fills_are_tracked_separately`.
@@ -122,8 +138,19 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
 - [x] Experiment tracker run records: config hash + git SHA + data range + manifest hashes + decision-log hash, reproducible & experiment-identifying (SIM-10). `sim_10_run_record_is_reproducible_and_identifies_experiments`.
 - [x] `replay-live` decision-log divergence detection (SIM-11). `sim_11_replay_live_diff_detects_divergence`, `sim_11_length_mismatch_with_shared_prefix_diverges`.
 - [x] `sim` CLI: `backtest|wf|plateau|mc|replay-live` over a real event-log file, writing tracker runs to `runs/index.jsonl`; `replay-live` exits non-zero on any decision-log divergence (SIM-9/10/11). `sim_9_cli_backtest_mc_and_replay_live_work_end_to_end` (end-to-end against the built binary).
+- [x] SWG-5: bar-return Sharpe + Deflated Sharpe in metrics, sampled once per bar boundary at `bar_tf_ns`, warmup-gated (None never NaN). `swg_5_sharpe_and_deflated_sharpe`, `swg_5_probit_is_monotone_and_symmetric`, `swg_5_summary_reports_bar_return_sharpe` (also `MetricsSummary` carries `sharpe`).
+- [x] SWG-5: purged walk-forward splits — `WalkForwardParams.embargo_ns` inserts a gap between train and test that is in NEITHER slice. `swg_5_walk_forward_purged_splits_embargo_gap`.
 
 ## Decisions
+- 2026-08-20 (impl, SWG-5 per 035): event-driven bar replay (daily/4h) via
+  `bar_tf_ns` (L0 bar fills already fill at next bar open; now bar-return
+  Sharpe samples once per bar boundary at the same timeframe, so a daily/4h
+  replay reports a daily/4h Sharpe — `sim backtest|wf|mc` accept `--bar-tf-ns`).
+  Walk-forward gains purged splits (`WalkForwardParams.embargo_ns`,
+  `sim wf --embargo-ns`) — the gap between train and test is in neither slice.
+  Deflated Sharpe (Bailey & López de Prado) adjusts the observed Sharpe for the
+  number of grid combos tried (`MetricsSummary::deflated_sharpe`); the probit
+  uses Acklam's rational approximation, no external stats dependency.
 - 2026-07-10: L3 (queue position) deferred to its own spec; until then maker-
   heavy strategies cannot pass gate G2 honestly and the funnel doc says so.
 - 2026-07-10 (impl): the backtester runs the PRODUCTION `mp-features`,
@@ -210,6 +237,28 @@ range + manifest coverage, metrics.json, equity.parquet, decision_log hash.
   With every requirement ID tested and every acceptance criterion automated,
   status flips to `implemented`. Remaining honest caveats live in COL/EXE
   (live-venue work), not here.
+- 2026-08-17 (fix-all): three cost/honesty fixes. (1) Funding now reaches
+  per-trade P&L: `Position` tracks `funding_open`; `accrue_funding` attributes
+  each payment to the held position; `FillOutcome.attributed_funding` releases
+  it pro-rata on reduce/close/flip; the engine's net P&L is
+  `gross − fees − funding`. Before, funding was invisible to `Metrics` and
+  expectancy — a carry edge paid entirely in funding scored as flat (H1). The
+  SIM-13 identity is unchanged (`equity == start + realized + unrealized −
+  fees − funding`), since funding was already in cash. (2) The cost model's
+  maker|taker split is real: `SimConfig.maker_fee` (default 0.0002, bybit
+  maker) is charged on maker-priced fills (resting limits, L0 bar fills) —
+  previously every fill paid the taker fee. (3) Timers fire at-or-after their
+  scheduled time (`t <= now`), not one event late (`t < now` was an off-by-one
+  that delayed exact-time timers).
+- 2026-08-17 (fix-all, follow-up): the trade-level optimism tag is now the
+  worst-case across the position's legs, not just the closing fill's —
+  `FillOptimism::merge` + `Position.optimism`, so a maker-optimistic entry
+  closed by a taker fill still lands in the G1 maker bucket (B4,
+  `sim_13_trade_tag_keeps_entry_leg_optimism`). The backtest arm's tracker
+  `config_text` now includes `coverage` and the carry overrides, so runs that
+  differ only in params no longer collide in the experiment identity (M6).
+  `Metrics`/`sim` report the honest status of the spec §Metrics letter (L9,
+  see the annotation above).
 
 ## Open questions
 - None.

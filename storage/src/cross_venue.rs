@@ -349,8 +349,7 @@ fn detect_veracity(
             .collect();
         if liquid.len() >= cfg.min_cohort {
             let med_vwp = median(liquid.iter().map(|(_, _, v)| *v));
-            let med_trades =
-                median(liquid.iter().map(|(_, c, _)| *c as f64)).round() as u64;
+            let med_trades = median(liquid.iter().map(|(_, c, _)| *c as f64)).round() as u64;
             let band = cfg.max_price_band_pct / 100.0;
             for (i, count, v) in &rows {
                 let (vslug, symbol, _) = &streams[*i];

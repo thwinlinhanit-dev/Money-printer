@@ -28,17 +28,17 @@ pub mod tracker;
 pub use account::Accountant;
 pub use decision_log::DecisionLog;
 pub use determinism::{
-    check_day, replay, strategy_for, DayReplay, DeterminismConfig, DeterminismVerdict,
-    ReplaySummary, DEFAULT_SEED,
+    check_day, check_day_streamed, replay, replay_stream, strategy_for, DayReplay,
+    DeterminismConfig, DeterminismVerdict, ReplaySummary, DEFAULT_SEED,
 };
 pub use engine::{Backtester, SimConfig};
 pub use error::SimError;
 pub use fills::{FillModel, FillOptimism};
 pub use gates::{evaluate_g1, G1Params, G1Result};
 pub use harness::{
-    monte_carlo, param_combinations, plateau_ok, slice_by_recv, walk_forward, McResult,
-    MetricsSummary, WalkForwardParams, WindowResult,
+    monte_carlo, param_combinations, pick_best_eligible, plateau_ok, slice_by_recv, walk_forward,
+    McResult, MetricsSummary, WalkForwardParams, WindowResult,
 };
-pub use metrics::Metrics;
+pub use metrics::{bars_per_year, Metrics};
 pub use paper::PaperSession;
 pub use tracker::{content_hash, RunRecord};

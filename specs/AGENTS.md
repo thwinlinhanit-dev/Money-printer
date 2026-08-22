@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Design specification documents (000–031) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
+Design specification documents (000–041) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
 
 ## Ownership
 
@@ -18,7 +18,7 @@ Design specification documents (000–031) defining the system architecture, dat
 - `008-risk-sizing.md` — risk sizing
 - `009-ops-alerting.md` — operations and alerting
 - `010-research-llm.md` — research/LLM pipeline
-- `011-terminal.md` — terminal UI
+- `011-terminal.md` — WASM terminal UI
 - `012-zero-copy-pipeline.md` — zero-copy pipeline
 - `013-ws-backpressure.md` — WebSocket backpressure
 - `014-event-log-fsync.md` — event log fsync guarantees
@@ -39,6 +39,16 @@ Design specification documents (000–031) defining the system architecture, dat
 - `029-liquidation-features.md` — cross-venue liquidation aggregation & estimated liq bands
 - `030-macro-collector.md` — macro data collector (HIP-3 + FRED)
 - `031-deribit-options-recorder.md` — Deribit options market-data recorder
+- `032-multi-symbol-collectors.md` — multi-symbol-per-process collector fan-out (MSC requirements)
+- `033-wallet-identity.md` — wallet identity in trades (TradeWithAddr, WAL requirements)
+- `034-exchange-netflow.md` — exchange netflow indexer (Ethereum reserve balances, NFL requirements)
+- `035-swing-focus.md` — swing trading focus (multi-day/multi-week horizon spec, SWG requirements)
+- `036-volume-profile-liquidity.md` — volume-profile liquidity features + swing-range-reclaim-v1 (SLQ requirements)
+- `037-options-greeks-computation.md` — options Greeks computation engine: GEX profiles, higher Greeks, max pain, implied probability (GRE requirements)
+- `038-iv-surface-builder.md` — IV surface builder & volatility analytics: term structure, skew, VRP, vol regime, DVOL index (IVS requirements)
+- `039-options-flow-aggregator.md` — cross-exchange options flow aggregator: block trades, net premium, delta-adjusted flow, whale detection (OFI requirements)
+- `040-ibit-etf-integration.md` — IBIT ETF options integration: CBOE data collection, cross-market analysis with Deribit (IBI requirements)
+- `041-analytics-terminal.md` — real-time analytics terminal: web dashboard, WebSocket streaming, charts, per-asset routing (TER requirements)
 
 ## Local Contracts
 

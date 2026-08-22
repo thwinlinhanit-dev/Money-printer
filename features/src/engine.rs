@@ -234,7 +234,8 @@ impl FeatureEngine {
         }
         let names: Vec<String> = self.global_factories.iter().map(|f| f().id()).collect();
         let ids: Vec<SymbolId> = names.iter().map(|n| self.intern(n)).collect();
-        let globals: Vec<Box<dyn TickFeature>> = self.global_factories.iter().map(|f| f()).collect();
+        let globals: Vec<Box<dyn TickFeature>> =
+            self.global_factories.iter().map(|f| f()).collect();
         self.global_names = names;
         self.global_ids = ids;
         self.globals = globals;

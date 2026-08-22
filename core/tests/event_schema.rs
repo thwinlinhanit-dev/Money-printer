@@ -241,6 +241,25 @@ fn body_strategy() -> impl Strategy<Value = MarketEvent> {
                     }
                 },
             ),
+        // ---- spec 033/034 variants (schema-4, CONV-22 round-trip coverage) ----
+        (
+            -1.0e9f64..1.0e9,
+            0.0f64..1.0e9,
+            side_strategy(),
+            any::<u64>(),
+            ".*",
+        )
+            .prop_map(|(price, qty, side, trade_id, taker_addr)| {
+                MarketEvent::TradeWithAddr {
+                    price,
+                    qty,
+                    side,
+                    trade_id,
+                    taker_addr,
+                }
+            },),
+        (".*", 0.0f64..1.0e18)
+            .prop_map(|(address, balance)| MarketEvent::NetflowSnapshot { address, balance }),
     ]
 }
 
@@ -626,4 +645,136 @@ fn evt_9_book_ignores_old_delta() {
     assert!(!book.apply_delta(5, 9, &[(100.0, 999.0)], &[]));
     assert!(!book.is_stale());
     assert_eq!(book.best_bid(), Some((100.0, 1.0)));
+}
+
+#[test]
+fn regression_book_partial_overlap_delta_not_double_applied() {
+    // Audit: a delta whose window starts at/before the applied seq but
+    // extends past it (first_seq <= last_seq < last_seq) was applied in
+    // full, double-applying the covered part — stale removals could
+    // double-apply on replay. It must now be dropped and the book marked
+    // stale instead of silently corrupting.
+    let mut book = BookMirror::new();
+    book.apply_snapshot(10, &[(100.0, 5.0)], &[(101.0, 4.0)]);
+
+    // Partial overlap: window [8, 12] straddles the applied seq 10. The bid
+    // removal belongs to seq 8 — already covered by the snapshot, so the
+    // full delta must NOT be applied.
+    assert!(!book.apply_delta(8, 12, &[(100.0, 0.0)], &[]));
+    assert!(book.is_stale(), "partial overlap must mark the book stale");
+    assert_eq!(book.best_bid(), None, "reads refused while stale");
+
+    // A fresh snapshot restores service (EVT-9).
+    book.apply_snapshot(20, &[(99.0, 1.0)], &[(101.0, 1.0)]);
+    assert!(!book.is_stale());
+    assert_eq!(book.best_bid(), Some((99.0, 1.0)));
+}
+
+// ---- spec 033/034 consumer-surface coverage (WAL-6/7, NFL-6/8) ------------
+//
+// The schema-4 variants are covered end-to-end by the proptest round-trip
+// (`evt_3_envelope_roundtrip` — body_strategy includes TradeWithAddr and
+// NetflowSnapshot) and by the BDC-1/2 golden tables in `bincode_migration.rs`.
+// These tests pin the consumer-side properties the specs name, so each
+// requirement ID has a dedicated test (CONV-21).
+
+fn hex_of(s: &str) -> Vec<u8> {
+    assert!(s.len().is_multiple_of(2), "hex must have even length");
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex digit"))
+        .collect()
+}
+
+#[test]
+fn wal_6_trade_view_unifies_trade_and_tradewithaddr() {
+    let trade = MarketEvent::Trade {
+        price: 50000.0,
+        qty: 0.3,
+        side: Side::Sell,
+        trade_id: 42,
+    };
+    let with_addr = MarketEvent::TradeWithAddr {
+        price: 50000.0,
+        qty: 0.3,
+        side: Side::Sell,
+        trade_id: 42,
+        taker_addr: "0xabc123".into(),
+    };
+    assert_eq!(
+        trade.trade_view(),
+        Some((50000.0, 0.3, Side::Sell, 42, None)),
+        "schema-3 Trade exposes the common fields with no address (WAL-5)"
+    );
+    assert_eq!(
+        with_addr.trade_view(),
+        Some((50000.0, 0.3, Side::Sell, 42, Some("0xabc123"))),
+        "TradeWithAddr routes through the same view with the address (WAL-6)"
+    );
+    let status = MarketEvent::Status {
+        kind: StatusKind::Census,
+        detail: "probe".into(),
+    };
+    assert_eq!(
+        status.trade_view(),
+        None,
+        "non-trade variants have no trade view"
+    );
+}
+
+/// Pinned schema-4 golden bytes for `TradeWithAddr` (BDC-1 table restamped
+/// 2026-08-18, captured with bincode 1.3.3 — see `bincode_migration.rs`).
+/// Proves the new variant's wire bytes are stable from the consumer side and
+/// that a read frame re-encodes byte-identically (WAL-7).
+const WAL_7_GOLDEN_TRADE_WITH_ADDR: &str =
+    "0400030000000d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e0000000000000010c9ed40000000000000d03f00000000070000000000000008000000000000003078616263313233";
+
+#[test]
+fn wal_7_schema4_golden_pins_trade_with_addr() {
+    let bytes = hex_of(WAL_7_GOLDEN_TRADE_WITH_ADDR);
+    let ev = decode_event(&bytes).expect("pinned golden must decode");
+    match &ev.body {
+        MarketEvent::TradeWithAddr { taker_addr, .. } => {
+            assert_eq!(taker_addr, "0xabc123");
+        }
+        other => panic!("expected TradeWithAddr, got {other:?}"),
+    }
+    // decode(pin) -> encode(pin) byte-identical: bincode copies f64 payload
+    // bits verbatim, so a consumer that re-encodes a read frame keeps it
+    // intact (WAL-7 round-trip half).
+    assert_eq!(encode_event(&ev).unwrap(), bytes);
+}
+
+#[test]
+fn nfl_6_netflow_is_data_only_not_a_trade_input() {
+    // NFL-6: balances are DATA ONLY until an event-study gate promotes a
+    // feature. The consumer-surface proof: a NetflowSnapshot has no trade
+    // view, so it can never enter a fill/feature/strategy path as a trade.
+    let snap = MarketEvent::NetflowSnapshot {
+        address: "0x1234".into(),
+        balance: 1_000.0,
+    };
+    assert!(snap.trade_view().is_none());
+}
+
+/// Pinned schema-4 golden bytes for `NetflowSnapshot` (BDC-1 table restamp
+/// 2026-08-18 — see `bincode_migration.rs`).
+const NFL_8_GOLDEN_NETFLOW_SNAPSHOT: &str =
+    "0400080000000e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f0000000a00000000000000307864656164626565663d0ad7e387d63241";
+
+#[test]
+fn nfl_8_schema4_golden_pins_netflow_snapshot() {
+    let bytes = hex_of(NFL_8_GOLDEN_NETFLOW_SNAPSHOT);
+    let ev = decode_event(&bytes).expect("pinned netflow golden must decode");
+    match &ev.body {
+        MarketEvent::NetflowSnapshot { address, balance } => {
+            assert_eq!(address, "0xdeadbeef");
+            assert!(
+                balance.is_finite(),
+                "balance must be finite (CONV-8 fail-closed)"
+            );
+        }
+        other => panic!("expected NetflowSnapshot, got {other:?}"),
+    }
+    assert_eq!(encode_event(&ev).unwrap(), bytes);
 }

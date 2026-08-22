@@ -72,6 +72,9 @@ enum OrderflowState {
         venue: Venue,
         symbol: SymbolId,
         direction: Side,
+        /// Timestamp of the SIGNAL, not of the eventual fill — hold/exit
+        /// checks count from signal time (the sim's latency_ns then shifts
+        /// the actual fill; entry_ts is not a fill timestamp).
         entry_ts_ns: i64,
     },
     Entered {
@@ -238,7 +241,13 @@ impl Strategy for OrderflowV1 {
         {
             return Vec::new();
         }
-        if u.venue != self.universe.venues.first().copied().unwrap_or(Venue::Hyperliquid)
+        if u.venue
+            != self
+                .universe
+                .venues
+                .first()
+                .copied()
+                .unwrap_or(Venue::Hyperliquid)
             || !self.universe.symbols.contains(&u.symbol)
         {
             return Vec::new();
@@ -291,7 +300,8 @@ impl Strategy for OrderflowV1 {
         let mut p = ParamSpace::default();
         p.grid.insert("entry_gauge".into(), vec![0.2, 0.3, 0.4]);
         p.grid.insert("min_tape_bps".into(), vec![0.5, 1.0, 2.0]);
-        p.grid.insert("min_depth".into(), vec![50_000.0, 100_000.0, 250_000.0]);
+        p.grid
+            .insert("min_depth".into(), vec![50_000.0, 100_000.0, 250_000.0]);
         p
     }
 
@@ -306,7 +316,11 @@ impl Strategy for OrderflowV1 {
         if let Some(&v) = params.get("min_depth") {
             cfg.min_depth = v;
         }
-        Box::new(OrderflowV1::new(self.id.clone(), self.universe.clone(), cfg))
+        Box::new(OrderflowV1::new(
+            self.id.clone(),
+            self.universe.clone(),
+            cfg,
+        ))
     }
 }
 
@@ -371,7 +385,9 @@ mod tests {
         let mut s = strat();
         let mut c = ctx(1_000_000_000);
         // Bid-dominant depth (gauge +0.5) + aggressive buying (tape +2 bps).
-        assert!(s.on_feature(&up("book.depth.0.5", 0.5, 900_000_000), &mut c).is_empty());
+        assert!(s
+            .on_feature(&up("book.depth.0.5", 0.5, 900_000_000), &mut c)
+            .is_empty());
         assert!(s
             .on_feature(&up("book.depth_total.0.5", 500_000.0, 950_000_000), &mut c)
             .is_empty());
@@ -385,7 +401,9 @@ mod tests {
     fn of_2_enters_short_on_mirrored_imbalance() {
         let mut s = strat();
         let mut c = ctx(1_000_000_000);
-        assert!(s.on_feature(&up("book.depth.0.5", -0.5, 900_000_000), &mut c).is_empty());
+        assert!(s
+            .on_feature(&up("book.depth.0.5", -0.5, 900_000_000), &mut c)
+            .is_empty());
         assert!(s
             .on_feature(&up("book.depth_total.0.5", 500_000.0, 950_000_000), &mut c)
             .is_empty());
@@ -401,7 +419,9 @@ mod tests {
         s.on_feature(&up("book.depth.0.5", 0.5, 900_000_000), &mut c);
         s.on_feature(&up("book.depth_total.0.5", 500_000.0, 950_000_000), &mut c);
         // No tape yet.
-        assert!(s.on_feature(&up("book.depth.0.5", 0.6, 1_000_000_000), &mut c).is_empty());
+        assert!(s
+            .on_feature(&up("book.depth.0.5", 0.6, 1_000_000_000), &mut c)
+            .is_empty());
         // Misaligned tape: bids dominate but tape is selling.
         let none = s.on_feature(&up("tape.bps_delta", -2.0, 1_000_000_000), &mut c);
         assert!(none.is_empty(), "misaligned tape must not enter");
@@ -415,7 +435,9 @@ mod tests {
         s.on_feature(&up("book.depth_total.0.5", 500_000.0, 950_000_000), &mut c);
         // Tape observed 6s ago > confirm_window_ns (5s) → stale, no entry.
         s.on_feature(&up("tape.bps_delta", 2.0, 994_000_000), &mut c);
-        assert!(s.on_feature(&up("book.depth.0.5", 0.5, 1_000_000_000), &mut c).is_empty());
+        assert!(s
+            .on_feature(&up("book.depth.0.5", 0.5, 1_000_000_000), &mut c)
+            .is_empty());
     }
 
     #[test]

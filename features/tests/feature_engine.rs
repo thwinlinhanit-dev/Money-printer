@@ -538,9 +538,15 @@ fn om_3_tape_bps_delta_hides_sub_floor_noise() {
     let mut e = FeatureEngine::new(SEC);
     e.register_tick(|| Box::new(TapeBpsDelta::new(0.5)));
     let mut ups = e.on_event(&trade(1, 100.0, 1.0, Side::Buy));
-    assert!(value(&e, &ups, "tape.bps_delta").is_none(), "first trade: no prior");
+    assert!(
+        value(&e, &ups, "tape.bps_delta").is_none(),
+        "first trade: no prior"
+    );
     ups = e.on_event(&trade(2, 100.0001, 1.0, Side::Buy));
-    assert!(value(&e, &ups, "tape.bps_delta").is_none(), "0.01 bps < 0.5 floor");
+    assert!(
+        value(&e, &ups, "tape.bps_delta").is_none(),
+        "0.01 bps < 0.5 floor"
+    );
     ups = e.on_event(&trade(3, 100.01, 1.0, Side::Buy));
     let d = value(&e, &ups, "tape.bps_delta").unwrap();
     // (100.01-100.0001)/100.0001 × 10000 ≈ 0.99 bps
@@ -555,7 +561,10 @@ fn om_4_tape_tps_counts_per_bar() {
     for _ in 0..3 {
         all.extend(e.on_event(&trade(SEC, 100.0, 1.0, Side::Buy)));
     }
-    assert!(value(&e, &all, "tape.tps.1s").is_none(), "bar not closed yet");
+    assert!(
+        value(&e, &all, "tape.tps.1s").is_none(),
+        "bar not closed yet"
+    );
     // First trade of the next second closes the 1s bar holding 3 trades.
     all.extend(e.on_event(&trade(2 * SEC, 100.0, 1.0, Side::Buy)));
     assert_eq!(value(&e, &all, "tape.tps.1s"), Some(3.0));
@@ -590,7 +599,10 @@ fn liq_1_vol_by_side_accumulates_and_window_expires() {
     let mut all = Vec::new();
     all.extend(e.on_event(&liq(1, 100.0, 2.0, Side::Buy)));
     assert_eq!(value(&e, &all, "liq.vol_buy"), Some(200.0));
-    assert!(value(&e, &all, "liq.vol_sell").is_none(), "sell side untouched");
+    assert!(
+        value(&e, &all, "liq.vol_sell").is_none(),
+        "sell side untouched"
+    );
     all.extend(e.on_event(&liq(2, 101.0, 3.0, Side::Sell)));
     assert_eq!(value(&e, &all, "liq.vol_sell"), Some(303.0));
     // Buy sum keeps its own window (not netted against the sell side).
@@ -676,7 +688,7 @@ fn liq_delta_1_divergence_when_venues_disagree() {
     let mut all = Vec::new();
     all.extend(e.on_event(&liq_at(1, 100.0, 5.0, Side::Buy, Venue::Bybit))); // +500
     all.extend(e.on_event(&liq_at(2, 100.0, 3.0, Side::Sell, Venue::Okx))); //  -300
-    // (500 - 0) - (0 - 300) = 800
+                                                                            // (500 - 0) - (0 - 300) = 800
     assert_eq!(value(&e, &all, "liq.delta.bybit_okx"), Some(800.0));
     // A sell liq on bybit partially cancels venue a's pressure.
     all.extend(e.on_event(&liq_at(3, 100.0, 1.0, Side::Sell, Venue::Bybit)));
@@ -833,7 +845,9 @@ fn fea_7_features_toml_parses_and_rejects_unknown_keys() {
     // The production pair (bybit x binance) registers cleanly.
     let prod_cfg_engine = engine_from_config(&prod_cfg).unwrap();
     assert!(
-        prod_cfg_engine.name_to_id("liq.delta.bybit_binance").is_some(),
+        prod_cfg_engine
+            .name_to_id("liq.delta.bybit_binance")
+            .is_some(),
         "production [liq_delta] pair must register"
     );
 }
@@ -909,6 +923,115 @@ fn fea_9_offline_only_features_are_flagged_for_live_refusal() {
     assert!(clean.offline_only_features().is_empty());
 }
 
+// ---- microstructure (microprice / spread.bp / spread.regime) ---------------
+
+fn book_hl(recv: i64, bids: &[(f64, f64)], asks: &[(f64, f64)]) -> EventEnvelope {
+    let mut b: smallvec::SmallVec<[_; 8]> = smallvec::SmallVec::new();
+    for &(p, q) in bids {
+        b.push((p, q));
+    }
+    let mut a: smallvec::SmallVec<[_; 8]> = smallvec::SmallVec::new();
+    for &(p, q) in asks {
+        a.push((p, q));
+    }
+    EventEnvelope::new(
+        Venue::Hyperliquid,
+        SymbolId(0),
+        recv,
+        recv,
+        100,
+        MarketEvent::BookSnapshot {
+            bids: b,
+            asks: a,
+            seq: 100,
+            depth: 4,
+            reason: SnapshotReason::Init,
+        },
+    )
+}
+
+fn micro_engine() -> FeatureEngine {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_tick(|| Box::new(Microprice::for_venue(Venue::Hyperliquid)))
+        .register_tick(|| Box::new(SpreadBp::for_venue(Venue::Hyperliquid)))
+        .register_tick(|| Box::new(SpreadRegime::for_venue(Venue::Hyperliquid, 2.0)));
+    e
+}
+
+#[test]
+fn mic_1_microprice_is_qty_weighted_mid() {
+    // bid 100 × 10, ask 101 × 20: microprice = (10·101 + 20·100)/30 ≈ 100.3333.
+    let mut e = micro_engine();
+    let u = e.on_event(&book_hl(1, &[(100.0, 10.0)], &[(101.0, 20.0)]));
+    let mp = value(&e, &u, "microprice.hyperliquid").unwrap();
+    assert!((mp - 100.333333333).abs() < 1e-6);
+    // Venue mismatch: a Bybit book must not feed the HL-scoped feature.
+    let u = e.on_event(&book(1, &[(100.0, 10.0)], &[(101.0, 20.0)]));
+    assert!(value(&e, &u, "microprice.hyperliquid").is_none());
+}
+
+#[test]
+fn mic_2_spread_bp_and_regime_threshold() {
+    // bid 100, ask 101 → spread = 1/100.5 × 10_000 ≈ 99.5 bps ≥ 2 → regime 1.
+    let mut e = micro_engine();
+    let u = e.on_event(&book_hl(1, &[(100.0, 6.0)], &[(101.0, 2.0)]));
+    let bp = value(&e, &u, "spread.bp.hyperliquid").unwrap();
+    assert!((bp - 99.50248756).abs() < 1e-4);
+    assert_eq!(value(&e, &u, "spread.regime.hyperliquid"), Some(1.0));
+    // Tight book: 100 / 100.01 → 0.99995 bps < 2 → regime 0.
+    let u = e.on_event(&book_hl(2, &[(100.0, 6.0)], &[(100.01, 2.0)]));
+    let bp = value(&e, &u, "spread.bp.hyperliquid").unwrap();
+    assert!((bp - 0.9999500).abs() < 1e-6);
+    assert_eq!(value(&e, &u, "spread.regime.hyperliquid"), Some(0.0));
+}
+
+#[test]
+fn mic_3_silent_on_stale_or_one_sided_book() {
+    // One-sided snapshot (no asks) → nothing to compute (FEA-8).
+    let mut e = micro_engine();
+    assert!(e.on_event(&book_hl(1, &[(100.0, 6.0)], &[])).is_empty());
+    // A gap delta stales the book → all three go silent.
+    let gap = EventEnvelope::new(
+        Venue::Hyperliquid,
+        SymbolId(0),
+        2,
+        2,
+        105,
+        MarketEvent::BookDelta {
+            bids: smallvec![(100.0, 9.0)],
+            asks: smallvec![],
+            first_seq: 105,
+            last_seq: 105,
+        },
+    );
+    assert!(e.on_event(&gap).is_empty());
+}
+
+#[test]
+fn mic_4_config_registers_microstructure_family_and_rejects_unknown_slug() {
+    use mp_features::FeaturesConfig;
+    let cfg = FeaturesConfig::from_toml(
+        "[microstructure]\nvenues = [\"hyperliquid\"]\nwide_spread_bps = 1.5",
+    )
+    .unwrap();
+    assert_eq!(cfg.microstructure.wide_spread_bps, 1.5);
+    let mut e = mp_features::engine_from_config(&cfg).unwrap();
+    let u = e.on_event(&book_hl(1, &[(100.0, 10.0)], &[(100.02, 10.0)]));
+    // spread = 0.02/100.01 × 10_000 ≈ 2.0 bps ≥ 1.5 → regime 1.
+    let mp = value(&e, &u, "microprice.hyperliquid").unwrap();
+    assert!((mp - 100.01).abs() < 1e-6);
+    assert_eq!(value(&e, &u, "spread.regime.hyperliquid"), Some(1.0));
+    // Fail-closed (CONV-8): a bogus venue slug is an error, not a skip.
+    let bad = FeaturesConfig {
+        microstructure: mp_features::MicrostructureParams {
+            venues: vec!["bogus".into()],
+            wide_spread_bps: 2.0,
+        },
+        ..FeaturesConfig::default()
+    };
+    assert!(mp_features::engine_from_config(&bad).is_err());
+}
+
 // ---- FEA-2: as-of ordering is a prefix property -----------------------------
 
 #[test]
@@ -937,4 +1060,91 @@ fn fea_2_updates_for_a_prefix_equal_the_prefix_of_updates() {
             "prefix k={k} must be a prefix of the full run"
         );
     }
+}
+
+// ---- spec 035 SWG-2: swing bar features register via engine_from_config -----
+
+#[test]
+fn swg_2_engine_from_config_registers_swing_bar_features() {
+    use mp_features::FeaturesConfig;
+    let cfg = FeaturesConfig::from_toml(
+        r#"
+        bar_tf_ns = 60000000000
+        [swing]
+        realized_vol_window = 5
+        sqrt_bars_per_year = 725.2
+        trend_lookback = 3
+        value_area_window = 5
+        value_area_bucket = 10.0
+        rolling_vwap_bars = 3
+        "#,
+    )
+    .unwrap();
+    let mut e = mp_features::engine_from_config(&cfg).unwrap();
+    // Every swing feature id must be registered and interned (SWG-2: bar-only
+    // regime/structure available to strategies).
+    for id in [
+        "swing.realized_vol.5",
+        "swing.trend_strength.3",
+        "swing.value_area.poc.5",
+        "swing.value_area.high.5",
+        "swing.value_area.low.5",
+        "swing.rolling_vwap.3",
+    ] {
+        assert!(e.name_to_id(id).is_some(), "{id} must register");
+    }
+    // Feed 6 bars (one trade per 60s bucket) so 5 bars close; each swing
+    // feature emits once warm.
+    let mut all = Vec::new();
+    for i in 0..6 {
+        all.extend(e.on_event(&trade(i * SEC * 60 + 1, 100.0 + i as f64, 1.0, Side::Buy)));
+    }
+    assert!(value(&e, &all, "swing.realized_vol.5").is_some());
+    assert!(value(&e, &all, "swing.trend_strength.3").is_some());
+    assert!(value(&e, &all, "swing.value_area.poc.5").is_some());
+    assert!(value(&e, &all, "swing.value_area.high.5").is_some());
+    assert!(value(&e, &all, "swing.value_area.low.5").is_some());
+    assert!(value(&e, &all, "swing.rolling_vwap.3").is_some());
+    // Params change → new feature-store ver (FEA-6): different config hash.
+    let cfg2 = FeaturesConfig::from_toml("[swing]\nrealized_vol_window = 20").unwrap();
+    assert_ne!(cfg.params_hash().unwrap(), cfg2.params_hash().unwrap());
+}
+
+// ---- spec 036 SLQ: liquidity-structure family registers via engine config --
+
+#[test]
+fn slq_engine_from_config_registers_sweep_and_profile_family() {
+    use mp_features::FeaturesConfig;
+    let cfg = FeaturesConfig::from_toml(
+        r#"
+        bar_tf_ns = 60000000000
+        [swing]
+        sweep_range_n = 5
+        sweep_atr_n = 5
+        profile_window = 6
+        "#,
+    )
+    .unwrap();
+    let mut e = mp_features::engine_from_config(&cfg).unwrap();
+    // The whole SLQ family must register: ATR, close passthrough, both range
+    // boundaries, the four sweep event streams, and the four nearest-level
+    // streams (FEA-4 one-code-path: live and materialized share these ids).
+    for id in [
+        "swing.atr.5",
+        "swing.close",
+        "swing.range.high.5",
+        "swing.range.low.5",
+        "swing.sweep.low.5",
+        "swing.sweep.high.5",
+        "swing.sweep.low.stop.5",
+        "swing.sweep.high.stop.5",
+        "swing.profile.hvn_above.6",
+        "swing.profile.hvn_below.6",
+        "swing.profile.lvn_above.6",
+        "swing.profile.lvn_below.6",
+    ] {
+        assert!(e.name_to_id(id).is_some(), "{id} must register");
+    }
+    // Unknown [swing] keys still fail closed (FEA-7).
+    assert!(FeaturesConfig::from_toml("[swing]\nsweep_range_k = 5").is_err());
 }

@@ -2,7 +2,6 @@
 the job contract — hand-verified numbers and a fake ``whale_study`` shim."""
 
 import json
-import sys
 from pathlib import Path
 
 import pytest

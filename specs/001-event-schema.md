@@ -17,7 +17,7 @@ Every event is wrapped in:
 | field | type | notes |
 |---|---|---|
 | `schema_ver` | u16 | starts at 1 (CONV-20) |
-| `venue` | enum `Venue` | `BinanceFutures, Bybit, Okx, Hyperliquid, Coinbase, KrakenFutures, Deribit, Fred` |
+| `venue` | enum `Venue` | `BinanceFutures, Bybit, Okx, Hyperliquid, Coinbase, KrakenFutures, Deribit, Fred, Ethereum` |
 | `symbol` | `SymbolId` (u32) | interned; string form in symbol table only |
 | `exch_ts_ns` | i64 | exchange-reported time (0 if venue omits) |
 | `recv_ts_ns` | i64 | local receive time, from `WallClock` at socket read |
@@ -52,10 +52,21 @@ OptionTicker  { leg: OptionLeg, mark_iv: f64, mark_price: f64, underlying_price:
 
 OptionLeg = { underlying: String, strike: f64, expiry_ts_ns: i64, kind: Call|Put }
 OptionGreeks = { delta, gamma, theta, vega: f64 }
+
+— schema 3→4 additions (spec 033/034, append-only — see Decisions) —
+TradeWithAddr { price: f64, qty: f64, side: Side /*aggressor*/, trade_id: u64,
+                taker_addr: String /*opaque 0x id; "" if venue omits, WAL-4*/ }
+NetflowSnapshot { address: String /*opaque 0x id*/, balance: f64 /*raw base units*/ }
 ```
 
 `Side = Buy | Sell`. Status events flow through the same pipe: gaps and
 disconnects are data (they cluster with volatility) and sim needs them.
+
+Schema-4 note (2026-08-18): `TradeWithAddr` and `NetflowSnapshot` are
+appended variants (spec 033/034 amendment, CONV-20 — old variant indices
+unchanged). The log reader decodes schema-1 (`EnvelopeV1` legacy),
+schema-2/3 (current codec), and the current version (4) — see the reader-arm
+list in `core::log::LogReader`.
 
 ### Symbol metadata table (`core::SymbolMeta`)
 `symbol_id, venue, venue_symbol (string), base, quote, kind (Spot|Perp|Future),
@@ -151,7 +162,11 @@ stays flagged and would keep the audit debt alive (BDC-7).
   `bincode-next` dependency — the advisory has no patched versions).
 - **BDC-8** This spec MUST NOT change `FORMAT_VER`, `SCHEMA_VER`, the frame
   layout, or the `schema_ver` dispatch; the on-disk log format is frozen
-  (EVT-4/EVT-8, CONV-20).
+  (EVT-4/EVT-8, CONV-20). The single sanctioned exception is an
+  owner-approved spec amendment that only APPENDS enum variants (CONV-20),
+  as 2→3 (028/030/031) and 3→4 (033/034) did — the reader keeps the prior
+  schema arm and the `GOLDEN` table is restamped in the same change (the
+  only per-entry difference is the leading `schema_ver` bytes).
 - **BDC-9** Workspace `rust-version` MUST be raised to ≥ the adopted line's
   MSRV in the same commit (the toolchain is `stable`, so no build impact; the
   declared floor stays honest). `bincode-next` 3.x declares `rust-version`
@@ -166,7 +181,7 @@ stays flagged and would keep the audit debt alive (BDC-7).
 - [x] EVT-2 heap-free Trade path proven by a counting allocator. `evt_2_trade_envelope_is_alloc_free`.
 - [x] BDC-1/BDC-2 golden bytes: bincode-2-line encode with `config::legacy()`
   equals the committed bincode-1.3.3 hex and decodes back to the exact
-  source value for all 14 `MarketEvent` variants + `SymbolMeta` +
+  source value for all 16 `MarketEvent` variants + `SymbolMeta` +
   `EnvelopeV1`. `bdc_1_golden_bincode1_bytes_unchanged`,
   `bdc_2_golden_bytes_decode_with_legacy`.
 - [x] BDC-3 existing suite passes unchanged on the swapped codec — full
@@ -243,6 +258,19 @@ stays flagged and would keep the audit debt alive (BDC-7).
   `rust-version` 1.90 (edition 2024). The draft said 1.85 (bincode 2.0.2's
   MSRV); 1.90 is the honest floor for `bincode-next`. `stable` toolchain
   (1.96) is unaffected.
+- 2026-08-18 (spec 033/034, owner sign-off via "implement all"): `SCHEMA_VER`
+  3→4, APPEND-ONLY (CONV-20 — old variant indices unchanged, so schema-3
+  frames stay readable with the current types; no legacy struct needed):
+  `Venue::Ethereum` appended (034 NFL-1); new variants `TradeWithAddr`
+  (033 WAL-1) and `NetflowSnapshot` (034 NFL-1). The log reader gained a
+  schema-3 decode arm (mirroring the 2→3 precedent); the schema-2 arm stays.
+  Writes always stamp the current version. `GOLDEN` restamped in
+  `core/tests/bincode_migration.rs` — every existing vector differs from its
+  schema-3 capture ONLY in the leading `schema_ver` bytes (03→04), verified
+  byte-for-byte at regeneration; `TradeWithAddr`/`NetflowSnapshot` vectors
+  added. Pins updated deliberately: `bdc_8_wire_format_frozen` (SCHEMA_VER
+  == 4), `features::liq_5_no_new_event_variant`, `deribit_fixtures`
+  `opt_10_host_and_schema_signed_off`.
 
 ## Appendix (draft) — future wire format: `config::standard()` (varint)
 
@@ -332,7 +360,10 @@ land near the −8% BookSnapshot end; small-event days nearer −40%.
 concentrated in the reader dual-path + a second golden-vector set, not in
 data movement. Revisit triggers:
 
-- **disk budget** — raw data approaching available storage;
+- **disk budget** — raw data approaching available storage (wired
+  2026-08-14: `storage-budget` P2, spec 009 OPS-15 — `mp-ops
+  storage-budget` projects days-to-cap from the corpus's own per-day growth
+  and alerts when the horizon is crossed);
 - **replay cost** — if log decode shows up in sim runtime profiles;
 - **bundling** — if a format change is needed anyway (e.g. slimming the
   9 B/event frame header, or enabling bincode fingerprints), fold the

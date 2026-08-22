@@ -41,7 +41,7 @@ mod impl_ {
     };
     use mp_collectors::Normalizer;
     use mp_core::log::EventLogWriter;
-    use mp_core::{EventEnvelope, Venue};
+    use mp_core::EventEnvelope;
     use serde::Deserialize;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -117,9 +117,7 @@ mod impl_ {
                 || cfg.watch_poll_interval_s == 0
                 || cfg.leaderboard_refresh_s == 0
             {
-                return Err(
-                    "whale config requires top_n > 0 and non-zero poll intervals".into(),
-                );
+                return Err("whale config requires top_n > 0 and non-zero poll intervals".into());
             }
             return Ok(cfg);
         }
@@ -282,10 +280,7 @@ mod impl_ {
                 // the raw log stays fresh on flat days (zero positions is a
                 // real observation, and the watchdog's log-stall check must
                 // not mistake a quiet market for a dead collector).
-                let sym = normalizer
-                    .symbols()
-                    .lookup(Venue::Hyperliquid, "")
-                    .unwrap_or(mp_core::SymbolId(0));
+                let sym = normalizer.census_symbol();
                 event_buffer.push(census_detected(sym, recv_ns, positions_found));
                 any = true;
             }
@@ -314,19 +309,13 @@ mod impl_ {
                         binutil::touch_heartbeat(&raw_dir, "hyperliquid_positions");
                     }
                 }
-                let sym = normalizer
-                    .symbols()
-                    .lookup(Venue::Hyperliquid, "")
-                    .unwrap_or(mp_core::SymbolId(0));
+                let sym = normalizer.census_symbol();
                 event_buffer.push(census_detected(sym, recv_ns, positions_found));
                 any = true;
             }
 
             if fail_top || fail_watch {
-                let sym = normalizer
-                    .symbols()
-                    .lookup(Venue::Hyperliquid, "")
-                    .unwrap_or(mp_core::SymbolId(0));
+                let sym = normalizer.census_symbol();
                 event_buffer.push(gap_detected(
                     sym,
                     recv_ns,

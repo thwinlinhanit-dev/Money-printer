@@ -62,7 +62,10 @@ pub fn determinism_file(score_dir: &Path, date: &str) -> PathBuf {
 /// Load the artifact for `date` from the scorecards dir. `Err` on a CORRUPT
 /// file (fail-closed: the gate must know the proof cannot be read), `Ok(None)`
 /// when absent.
-pub fn load_determinism(score_dir: &Path, date: &str) -> Result<Option<DeterminismArtifact>, String> {
+pub fn load_determinism(
+    score_dir: &Path,
+    date: &str,
+) -> Result<Option<DeterminismArtifact>, String> {
     let path = determinism_file(score_dir, date);
     match std::fs::read_to_string(&path) {
         Ok(text) => {
@@ -77,7 +80,10 @@ pub fn load_determinism(score_dir: &Path, date: &str) -> Result<Option<Determini
 
 /// Serialize + write the artifact (replacing any prior verdict for the date —
 /// a re-check supersedes, W-6 applies to recorded data, not gate artifacts).
-pub fn write_determinism(score_dir: &Path, artifact: &DeterminismArtifact) -> Result<PathBuf, String> {
+pub fn write_determinism(
+    score_dir: &Path,
+    artifact: &DeterminismArtifact,
+) -> Result<PathBuf, String> {
     let path = determinism_file(score_dir, &artifact.date);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;

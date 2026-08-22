@@ -1,0 +1,20 @@
+# Storage-budget watch (spec 009 OPS-15, the spec 001 appendix's "disk
+# budget" trigger wired): projects when data/raw growth hits the budget cap
+# and raises storage-budget (P2) when the projection is within the horizon.
+# Runs daily via storage-budget.timer. The budget comes from
+# MP_STORAGE_BUDGET_BYTES in ops.env (operator-set, fail-closed: unset means
+# the check exits 2 and logs in journald — never a silent skip). Reads ONLY
+# the corpus (ProtectSystem=strict, no ReadWritePaths) — W-6.
+[Unit]
+Description=Money Printer storage-budget growth watch (P2)
+
+[Service]
+Type=oneshot
+User=printer
+WorkingDirectory=/opt/money-printer
+EnvironmentFile=/etc/money-printer/ops.env
+ExecStart=/opt/money-printer/bin/mp-ops storage-budget --dir /opt/money-printer/data/raw --telegram
+ProtectSystem=strict
+# Inputs are read-only to the job (W-6: it can never alter the corpus).
+ReadOnlyPaths=/opt/money-printer/data/raw
+NoNewPrivileges=true

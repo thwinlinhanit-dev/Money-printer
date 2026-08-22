@@ -63,10 +63,7 @@ pub fn state_machine_self_test() -> Result<(), String> {
     // Illegal transitions must error, never silently change state.
     let mut store = OrderStore::new();
     store.submit("self-test");
-    if store
-        .apply("self-test", Ack, 0)
-        .is_some_and(|r| r.is_ok())
-    {
+    if store.apply("self-test", Ack, 0).is_some_and(|r| r.is_ok()) {
         return Err("ack-before-submit must be illegal".into());
     }
     Ok(())

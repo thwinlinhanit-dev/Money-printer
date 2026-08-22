@@ -36,3 +36,18 @@ Funding regime change by venue (formula/interval changes); squeeze while
 hedge-legged (execution gap between legs — enter hedge-first); spot/perp
 basis blowout; venue solvency during exactly the events that pay us;
 crowding by other carry harvesters compressing extremes.
+
+## Edge results
+### 2026-08-21 — hyperliquid BTC, merged `data/swing_hyperliquid_BTC.log` (Aug 8–19, hourly funding)
+Walk-forward (train 3d / embargo 12h / test 1d / step 1d, 4h bar replay,
+27-combo grid, min-trades 2): the in-sample edge does NOT reproduce
+out-of-sample. Of the 4 windows that SELECTED, the 3 OOS windows that
+actually traded went NEGATIVE (35 trades, −151; 9 trades, −160; 2 trades,
++17199); the remaining selected windows traded 0 OOS. Diagnosed and fixed
+during this run: (1) `subscriptions()` used glob `"funding.*"` — the engine
+matches by `starts_with`, so carry was never dispatched and every sim run
+was silently VACUOUS; (2) entry grid 5e-5..2e-4 sat entirely above the
+observed ±1.5e-5 hourly rate span — recalibrated to entry 2e-6..4e-6
+(empirical boundary: entry 5e-6 starves the z-gate). Status: hypothesis
+not confirmed on this 12-day sample; no OOS edge measured.
+Full output: `runs/swing-wf/carry-v1-hyperliquid-wf.txt`.

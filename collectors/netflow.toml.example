@@ -1,0 +1,37 @@
+# Exchange-reserve balance poller (spec 034, NFL-1..6).  Public REST with a
+# FREE Etherscan API key read from the environment ONLY (PD-2 — the key never
+# lives in the repo):
+#   $env:MP_ETHERSCAN_KEY = "..."
+#   cargo run -p mp-collectors --features live-http --bin mp-netflow -- \
+#     --config collectors/netflow.toml.example
+# Records NetflowSnapshot events to data/raw/{date}_netflow_ethereum.log.
+# Research derives exchange netflows from balance deltas (NFL-5) — the
+# snapshot is the honest primitive.
+
+data_dir = "data"
+
+# Poll cadence in seconds (NFL-1 default 300s = 5 min).
+poll_interval_s = 300
+
+# Pacing between per-wallet fetches (Etherscan free tier: 5 calls/sec).
+min_poll_gap_ms = 250
+
+# Known exchange hot wallets. `label` is for logs only — it is NEVER recorded
+# into events (NFL-3; events carry the opaque address only). `contract` is
+# the ERC-20 contract address for the asset; EMPTY = native ETH balance.
+# Balances are recorded in raw base units (wei / token base units) — scale by
+# the asset's decimals in research (NFL-3).
+#
+# Example entries (USDT on Ethereum mainnet, 6 decimals):
+# [[watchlist]]
+# label = "example-exchange-hot"
+# address = "0x..."
+# asset = "USDT"
+# contract = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+#
+# [[watchlist]]
+# label = "example-exchange-eth"
+# address = "0x..."
+# asset = "ETH"
+# contract = ""
+watchlist = []

@@ -586,9 +586,24 @@ fn cvg_10_nan_fails_closed() {
 
 /// `n` trades spaced `spacing_s` seconds apart starting at `start_ns`, all at
 /// `price` with qty 1 — a dense enough stream for the veracity windows.
-fn dense(venue: Venue, sym: SymbolId, start_ns: i64, n: u64, price: f64, spacing_s: i64) -> Vec<EventEnvelope> {
+fn dense(
+    venue: Venue,
+    sym: SymbolId,
+    start_ns: i64,
+    n: u64,
+    price: f64,
+    spacing_s: i64,
+) -> Vec<EventEnvelope> {
     (0..n)
-        .map(|i| trade(venue, sym, start_ns + (i as i64) * spacing_s * 1_000_000_000, i + 1, price))
+        .map(|i| {
+            trade(
+                venue,
+                sym,
+                start_ns + (i as i64) * spacing_s * 1_000_000_000,
+                i + 1,
+                price,
+            )
+        })
         .collect()
 }
 
@@ -603,7 +618,14 @@ fn cvg_13_veracity_flags_price_divergence_with_no_gap() {
     // drifts to 150 (50% outlier); binance/okx stay at 100 ⇒ cohort median 100
     // ⇒ bybit deviates 50%, the healthy venues 0%.
     let mut be = dense(Venue::BinanceFutures, bin, 100_000_000_000, 60, 100.0, 40);
-    be.extend(dense(Venue::BinanceFutures, bin, 3_700_000_000_000, 60, 100.0, 40));
+    be.extend(dense(
+        Venue::BinanceFutures,
+        bin,
+        3_700_000_000_000,
+        60,
+        100.0,
+        40,
+    ));
     compact(&root, Venue::BinanceFutures, "2026-08-04", be, &syms, "hB");
     let mut ye = dense(Venue::Bybit, byb, 100_000_000_000, 60, 100.0, 40);
     ye.extend(dense(Venue::Bybit, byb, 3_700_000_000_000, 60, 150.0, 40));
@@ -620,7 +642,12 @@ fn cvg_13_veracity_flags_price_divergence_with_no_gap() {
         .iter()
         .filter(|v| v.kind == "price_divergence")
         .collect();
-    assert_eq!(divs.len(), 1, "exactly one price divergence: {:?}", f.veracity);
+    assert_eq!(
+        divs.len(),
+        1,
+        "exactly one price divergence: {:?}",
+        f.veracity
+    );
     assert_eq!(divs[0].venue, "bybit", "the outlier is bybit");
     assert_eq!(divs[0].window_from_ns, 3_600_000_000_000, "window 2");
     assert_eq!(divs[0].trade_count, 60);
@@ -641,7 +668,14 @@ fn cvg_14_veracity_flags_trade_drought_with_no_gap() {
     // Window 1: all liquid (60 trades). Window 2: binance/okx stay at 60,
     // bybit collapses to 5 (frames dropped, presence still fine).
     let mut be = dense(Venue::BinanceFutures, bin, 100_000_000_000, 60, 100.0, 40);
-    be.extend(dense(Venue::BinanceFutures, bin, 3_700_000_000_000, 60, 100.0, 40));
+    be.extend(dense(
+        Venue::BinanceFutures,
+        bin,
+        3_700_000_000_000,
+        60,
+        100.0,
+        40,
+    ));
     compact(&root, Venue::BinanceFutures, "2026-08-04", be, &syms, "hB");
     let mut ye = dense(Venue::Bybit, byb, 100_000_000_000, 60, 100.0, 40);
     ye.extend(dense(Venue::Bybit, byb, 3_700_000_000_000, 5, 100.0, 40));
@@ -703,7 +737,11 @@ fn cvg_15_veracity_needs_liquid_cohort_and_is_deterministic() {
     let f2 = detect(&root, "2026-08-04", &cfg(), "s", "h").unwrap();
     // A 30% price outlier on a sub-liquid window must NOT be flagged — no
     // liquid reference exists, so no claim is made (fail-closed, CVG-10 analog).
-    assert!(f1.veracity.is_empty(), "thin window ⇒ no veracity findings: {:?}", f1.veracity);
+    assert!(
+        f1.veracity.is_empty(),
+        "thin window ⇒ no veracity findings: {:?}",
+        f1.veracity
+    );
     // Determinism covers the whole artifact including the veracity section.
     assert_eq!(
         serde_json::to_vec_pretty(&f1).unwrap(),

@@ -9,6 +9,7 @@
 //! floor division `ts.div_euclid(interval) * interval` so candle-based views
 //! line up across queries.
 
+use mp_core::book::BookMirror;
 use mp_core::{EventEnvelope, MarketEvent, Side, Venue};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -52,13 +53,7 @@ pub fn footprint_bars(events: &[EventEnvelope], interval_ns: i64) -> Vec<Footpri
     let interval = interval_ns.max(1);
     let mut bars: BTreeMap<i64, BarAcc> = BTreeMap::new();
     for ev in events {
-        let MarketEvent::Trade {
-            price,
-            qty,
-            side,
-            ..
-        } = ev.body
-        else {
+        let Some((price, qty, side, _, _)) = ev.body.trade_view() else {
             continue;
         };
         let bucket = ev.recv_ts_ns.div_euclid(interval) * interval;
@@ -118,13 +113,7 @@ pub fn footprint_buckets(
     let block = bucket_usd.max(f64::MIN_POSITIVE);
     let mut rows: BTreeMap<(i64, i64), (f64, f64, u64)> = BTreeMap::new();
     for ev in events {
-        let MarketEvent::Trade {
-            price,
-            qty,
-            side,
-            ..
-        } = ev.body
-        else {
+        let Some((price, qty, side, _, _)) = ev.body.trade_view() else {
             continue;
         };
         let bucket = ev.recv_ts_ns.div_euclid(interval) * interval;
@@ -145,6 +134,100 @@ pub fn footprint_buckets(
             n_trades: n,
         })
         .collect()
+}
+
+/// One sampled order-book ladder — the DOM view (terminal Slice 1). `bids` and
+/// `asks` are the top `levels` resting entries, best first (highest bid, lowest
+/// ask). `stale` mirrors [`BookMirror::is_stale`]: the mirror refuses to serve
+/// a book with a sequence hole (EVT-9) — a ladder labeled `stale: true` must
+/// render as "no trusted book", never as a silent stale picture.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DomSnapshot {
+    /// Nominal sample time: the bucket boundary the book state was captured at.
+    pub ts_ns: i64,
+    pub stale: bool,
+    /// `(price, qty)` per level, best first; empty when `stale`.
+    pub bids: Vec<(f64, f64)>,
+    /// `(price, qty)` per level, best first; empty when `stale`.
+    pub asks: Vec<(f64, f64)>,
+}
+
+/// Reconstruct the book and sample the top-N ladder at fixed intervals —
+/// [`analytics`]'s third view. Book events BEFORE `from_ts_ns` are applied so
+/// the book is warm at the first sample (the ladder the viewer wants is *as of*
+/// the scrubbed time, not a book that starts cold there). Sampling semantics:
+/// a boundary strictly before an event's time settles with the PRE-apply state
+/// (the ladder as of the last event at or before the boundary), the boundary
+/// exactly at an event's time settles with that event applied, and trailing
+/// boundaries after the last event repeat the final state. Capped at
+/// `max_samples` (returned early). Pure, deterministic, no wall clock (PD-3).
+pub fn dom_series(
+    events: &[EventEnvelope],
+    from_ts_ns: i64,
+    to_ts_ns: i64,
+    every_ns: i64,
+    levels: usize,
+    max_samples: usize,
+) -> Vec<DomSnapshot> {
+    let every = every_ns.max(1_000_000); // 1 ms floor
+    let levels = levels.max(1).min(50);
+    let max_samples = max_samples.max(1);
+    if from_ts_ns > to_ts_ns {
+        return Vec::new();
+    }
+    let mut book = BookMirror::new();
+    let mut out: Vec<DomSnapshot> = Vec::new();
+    let mut next = from_ts_ns;
+    for ev in events {
+        let t = ev.recv_ts_ns;
+        if t >= from_ts_ns {
+            while next < t && next <= to_ts_ns {
+                push_dom_sample(&mut out, &book, next, levels);
+                next += every;
+                if out.len() >= max_samples {
+                    return out;
+                }
+            }
+        }
+        let _ = book.apply(&ev.body);
+        if t >= from_ts_ns && next == t && next <= to_ts_ns {
+            push_dom_sample(&mut out, &book, t, levels);
+            next += every;
+            if out.len() >= max_samples {
+                return out;
+            }
+        }
+    }
+    // Trailing region: no events left — repeat the final book on each
+    // remaining boundary (doc promise: "same state, capped at max_samples").
+    while next <= to_ts_ns {
+        push_dom_sample(&mut out, &book, next, levels);
+        next += every;
+        if out.len() >= max_samples {
+            return out;
+        }
+    }
+    out
+}
+
+/// Push one ladder sample; `stale` books emit empty sides (EVT-9: a hole
+/// renders as "no trusted book", never a silent stale picture).
+fn push_dom_sample(out: &mut Vec<DomSnapshot>, book: &BookMirror, ts: i64, levels: usize) {
+    if book.is_stale() {
+        out.push(DomSnapshot {
+            ts_ns: ts,
+            stale: true,
+            bids: Vec::new(),
+            asks: Vec::new(),
+        });
+    } else {
+        out.push(DomSnapshot {
+            ts_ns: ts,
+            stale: false,
+            bids: book.bids().take(levels).collect(),
+            asks: book.asks().take(levels).collect(),
+        });
+    }
 }
 
 /// One venue's contribution to an OI-weighted funding point.
@@ -416,7 +499,10 @@ pub fn carry_series(events: &[EventEnvelope], interval_ns: i64) -> Vec<CarryPoin
                 by_unit.entry("usd").or_default().push((key.clone(), oi));
             }
             if let Some(oi) = c.oi_contracts {
-                by_unit.entry("contracts").or_default().push((key.clone(), oi));
+                by_unit
+                    .entry("contracts")
+                    .or_default()
+                    .push((key.clone(), oi));
             }
         }
         if by_unit.is_empty() {
@@ -447,6 +533,77 @@ pub fn carry_series(events: &[EventEnvelope], interval_ns: i64) -> Vec<CarryPoin
             });
         }
     }
+    out
+}
+
+/// One liquidation-stress interval (per venue, symbol): signed notional sums
+/// by aggressor side — buy-side liquidations are the venue buying back
+/// liquidated shorts (flow INTO the book), sell-side is longs being dumped.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LiqPoint {
+    pub interval_ts_ns: i64,
+    pub venue: String,
+    /// SymbolId.0 (numeric — resolve via the shared symbol table at the edge).
+    pub symbol: u32,
+    /// Σ(price·qty) for buy-side liquidations in the interval.
+    pub buy_notional: f64,
+    /// Σ(price·qty) for sell-side liquidations in the interval.
+    pub sell_notional: f64,
+    /// `buy_notional − sell_notional` (positive = short-squeeze pressure).
+    pub net_notional: f64,
+    pub n_buy: u64,
+    pub n_sell: u64,
+}
+
+/// Liquidation-stress series over a merged, time-sorted event stream: per
+/// (interval, venue, symbol), the signed notional sums of `Liquidation`
+/// events. Intervals with no liquidation are omitted (the stress leg is
+/// naturally sparse). Same bucket rule as [`carry_series`] — intervals line
+/// up across queries for cross-leg join on `interval_ts_ns`.
+pub fn liq_series(events: &[EventEnvelope], interval_ns: i64) -> Vec<LiqPoint> {
+    let interval = interval_ns.max(1);
+    #[derive(Default)]
+    struct Acc {
+        buy: f64,
+        sell: f64,
+        n_buy: u64,
+        n_sell: u64,
+    }
+    let mut accs: BTreeMap<(Venue, u32, i64), Acc> = BTreeMap::new();
+    for ev in events {
+        if let MarketEvent::Liquidation { price, qty, side } = ev.body {
+            if !price.is_finite() || !qty.is_finite() {
+                continue; // CONV-8: never aggregate a non-finite sentinel
+            }
+            let bucket = ev.recv_ts_ns.div_euclid(interval) * interval;
+            let a = accs.entry((ev.venue, ev.symbol.0, bucket)).or_default();
+            let notional = price * qty;
+            match side {
+                Side::Buy => {
+                    a.buy += notional;
+                    a.n_buy += 1;
+                }
+                Side::Sell => {
+                    a.sell += notional;
+                    a.n_sell += 1;
+                }
+            }
+        }
+    }
+    let mut out: Vec<LiqPoint> = accs
+        .into_iter()
+        .map(|((venue, symbol, bucket), a)| LiqPoint {
+            interval_ts_ns: bucket,
+            venue: venue.slug().to_owned(),
+            symbol,
+            buy_notional: a.buy,
+            sell_notional: a.sell,
+            net_notional: a.buy - a.sell,
+            n_buy: a.n_buy,
+            n_sell: a.n_sell,
+        })
+        .collect();
+    out.sort_by_key(|p| (p.interval_ts_ns, p.venue.clone(), p.symbol));
     out
 }
 
@@ -542,6 +699,24 @@ mod tests {
         )
     }
 
+    fn liq(
+        venue: Venue,
+        sym: u32,
+        recv_ns: i64,
+        price: f64,
+        qty: f64,
+        side: Side,
+    ) -> EventEnvelope {
+        EventEnvelope::new(
+            venue,
+            SymbolId(sym),
+            recv_ns,
+            recv_ns,
+            3,
+            MarketEvent::Liquidation { price, qty, side },
+        )
+    }
+
     #[test]
     fn footprint_bars_aggregate_and_split_sides() {
         let t0 = 1_700_000_000_000_000_000i64; // some floor-aligned-ish time
@@ -550,7 +725,15 @@ mod tests {
             trade(Venue::Hyperliquid, 1, t0 + 1, 110.0, 3.0, Side::Sell, 2),
             trade(Venue::Hyperliquid, 1, t0 + 2, 90.0, 1.0, Side::Buy, 3),
             // Next bucket:
-            trade(Venue::Hyperliquid, 1, t0 + 60_000_000_000, 95.0, 5.0, Side::Sell, 4),
+            trade(
+                Venue::Hyperliquid,
+                1,
+                t0 + 60_000_000_000,
+                95.0,
+                5.0,
+                Side::Sell,
+                4,
+            ),
         ];
         let bars = footprint_bars(&evs, 60_000_000_000);
         assert_eq!(bars.len(), 2);
@@ -590,6 +773,63 @@ mod tests {
         assert_eq!(rows[1].sell_vol, 2.0);
         assert_eq!(rows[1].buy_vol, 0.0);
         assert_eq!(rows[1].n_trades, 1);
+    }
+
+    #[test]
+    fn liq_series_sums_signed_notional_per_interval() {
+        let t0 = 1_700_000_000_000_000_000i64;
+        let evs = vec![
+            // Hour bucket A (t0): one buy (short flushed) + two sells (longs).
+            liq(Venue::Bybit, 1, t0, 100.0, 2.0, Side::Buy),
+            liq(Venue::Bybit, 1, t0 + 1, 100.0, 1.0, Side::Sell),
+            liq(Venue::Bybit, 1, t0 + 2, 110.0, 5.0, Side::Sell),
+            // Hour bucket B (t0 + 1h): one sell on the same symbol.
+            liq(
+                Venue::Bybit,
+                1,
+                t0 + 3_600_000_000_000,
+                100.0,
+                3.0,
+                Side::Sell,
+            ),
+            // A NaN-priced liquidation must never poison the sums (CONV-8).
+            liq(Venue::Bybit, 1, t0 + 3, f64::NAN, 9.0, Side::Buy),
+            // Another symbol in the same bucket stays separate.
+            liq(Venue::Bybit, 2, t0, 50.0, 4.0, Side::Sell),
+            // A different venue is never merged into bybit's row.
+            liq(Venue::BinanceFutures, 1, t0, 100.0, 7.0, Side::Buy),
+        ];
+        let out = liq_series(&evs, 3_600_000_000_000);
+        // Sorted by (interval, venue, symbol): "binance" < "bybit", and the
+        // t0 bucket precedes the t0+1h bucket.
+        assert_eq!(out.len(), 4);
+        let binance = &out[0];
+        assert_eq!(binance.venue, "binance");
+        assert!((binance.buy_notional - 700.0).abs() < 1e-9);
+        assert_eq!(binance.n_buy, 1);
+        let bybit_b = &out[1];
+        assert_eq!(bybit_b.venue, "bybit");
+        assert_eq!(bybit_b.symbol, 1);
+        assert_eq!(
+            bybit_b.interval_ts_ns,
+            t0.div_euclid(3_600_000_000_000) * 3_600_000_000_000
+        );
+        // buy = 100×2 = 200; sell = 100×1 + 110×5 = 650 → net −450.
+        assert!((bybit_b.buy_notional - 200.0).abs() < 1e-9);
+        assert!((bybit_b.sell_notional - 650.0).abs() < 1e-9);
+        assert!((bybit_b.net_notional + 450.0).abs() < 1e-9);
+        assert_eq!((bybit_b.n_buy, bybit_b.n_sell), (1, 2));
+        // bybit symbol 2 (never touched by the NaN / other-venue rows).
+        assert_eq!(out[2].symbol, 2);
+        assert!((out[2].sell_notional - 200.0).abs() < 1e-9);
+        assert_eq!(out[2].n_sell, 1);
+        // The t0+1h bybit bucket: same symbol, separate row.
+        assert_eq!(
+            out[3].interval_ts_ns,
+            bybit_b.interval_ts_ns + 3_600_000_000_000
+        );
+        assert!((out[3].sell_notional - 300.0).abs() < 1e-9);
+        assert_eq!(out[3].n_sell, 1);
     }
 
     #[test]
@@ -653,7 +893,10 @@ mod tests {
         assert!((p.basis_bps - 10.0).abs() < 1e-9);
 
         // A funded interval with NO mark leg still emits (mark/basis NaN).
-        let mut evs2 = vec![oi(Venue::Hyperliquid, 1, t0 - 60, 200.0), funding(Venue::Hyperliquid, 1, t0, 0.0001)];
+        let mut evs2 = vec![
+            oi(Venue::Hyperliquid, 1, t0 - 60, 200.0),
+            funding(Venue::Hyperliquid, 1, t0, 0.0001),
+        ];
         evs2.sort_by_key(|e| (e.recv_ts_ns, e.stream_seq));
         let out2 = carry_series(&evs2, 3_600_000_000_000);
         assert_eq!(out2.len(), 1);
@@ -747,5 +990,154 @@ mod tests {
         assert_eq!(out2[0].members[0].venue, "hyperliquid");
         assert!((out2[0].total_oi - 200.0).abs() < 1e-9);
         assert!((out2[0].rate - 0.0001).abs() < 1e-15);
+    }
+
+    fn snapshot(
+        venue: Venue,
+        sym: u32,
+        recv_ns: i64,
+        seq: u64,
+        bids: &[(f64, f64)],
+        asks: &[(f64, f64)],
+    ) -> EventEnvelope {
+        EventEnvelope::new(
+            venue,
+            SymbolId(sym),
+            recv_ns,
+            recv_ns,
+            seq as u64,
+            MarketEvent::BookSnapshot {
+                bids: bids.to_vec().into(),
+                asks: asks.to_vec().into(),
+                seq,
+                depth: 10,
+                reason: mp_core::SnapshotReason::Periodic,
+            },
+        )
+    }
+
+    fn delta(
+        venue: Venue,
+        sym: u32,
+        recv_ns: i64,
+        first_seq: u64,
+        last_seq: u64,
+        bids: &[(f64, f64)],
+        asks: &[(f64, f64)],
+    ) -> EventEnvelope {
+        EventEnvelope::new(
+            venue,
+            SymbolId(sym),
+            recv_ns,
+            recv_ns,
+            last_seq as u64,
+            MarketEvent::BookDelta {
+                bids: bids.to_vec().into(),
+                asks: asks.to_vec().into(),
+                first_seq,
+                last_seq,
+            },
+        )
+    }
+
+    #[test]
+    fn dom_samples_warm_book_at_boundaries() {
+        let t0 = 1_700_000_000_000_000_000i64;
+        let evs = vec![
+            snapshot(
+                Venue::Hyperliquid,
+                1,
+                t0 - 10,
+                10,
+                &[(101.0, 5.0), (100.5, 3.0)],
+                &[(102.0, 4.0)],
+            ),
+            // Warm book in place before the window opens.
+            delta(
+                Venue::Hyperliquid,
+                1,
+                t0 + 1,
+                11,
+                11,
+                &[],
+                &[(102.0, 0.0), (102.5, 1.5)],
+            ),
+        ];
+        let out = dom_series(&evs, t0, t0 + 10_000_000_000, 5_000_000_000, 5, 100);
+        // 3 samples at t0, t0+5s, t0+10s.
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].ts_ns, t0);
+        assert!(!out[0].stale);
+        // First sample carries the warm book (ask 102.0 before the t0+1 delta).
+        assert_eq!(out[0].bids, vec![(101.0, 5.0), (100.5, 3.0)]);
+        assert_eq!(out[0].asks, vec![(102.0, 4.0)]);
+        // t0+1 delta moved the ask to 102.5; t0+5s sample sees it.
+        assert_eq!(out[1].asks, vec![(102.5, 1.5)]);
+        assert_eq!(out[1].bids, vec![(101.0, 5.0), (100.5, 3.0)]);
+        // t0+10s: no new events, same book as the 5s sample.
+        assert_eq!(out[2].asks, vec![(102.5, 1.5)]);
+    }
+
+    #[test]
+    fn dom_levels_capped_and_stale_samples_empty() {
+        let t0 = 1_700_000_000_000_000_000i64;
+        // Snapshot seq 10, then a hole: next delta starts at 12 (gap → stale).
+        let evs = vec![
+            snapshot(
+                Venue::Hyperliquid,
+                1,
+                t0 - 1,
+                10,
+                &[(100.0, 1.0)],
+                &[(101.0, 1.0)],
+            ),
+            delta(Venue::Hyperliquid, 1, t0, 12, 12, &[], &[(101.5, 2.0)]),
+            snapshot(
+                Venue::Hyperliquid,
+                1,
+                t0 + 10_000_000_000,
+                20,
+                &[(99.0, 2.0)],
+                &[(102.0, 3.0)],
+            ),
+        ];
+        let out = dom_series(&evs, t0, t0 + 15_000_000_000, 5_000_000_000, 1, 100);
+        assert_eq!(out.len(), 4);
+        assert!(out[0].stale, "gap must mark the ladder stale");
+        assert!(out[0].bids.is_empty());
+        // Recovery at the new snapshot, levels capped to 1.
+        assert!(!out[2].stale);
+        assert_eq!(out[2].bids, vec![(99.0, 2.0)]);
+        assert_eq!(out[2].asks, vec![(102.0, 3.0)]);
+    }
+
+    #[test]
+    fn dom_max_samples_caps_and_window_is_bounded() {
+        let t0 = 1_700_000_000_000_000_000i64;
+        let evs = vec![
+            snapshot(
+                Venue::Hyperliquid,
+                1,
+                t0 - 1,
+                10,
+                &[(100.0, 1.0)],
+                &[(101.0, 1.0)],
+            ),
+            snapshot(
+                Venue::Hyperliquid,
+                1,
+                t0 + 60_000_000_000,
+                11,
+                &[(99.0, 1.0)],
+                &[(102.0, 1.0)],
+            ),
+        ];
+        // every = 100ms over a 60s window → 600 samples, capped at 50.
+        let out = dom_series(&evs, t0, t0 + 60_000_000_000, 100_000_000, 5, 50);
+        assert_eq!(out.len(), 50);
+        assert_eq!(out[0].ts_ns, t0);
+        assert_eq!(out[49].ts_ns, t0 + 49 * 100_000_000);
+        // A reversed window yields nothing.
+        assert!(dom_series(&evs, t0 + 10, t0, 100_000_000, 5, 50).is_empty());
     }
 }

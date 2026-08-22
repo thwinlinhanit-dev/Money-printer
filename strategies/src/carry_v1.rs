@@ -33,9 +33,12 @@ pub enum HedgeKind {
 /// Configuration for the carry-v1 strategy.
 #[derive(Debug, Clone, Copy)]
 pub struct CarryConfig {
-    /// |funding.rate| floor over which we may enter (default 0.01% = 0.0001).
+    /// |funding.rate| floor over which we may enter (default 3e-6, calibrated
+    /// 2026-08-21 to hourly hyperliquid funding: observed span ±1.5e-5, median
+    /// ≈ 1e-5; entries cluster at 2e-6..4e-6 — above ~5e-6 the z-gate
+    /// starves every combo).
     pub entry_threshold: f64,
-    /// |funding.rate| below which we exit (default 0.002% = 0.00002).
+    /// |funding.rate| below which we exit (default 1e-6).
     pub exit_threshold: f64,
     /// |z-score| at which we enter once the rolling window is warm (hypothesis:
     /// "entry at |funding z-score| ≥ threshold").
@@ -75,8 +78,8 @@ pub struct CarryConfig {
 impl Default for CarryConfig {
     fn default() -> Self {
         Self {
-            entry_threshold: 0.0001,
-            exit_threshold: 0.00002,
+            entry_threshold: 3e-6,
+            exit_threshold: 1e-6,
             z_entry: 2.0,
             z_exit: 0.5,
             z_flip: 2.0,
@@ -185,8 +188,15 @@ impl CarryV1 {
     /// vol-sizer owns contracts). `vol_target` buys `vol_target / per-unit`
     /// risk-unit slots, clamped so a carry slot can never overshoot the gate's
     /// exposure checks (audit C1: `vol_target` was dead config).
+    ///
+    /// `max_gross_exposure` (fraction of portfolio, STR-13) clamps the request
+    /// too: the strategy has no mark access (Ctx exposes position/equity, not
+    /// price), so the notional cap is applied at the risk-unit layer as
+    /// `max_gross_exposure / per-unit-risk` — the engine risk gate stays the
+    /// notional-level authority (spec 015 §Sizing).
     fn risk_units(&self) -> f64 {
-        (self.config.vol_target / PER_RISK_UNIT_PCT).clamp(1.0, self.config.max_risk_units)
+        let cap = self.config.max_gross_exposure / PER_RISK_UNIT_PCT;
+        (self.config.vol_target / PER_RISK_UNIT_PCT).clamp(1.0, self.config.max_risk_units.min(cap))
     }
 
     fn make_intent(
@@ -233,7 +243,11 @@ impl CarryV1 {
         if rate.abs() < self.config.entry_threshold {
             return Vec::new();
         }
-        if z.map_or(true, |z| z.abs() < self.config.z_entry) {
+        // Undefined z (degenerate window) is NOT an extreme — a constant rate
+        // must never become an entry signal (audit fix-all 2026-08-17: the
+        // `is_none_or` rewrite must preserve the original `map_or(true, …)`
+        // None semantics — None ⇒ no entry).
+        if z.is_none_or(|z| z.abs() < self.config.z_entry) {
             return Vec::new();
         }
         let direction = if rate > 0.0 { Side::Sell } else { Side::Buy };
@@ -327,7 +341,11 @@ impl Strategy for CarryV1 {
         self.universe.clone()
     }
     fn subscriptions(&self) -> Vec<String> {
-        vec!["funding.*".into()]
+        // NOTE: the sim engine matches subscriptions with `name.starts_with(s)`
+        // — a trailing `*` NEVER matches (e.g. "funding.rate" does not start
+        // with "funding.*"), so a glob-style subscription silently starves the
+        // strategy of every feature update. Prefix form is the contract.
+        vec!["funding.".into()]
     }
     fn warmup_ns(&self) -> i64 {
         60_000_000_000
@@ -400,10 +418,15 @@ impl Strategy for CarryV1 {
 
     fn params(&self) -> ParamSpace {
         let mut p = ParamSpace::default();
+        // Calibrated 2026-08-21 to observed hourly hyperliquid BTC funding
+        // (span ±1.5e-5, median ≈ 1e-5): the prior 5e-5..2e-4 grid sat entirely
+        // above the observed range, so carry-v1 could never enter. Empirical
+        // trade counts over the merged log (z_entry 2.0): entry 2e-6 → 42,
+        // 3e-6 → 19, 4e-6 → 5, 5e-6 → 0 — the grid must span 2e-6..4e-6.
         p.grid
-            .insert("entry_threshold".into(), vec![0.00005, 0.0001, 0.0002]);
+            .insert("entry_threshold".into(), vec![2e-6, 3e-6, 4e-6]);
         p.grid
-            .insert("exit_threshold".into(), vec![0.00001, 0.00002, 0.00005]);
+            .insert("exit_threshold".into(), vec![5e-7, 1e-6, 2e-6]);
         p.grid.insert("z_entry".into(), vec![1.5, 2.0, 2.5]);
         p
     }
@@ -528,7 +551,7 @@ mod tests {
             venue: Venue::Hyperliquid,
             symbol: SymbolId(1),
             direction: Side::Sell,
-            entry_value: 0.0002,
+            entry_value: 2e-5,
             entry_ts_ns: 1_000_000_000,
             cumulative_funding: 0.0,
         };
@@ -537,13 +560,13 @@ mod tests {
             equity: 1_000_000.0,
             count: 0,
         };
-        let exit = s.on_feature(&make_update(0.00001, 2_000_000_000), &mut ctx);
+        let exit = s.on_feature(&make_update(5e-7, 2_000_000_000), &mut ctx);
         assert!(!exit.is_empty(), "should exit on normalization");
         assert_eq!(exit[0].tag, "carry-v1 exit");
     }
 
     #[test]
-    fn str_11_carry_enters_on_negative_funding() {
+    fn str_10_carry_enters_on_negative_funding() {
         let mut s = strat();
         let mut ctx = TestCtx {
             now: 1_000_000_000,
@@ -569,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn str_12_carry_ignores_non_funding_features() {
+    fn audit_c1_carry_ignores_non_funding_features() {
         // Audit C1: a CVD (or any non-funding) update with an extreme value
         // must never be read as a funding rate.
         let mut s = strat();
@@ -587,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn str_13_carry_enters_on_z_score_extreme_after_warmup() {
+    fn carry_enters_on_z_score_extreme_after_warmup() {
         // Warm window (8 ticks, mean ≈ 0.00025, σ ≈ 5.3e-5): a 0.0005 rate is
         // |z| ≈ 4.7 ≥ z_entry (2.0) → entry. A 0.0003 rate (|z| ≈ 0.9) → none.
         let mut s = strat();
@@ -616,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn str_14_carry_adverse_funding_accrues_and_stops() {
+    fn carry_adverse_funding_accrues_and_stops() {
         // Audit C1: the funding stop must be live. A short (Sell) pays when
         // rate < 0; two -0.012 updates exceed max_adverse_funding 0.02 → exit.
         let cfg = CarryConfig {
@@ -673,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn str_15_carry_uses_vol_target_in_sizing() {
+    fn carry_uses_vol_target_in_sizing() {
         let s = strat();
         let units = s.risk_units();
         assert!(units >= 1.0, "risk units must be ≥ 1, got {units}");
@@ -693,6 +716,89 @@ mod tests {
         assert!(
             big.risk_units() > units,
             "higher vol_target must request more units"
+        );
+    }
+
+    #[test]
+    fn str_11_carry_hypothesis_is_complete() {
+        // STR-11 (spec 015): the hypothesis document must carry the edge,
+        // regime, kill conditions, and risk parameters.
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("carry-v1")
+            .join("hypothesis.md");
+        let text = std::fs::read_to_string(&p)
+            .unwrap_or_else(|_| panic!("{} must exist (STR-11)", p.display()));
+        for section in ["Edge:", "Regime dependency", "Falsification", "Risks:"] {
+            assert!(
+                text.contains(section),
+                "hypothesis.md missing section {section:?} (STR-11)"
+            );
+        }
+    }
+
+    #[test]
+    fn str_13_carry_respects_max_exposure() {
+        // STR-13 (spec 015): sizing respects max_gross_exposure — the
+        // risk-unit request clamps to `max_gross_exposure / per-unit-risk`,
+        // and no new entry intent is emitted while a position is held.
+        let cfg = CarryConfig {
+            vol_target: 0.15,         // wants 30 units without a cap
+            max_risk_units: 64.0,     // generous — the cap must bind first
+            max_gross_exposure: 0.05, // 0.05 / 0.005 = 10 units at most
+            ..Default::default()
+        };
+        let s = CarryV1::new(
+            StrategyId::new("carry-v1"),
+            Universe {
+                venues: vec![Venue::Hyperliquid],
+                symbols: vec![SymbolId(1)],
+            },
+            cfg,
+        );
+        let units = s.risk_units();
+        assert_eq!(
+            units, 10.0,
+            "exposure cap must clamp risk units, got {units}"
+        );
+
+        // At cap (position already held): an extreme funding update emits no
+        // new entry intent.
+        let mut s = strat();
+        let mut ctx = TestCtx {
+            now: 1_000_000_000,
+            equity: 1_000_000.0,
+            count: 0,
+        };
+        for (i, r) in [
+            0.00001, 0.00002, 0.00001, 0.00002, 0.00001, 0.00002, 0.00001, 0.00002,
+        ]
+        .iter()
+        .enumerate()
+        {
+            s.on_feature(&make_update(*r, 1_000_000_000 + i as i64), &mut ctx);
+        }
+        s.on_feature(&make_update(0.0002, 2_000_000_000), &mut ctx); // entry signal
+        s.on_fill(
+            &mp_core::Fill {
+                intent_id: IntentId(1),
+                symbol: SymbolId(1),
+                side: Side::Sell,
+                price: 100.0,
+                qty: 1.0,
+                fee: 0.0,
+                liquidity: mp_core::Liquidity::Taker,
+                ts_ns: 2_000_000_000,
+            },
+            &mut ctx,
+        );
+        assert!(
+            matches!(s.state, CarryState::Entered { .. }),
+            "entry fill must move the state machine to Entered"
+        );
+        let re = s.on_feature(&make_update(0.0003, 3_000_000_000), &mut ctx);
+        assert!(
+            re.is_empty(),
+            "already holding at cap: no new entry intent (STR-13)"
         );
     }
 }

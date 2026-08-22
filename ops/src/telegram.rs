@@ -104,14 +104,20 @@ pub fn post_telegram(dispatch: &Dispatch, cfg: &TelegramConfig) -> Result<(), St
         .output()
         .map_err(|e| format!("curl spawn failed (is curl installed?): {e}"))?;
     if !out.status.success() {
+        // Audit 2026-08-17 (PD-2, same posture as `post_p1_webhook`): do NOT
+        // echo curl's stderr - on transport errors it can embed the
+        // token-bearing Bot API URL. Report only the exit code.
         return Err(format!(
-            "curl exit {}: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
+            "curl exited {} (stderr suppressed - may contain the bot URL)",
+            out.status
         ));
     }
     let body = String::from_utf8_lossy(&out.stdout);
     if !body.contains("\"ok\":true") {
+        // The Bot API never echoes the request URL (the only place the token
+        // lives) in its response body, so a truncated preview is
+        // credential-safe (PD-2); transport stderr above is suppressed for
+        // the same reason.
         let preview: String = body.chars().take(300).collect();
         return Err(format!("telegram api non-ok: {preview}"));
     }
@@ -337,7 +343,21 @@ pub fn flush_batch(dir: &Path, cfg: &TelegramConfig, now_ns: i64) -> Result<usiz
             // Preserve the failed line and everything after it; the lines
             // already flushed are gone (no duplicates on the next attempt).
             let rest = remaining.join("\n") + "\n";
-            std::fs::write(&path, rest).map_err(|e| format!("rewrite {}: {e}", path.display()))?;
+            // Audit 2026-08-17: this ledger rewrite must be as durable as the
+            // delivered.jsonl append that preceded it (W-6 discipline) - a
+            // crash right after an unsynced write could resurrect delivered
+            // lines for a duplicate re-send. Open + write + sync_all, matching
+            // append_batch/append_delivered.
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("rewrite open {}: {e}", path.display()))?;
+            f.write_all(rest.as_bytes())
+                .map_err(|e| format!("rewrite {}: {e}", path.display()))?;
+            f.sync_all()
+                .map_err(|e| format!("rewrite sync {}: {e}", path.display()))?;
             return Err(format!("batch line {}: {e}", flushed + 1));
         }
         // Delivery log first: a delivered P3 is evidence (W-6), written

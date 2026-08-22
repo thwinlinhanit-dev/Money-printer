@@ -1,0 +1,31 @@
+# Swing-only market collector unit (spec 035 SWG-1 / spec 036 SLQ-D).
+# Higher-timeframe focus: trades + funding/mark/OI (+ liq on bybit), NO L2
+# book stream. Run the swing universe:
+#   systemctl enable --now mp-swing@hyperliquid-btc mp-swing@hyperliquid-eth \
+#     mp-swing@bybit-btcusdt mp-swing@bybit-ethusdt mp-swing@bybit-solusdt
+# %i = config file basename under collectors/swing/ (e.g. "hyperliquid-btc").
+# NOTE: swing_only omits the gate-required `book` stream, so this unit does
+# NOT satisfy the Phase-0 promotion gate (ops/core_symbols.txt) — it is for
+# swing research/backtests only.
+[Unit]
+Description=Money Printer swing-only collector for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printer
+Group=printer
+EnvironmentFile=/etc/money-printer/venues.env
+WorkingDirectory=/opt/money-printer
+ExecStart=/opt/money-printer/bin/mp-collector --config collectors/swing/%i.toml
+Restart=always
+RestartSec=2
+MemoryMax=512M
+CPUQuota=50%
+LimitNOFILE=65536
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/data
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

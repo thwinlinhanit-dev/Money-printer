@@ -82,6 +82,18 @@ impl Normalizer for HyperliquidNormalizer {
                     };
                     let exch = i64_field(t, "time").map(ms_to_ns).unwrap_or(0);
                     let trade_id = u64_field(t, "tid").unwrap_or(0);
+                    // spec 033 WAL-1: the `users` array's first element is the
+                    // taker wallet (opaque 0x id). Missing/empty ⇒ "" (WAL-4 —
+                    // record nothing, never invent). The address makes the
+                    // wallet-markout edge possible (WAL-2); keep it in the
+                    // envelope's TradeWithAddr variant.
+                    let taker_addr = t
+                        .get("users")
+                        .and_then(|u| u.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_owned();
                     let seq = self.seq();
                     out.push(EventEnvelope::new(
                         Venue::Hyperliquid,
@@ -89,11 +101,12 @@ impl Normalizer for HyperliquidNormalizer {
                         exch,
                         recv_ts_ns,
                         seq,
-                        MarketEvent::Trade {
+                        MarketEvent::TradeWithAddr {
                             price,
                             qty,
                             side,
                             trade_id,
+                            taker_addr,
                         },
                     ));
                 }

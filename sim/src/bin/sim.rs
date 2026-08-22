@@ -6,7 +6,7 @@
 //! Usage:
 //!   sim backtest    --log <event.log> --strategy coinflip|null --seed N \
 //!                   --run-id <ulid> --runs-dir <dir> [--coverage F] [--git-sha S]
-//!   sim wf          --log <event.log> --strategy … --seed N --train-ns T --test-ns T --step-ns T
+//!   sim wf          --log <event.log> --strategy … --seed N --train-ns T --test-ns T --step-ns T [--min-trades N]
 //!   sim plateau     --base <expectancy> --point <delta:expectancy> …
 //!   sim mc          --log <event.log> --strategy … --seed N --resamples R
 //!   sim replay-live --log <live.log> --log-b <replay.log> --strategy … --seed N
@@ -28,11 +28,11 @@ use mp_core::{EventEnvelope, Venue};
 use mp_features::catalog::{
     BookDepth, BookDepthKind, Cvd, FundingRate, LiqDist, LiqRate, LiqVol, TapeBpsDelta,
 };
-use mp_features::LiqDelta;
 use mp_features::FeatureEngine;
+use mp_features::LiqDelta;
 use mp_sim::{
-    monte_carlo, plateau_ok, Backtester, MetricsSummary, PaperSession, RunRecord, SimConfig,
-    WalkForwardParams, WindowResult,
+    bars_per_year as mp_bars_per_year, monte_carlo, plateau_ok, Backtester, MetricsSummary,
+    PaperSession, RunRecord, SimConfig, WalkForwardParams, WindowResult,
 };
 use mp_strategies::{
     CarryConfig, CarryV1, CoinFlipStrategy, LiqFadeConfig, LiqFadeV1, NullStrategy,
@@ -174,7 +174,11 @@ fn engine() -> FeatureEngine {
     // until both legs record. Global registration: one instance must see
     // both venues (spec 023 FEA-20).
     e.register_global_tick(|| {
-        Box::new(LiqDelta::new(300_000_000_000, Venue::Bybit, Venue::BinanceFutures))
+        Box::new(LiqDelta::new(
+            300_000_000_000,
+            Venue::Bybit,
+            Venue::BinanceFutures,
+        ))
     });
     e
 }
@@ -186,10 +190,11 @@ fn run_backtest(
     coverage: f64,
     carry_entry: Option<f64>,
     carry_exit: Option<f64>,
+    bar_tf_ns: i64,
 ) -> Result<Backtester, String> {
     let cfg = SimConfig {
         min_coverage: coverage,
-        bar_tf_ns: 1_000_000,
+        bar_tf_ns,
         latency_ns: 0,
         fill_model: mp_sim::FillModel::L0BarFill,
         ..SimConfig::default()
@@ -301,13 +306,29 @@ fn run() -> Result<ExitCode, String> {
             let carry_exit: Option<f64> = flag(rest, "--carry-exit")
                 .map(|v| v.parse().map_err(|_| "bad --carry-exit"))
                 .transpose()?;
-            let bt = run_backtest(&events, &strategy, seed, coverage, carry_entry, carry_exit)?;
+            // SWG-5 bar replay: bar timeframe for L0 bar fills + bar-return
+            // Sharpe sampling. Default 1ms keeps legacy behavior; daily =
+            // 86_400_000_000_000, 4h = 14_400_000_000_000.
+            let bar_tf_ns: i64 = flag(rest, "--bar-tf-ns")
+                .map_or(Ok(1_000_000), |v| v.parse())
+                .map_err(|_| "bad --bar-tf-ns")?;
+            let bt = run_backtest(
+                &events,
+                &strategy,
+                seed,
+                coverage,
+                carry_entry,
+                carry_exit,
+                bar_tf_ns,
+            )?;
 
             // Tracker record (SIM-10): reproducible from the index alone.
             let run_id = need(rest, "--run-id")?;
             let runs_dir = need(rest, "--runs-dir")?;
             let git_sha = flag(rest, "--git-sha").unwrap_or_else(|| "unknown".into());
-            let config_text = format!("strategy={strategy};seed={seed};cfg=default");
+            let config_text = format!(
+                "strategy={strategy};seed={seed};cfg=default;coverage={coverage};carry_entry={carry_entry:?};carry_exit={carry_exit:?}"
+            );
             record_run(&runs_dir, &run_id, &git_sha, &config_text, &bt, &events)?;
             Ok(ExitCode::SUCCESS)
         }
@@ -433,7 +454,22 @@ fn run() -> Result<ExitCode, String> {
                 step_ns: need(rest, "--step-ns")?
                     .parse()
                     .map_err(|_| "bad --step-ns")?,
+                // SWG-5 purged split: gap between train and test slices. 0
+                // keeps the legacy contiguous behavior.
+                embargo_ns: flag(rest, "--embargo-ns")
+                    .map_or(Ok(0), |v| v.parse())
+                    .map_err(|_| "bad --embargo-ns")?,
             };
+            // SIM-9 integrity: a grid combo must actually trade to be eligible
+            // for selection. Without the bar, every combo that never trades
+            // scores exactly 0.0 and beats every combo that trades and loses
+            // (0.0 > -exp), so the argmax picks a vacuous "don't trade" combo
+            // and the OOS test is meaningless — the degeneracy observed on the
+            // first real-data walk-forward (2026-08-15). The window is then
+            // marked VACUOUS instead of reporting a false pass.
+            let min_trades: u64 = flag(rest, "--min-trades")
+                .map_or(Ok(10), |v| v.parse())
+                .map_err(|_| "bad --min-trades")?;
             // Build default strategy to read its param grid
             let default_strat = strategy_named(&strategy, &events, None, None)?;
             let param_space = default_strat.params();
@@ -444,70 +480,111 @@ fn run() -> Result<ExitCode, String> {
                 param_space.grid.keys().collect::<Vec<_>>()
             );
 
-            // Base sim config (same as run_backtest)
+            // Base sim config (same as run_backtest). SWG-5 bar replay: --bar-tf-ns
+            // picks the bar timeframe (daily/4h) for L0 bar fills + bar-return
+            // Sharpe sampling; default 1ms keeps legacy behavior.
+            let bar_tf_ns: i64 = flag(rest, "--bar-tf-ns")
+                .map_or(Ok(1_000_000), |v| v.parse())
+                .map_err(|_| "bad --bar-tf-ns")?;
             let base_cfg = SimConfig {
                 min_coverage: 1.0,
-                bar_tf_ns: 1_000_000,
+                bar_tf_ns,
                 latency_ns: 0,
                 fill_model: mp_sim::FillModel::L0BarFill,
                 ..SimConfig::default()
             };
+            // SWG-5 Deflated Sharpe: bars per year for the bar-return Sharpe
+            // annualization (365 daily, 2190 4h, 525600 60s). The 1ms bar
+            // replay default matches the base_cfg bar_tf_ns.
+            let bars_per_year: f64 = flag(rest, "--bars-per-year")
+                .map_or_else(|| Ok(mp_bars_per_year(base_cfg.bar_tf_ns)), |v| v.parse())
+                .map_err(|_| "bad --bars-per-year")?;
 
-            let first = events[0].recv_ts_ns;
-            let last = events[events.len() - 1].recv_ts_ns;
-            let mut train_start = first;
             let mut windows = Vec::new();
-            while train_start + p.train_ns + p.test_ns <= last + 1 {
-                let test_start = train_start + p.train_ns;
-                let test_end = test_start + p.test_ns;
-                let train = mp_sim::slice_by_recv(&events, train_start, test_start);
-                let test = mp_sim::slice_by_recv(&events, test_start, test_end);
+            // SWG-5: the harness rolls purged (train|embargo|test) windows.
+            // Each window runs the grid on train, picks the best eligible combo
+            // (SIM-9), and runs it OOS on test. The closure returns the OOS
+            // summary; `p.embargo_ns` inserts a gap between train and test that
+            // is in neither slice — blocking label-leakage across the boundary.
+            let _ = mp_sim::walk_forward(
+                &events,
+                p,
+                |_train_start, test_start, test_end, train, test| {
+                    // Grid search on train — pick params with best in-sample
+                    // expectancy among combos that actually trade enough to judge
+                    // (SIM-9: a 0-trade combo scoring 0.0 must never beat a combo
+                    // that trades and loses, nor count as a selection).
+                    let (best_params, best_exp) =
+                        mp_sim::pick_best_eligible(&combos, min_trades, |combo| {
+                            let strat = default_strat.with_params(combo);
+                            let mut bt = Backtester::new(engine(), strat, base_cfg, seed);
+                            if bt.run_checked(train, 1.0).is_err() {
+                                return None;
+                            }
+                            Some(bt.summary())
+                        });
 
-                // Grid search on train — pick params with best in-sample expectancy
-                let mut best_exp = f64::NEG_INFINITY;
-                let mut best_params = None;
-                for combo in &combos {
-                    let strat = default_strat.with_params(combo);
-                    let mut bt = Backtester::new(engine(), strat, base_cfg, seed);
-                    if bt.run_checked(train, 1.0).is_err() {
-                        continue;
-                    }
-                    let exp = bt.summary().expectancy;
-                    if exp > best_exp {
-                        best_exp = exp;
-                        best_params = Some(combo.clone());
-                    }
-                }
-
-                // Run best params on test (OOS)
-                let oos = if let Some(ref bp) = best_params {
-                    let strat = default_strat.with_params(bp);
-                    let mut bt = Backtester::new(engine(), strat, base_cfg, seed);
-                    match bt.run_checked(test, 1.0) {
-                        Ok(()) => bt.summary(),
-                        Err(e) => {
-                            eprintln!("OOS run failed: {e}");
-                            MetricsSummary::default()
+                    // Run best params on test (OOS). Three verdicts: SELECTED
+                    // (ran clean), ERROR (the OOS run itself failed — must never
+                    // read as a SELECTED 0-trade pass, audit M9), VACUOUS (nothing
+                    // eligible on train — no selection, OOS meaningless).
+                    let (oos, vacuous, error) = if let Some(ref bp) = best_params {
+                        let strat = default_strat.with_params(bp);
+                        let mut bt = Backtester::new(engine(), strat, base_cfg, seed);
+                        match bt.run_checked(test, 1.0) {
+                            Ok(()) => (bt.summary(), false, false),
+                            Err(e) => {
+                                eprintln!("OOS run failed: {e}");
+                                (MetricsSummary::default(), false, true)
+                            }
                         }
-                    }
-                } else {
-                    eprintln!("no train window succeeded");
-                    MetricsSummary::default()
-                };
+                    } else {
+                        eprintln!(
+                        "window VACUOUS: no grid combo reached min_trades={min_trades} on train — no selection, OOS meaningless"
+                    );
+                        (MetricsSummary::default(), true, false)
+                    };
+                    let verdict = if error {
+                        "ERROR"
+                    } else if vacuous {
+                        "VACUOUS"
+                    } else {
+                        "SELECTED"
+                    };
 
-                println!(
-                    "window test=[{},{}): in_exp={:+.6} best_params={:?} oos_trades={} oos_exp={:+.6} oos_stress2x={:+.6}",
-                    test_start, test_end, best_exp, best_params, oos.trades, oos.expectancy, oos.stress_expectancy_2x
+                    let shrp = oos
+                        .sharpe
+                        .map(|s| format!("{s:+.3}"))
+                        .unwrap_or_else(|| "NA".into());
+                    let dshr = oos
+                        .deflated_sharpe(bars_per_year, combos.len() as u64)
+                        .map(|d| format!("{d:+.3}"))
+                        .unwrap_or_else(|| "NA".into());
+                    println!(
+                    "window test=[{},{}): verdict={verdict} in_exp={:+.6} best_params={:?} oos_trades={} oos_exp={:+.6} oos_stress2x={:+.6} oos_sharpe={shrp} oos_deflated_sharpe={dshr}",
+                    test_start, test_end,
+                    best_exp, best_params, oos.trades, oos.expectancy, oos.stress_expectancy_2x
                 );
-                windows.push(WindowResult {
-                    train_start_ns: train_start,
-                    test_start_ns: test_start,
-                    test_end_ns: test_end,
-                    oos,
-                });
-                train_start += p.step_ns;
-            }
-            println!("windows={}", windows.len());
+                    windows.push(WindowResult {
+                        train_start_ns: test_start - p.train_ns - p.embargo_ns,
+                        test_start_ns: test_start,
+                        test_end_ns: test_end,
+                        oos,
+                        vacuous,
+                        error,
+                    });
+                    oos
+                },
+            );
+            let vacuous = windows.iter().filter(|w| w.vacuous).count();
+            let error = windows.iter().filter(|w| w.error).count();
+            println!(
+                "wf: windows={} vacuous={} error={} selected={}",
+                windows.len(),
+                vacuous,
+                error,
+                windows.len() - vacuous - error
+            );
             Ok(ExitCode::SUCCESS)
         }
         "plateau" => {
@@ -549,7 +626,20 @@ fn run() -> Result<ExitCode, String> {
             let carry_exit: Option<f64> = flag(rest, "--carry-exit")
                 .map(|v| v.parse().map_err(|_| "bad --carry-exit"))
                 .transpose()?;
-            let bt = run_backtest(&events, &strategy, seed, 1.0, carry_entry, carry_exit)?;
+            // SWG-5 bar replay: the Monte-Carlo path uses the same bar
+            // timeframe as the backtest arm.
+            let bar_tf_ns: i64 = flag(rest, "--bar-tf-ns")
+                .map_or(Ok(1_000_000), |v| v.parse())
+                .map_err(|_| "bad --bar-tf-ns")?;
+            let bt = run_backtest(
+                &events,
+                &strategy,
+                seed,
+                1.0,
+                carry_entry,
+                carry_exit,
+                bar_tf_ns,
+            )?;
             let mc = monte_carlo(bt.trade_pnls(), resamples, seed, block_ns);
             println!(
                 "mc: resamples={} block_ns={} p50_maxDD={:.4} p95_maxDD={:.4} worst={:.4}",
@@ -562,8 +652,8 @@ fn run() -> Result<ExitCode, String> {
             let replay = read_log(&need(rest, "--log-b")?)?;
             let strategy = need(rest, "--strategy")?;
             let seed: u64 = need(rest, "--seed")?.parse().map_err(|_| "bad --seed")?;
-            let a = run_backtest(&live, &strategy, seed, 1.0, None, None)?;
-            let b = run_backtest(&replay, &strategy, seed, 1.0, None, None)?;
+            let a = run_backtest(&live, &strategy, seed, 1.0, None, None, 1_000_000)?;
+            let b = run_backtest(&replay, &strategy, seed, 1.0, None, None, 1_000_000)?;
             match a.decision_log().first_divergence(b.decision_log()) {
                 None => {
                     println!(

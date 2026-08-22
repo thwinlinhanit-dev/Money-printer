@@ -115,10 +115,8 @@ impl BarBuilder {
     /// Feed an event; returns a closed [`Bar`] when this event opens a new
     /// bucket (only trades participate).
     pub fn on_event(&mut self, ts_ns: i64, body: &MarketEvent) -> Option<Bar> {
-        let (price, qty, side) = match body {
-            MarketEvent::Trade {
-                price, qty, side, ..
-            } => (*price, *qty, *side),
+        let (price, qty, side) = match body.trade_view() {
+            Some((price, qty, side, _, _)) => (price, qty, side),
             _ => return None,
         };
         let bucket = self.bucket_of(ts_ns);

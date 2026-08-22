@@ -49,7 +49,9 @@ pub enum StorageError {
     Refused(String),
 }
 
-pub use audit::{audit_raw_log, scorecard, AuditConfig, DailyScorecard, RawLogAudit, RecordingBursts};
+pub use audit::{
+    audit_raw_log, scorecard, AuditConfig, DailyScorecard, RawLogAudit, RecordingBursts,
+};
 pub use compactor::{compact_day, compact_day_verified, CompactStats};
 pub use cross_venue::{
     app_version, config_hash, detect, findings_file, parse_config, version_string, write_findings,
@@ -71,8 +73,8 @@ pub use historical::{
 pub use historical_download::{unzip_single_csv, BinanceVisionSource, RetryPolicy, Throttle};
 pub use manifest::{derive_manifest, Gap, GapKind, QualityManifest, StreamStats};
 pub use materialize::{
-    load_logs_merged, materialize_logs, materialize_logs_limited, LoadedLogs, MaterializeStats,
-    SymbolRow, DEFAULT_MAX_BACKFILL_BYTES,
+    load_logs_merged, materialize_logs, materialize_logs_limited, stream_logs_merged, LoadedLogs,
+    MaterializeStats, StreamedMergedLogs, SymbolRow, DEFAULT_MAX_BACKFILL_BYTES,
 };
 pub use migrate::{migrate_log, MigrateError, MigrateOutcome};
 pub use promotion::{

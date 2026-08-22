@@ -32,6 +32,14 @@ pub struct RiskLimits {
     pub max_orders_per_min: u32,
     pub strategy_daily_loss_budget: f64,
     pub portfolio_daily_loss_budget: f64,
+    /// SWG-6 (spec 035): max distinct symbols with an open position at once
+    /// (RG-12). Swing portfolios run several positions concurrently — this
+    /// caps the book's breadth, not its depth.
+    pub max_concurrent_positions: u32,
+    /// SWG-6 (spec 035): correlation-adjusted portfolio exposure cap (RG-13).
+    /// Default `> max_gross_portfolio` so the plain gross check binds first
+    /// unless the owner configures a tighter correlation number.
+    pub max_corr_adjusted_portfolio: f64,
 }
 
 impl Default for RiskLimits {
@@ -44,6 +52,8 @@ impl Default for RiskLimits {
             max_orders_per_min: 30,
             strategy_daily_loss_budget: 1_000.0,
             portfolio_daily_loss_budget: 3_000.0,
+            max_concurrent_positions: 32,
+            max_corr_adjusted_portfolio: 500_000.0,
         }
     }
 }
@@ -75,23 +85,32 @@ pub struct GateInput<'a> {
     pub contract_multiplier: f64,
     /// Allow-list of tradeable (venue, symbol) pairs (RG-2).
     pub allowed: &'a [(Venue, SymbolId)],
+    /// SWG-6 (spec 035): number of distinct symbols currently holding a
+    /// position (RG-12 counts an order that OPENS a new symbol slot).
+    pub open_positions: u32,
+    /// SWG-6 (spec 035): correlation-adjusted portfolio exposure AFTER this
+    /// order would fill (`portfolio::correlation_adjusted_exposure`). The gate
+    /// stays dumb — the caller owns the correlation math (RG-13).
+    pub corr_adjusted_exposure_notional: f64,
 }
 
 /// Why the gate rejected an order (the check that failed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectReason {
-    ModeDisallows,       // RG-1
-    NotAllowlisted,      // RG-2
-    OrderTooLarge,       // RG-3
-    PositionTooLarge,    // RG-4
-    GrossTooLarge,       // RG-5
-    PriceOutOfBand,      // RG-6
-    RateLimited,         // RG-7
-    StrategyLossBudget,  // RG-8
-    PortfolioLossBudget, // RG-9
-    KillSwitchTripped,   // RG-10
-    ReconcilerDiverged,  // RG-11
-    InvalidInput,        // RG-0: non-finite / negative qty, price, multiplier, or state inputs
+    ModeDisallows,        // RG-1
+    NotAllowlisted,       // RG-2
+    OrderTooLarge,        // RG-3
+    PositionTooLarge,     // RG-4
+    GrossTooLarge,        // RG-5
+    PriceOutOfBand,       // RG-6
+    RateLimited,          // RG-7
+    StrategyLossBudget,   // RG-8
+    PortfolioLossBudget,  // RG-9
+    KillSwitchTripped,    // RG-10
+    ReconcilerDiverged,   // RG-11
+    TooManyPositions,     // RG-12: new symbol slot beyond max_concurrent_positions
+    CorrAdjustedTooLarge, // RG-13: correlation-adjusted exposure cap breached
+    InvalidInput,         // RG-0: non-finite / negative qty, price, multiplier, or state inputs
 }
 
 /// Gate verdict.
@@ -135,11 +154,13 @@ pub fn evaluate(limits: &RiskLimits, kills: &KillSwitches, i: &GateInput) -> Ver
         || !i.gross_exposure_notional.is_finite()
         || !i.strategy_daily_pnl.is_finite()
         || !i.portfolio_daily_pnl.is_finite()
+        || !i.corr_adjusted_exposure_notional.is_finite()
         || i.qty < 0.0
         || i.price <= 0.0
         || i.contract_multiplier <= 0.0
         || !i.contract_multiplier.is_finite()
         || i.gross_exposure_notional < 0.0
+        || i.corr_adjusted_exposure_notional < 0.0
     {
         return Verdict::Reject(InvalidInput);
     }
@@ -208,6 +229,21 @@ pub fn evaluate(limits: &RiskLimits, kills: &KillSwitches, i: &GateInput) -> Ver
     // RG-11 reconciler must be clean for this venue.
     if !i.reconciler_clean {
         return Verdict::Reject(ReconcilerDiverged);
+    }
+    // RG-12 (SWG-6) max concurrent positions: only an order that OPENS a NEW
+    // symbol slot (no existing qty, not reduce_only) consumes a breadth slot.
+    // Adds to a held symbol and reduces/closes never count against the cap.
+    if !i.reduce_only
+        && i.current_position_qty.abs() < f64::EPSILON
+        && i.open_positions >= limits.max_concurrent_positions
+    {
+        return Verdict::Reject(TooManyPositions);
+    }
+    // RG-13 (SWG-6) correlation-adjusted portfolio exposure cap. The caller
+    // precomputes the RESULTING value via `portfolio::correlation_adjusted_exposure`
+    // (gate stays dumb; identity correlation ⇒ equals the gross notional).
+    if i.corr_adjusted_exposure_notional > limits.max_corr_adjusted_portfolio {
+        return Verdict::Reject(CorrAdjustedTooLarge);
     }
     Verdict::Pass
 }

@@ -8,9 +8,29 @@ the LLM agents that draft briefs grounded in this system's own data.
 ## Layout
 
 ```
-mp_data/         dataset/feature/manifest access with coverage checks (RES-1)
-grading.py       screener grading (RES-2) + edge-decay detection (RES-3)
-event_study.py   CAR harness with seeded bootstrap CIs + regime slicing (RES-4)
+mp_data/         dataset/feature/manifest access with coverage checks (RES-1) + `eligibility.py`: scorecard-grade selection (research-lab roadmap Phases 2.3–2.4)
+run_eligibility.py  CLI for the eligibility gate: prints eligible days + every excluded day and why; optional append-only run record (exit 2 fail-closed when nothing is eligible)
+registry.py      research idea registry (roadmap Phase 1.3): one record per candidate, funnel-state enum, run_id agreement with runs/index.jsonl
+run_registry.py  registry CLI: check / seed / render (check exits 1 on any problem)
+registry.jsonl   the ledger (14 records seeded 2026-08-19; states/reasons curated, evidence-linked)
+feasibility.py   economic feasibility gate (roadmap Phase 4.1): break-even holding period + min move from actual legs, base + stressed; funding needs a settlement cadence
+run_feasibility.py  feasibility CLI: computes + journals a kind=feasibility run record (E7) and updates the registry record
+panel.py         historical panel (roadmap 3.1): universe + manifest + membership from data.binance.vision daily klines; fidelity label `external_archive:binance-um-klines-1m-v1`
+panel_universe.json  versioned panel universe (binance-um-v1: BTCUSDT/ETHUSDT/SOLUSDT, 2026-01-01..08-18, train/validation/test partitions)
+run_panel.py     panel CLI: download (idempotent, missing-on-source recorded), check (coverage gaps), verify (seeded byte-identical rebuild)
+panel/           panel manifest ledger (append-only, per-universe)
+instrument_master.py  point-in-time instrument master (roadmap 3.3): versioned resolves, fail-closed on unresolved symbols; corpus filename regex + census log skip rule
+instrument_master.jsonl  the master (9 instruments, timestamp-corrected; last-match-wins by observed_from_ns)
+run_instrument_master.py  instrument-master CLI: resolve / check / render (check exits 1 on any unresolved symbol)
+autopsy.py       strategy autopsy (roadmap 4.5): P&L by day, cost share, classification (economic failure / data limitation / execution-model failure); zero-trade runs are absence of evidence, never data
+run_autopsy.py   autopsy CLI: writes `autopsies/<id>-<date>.md` append-only + links it in the registry evidence (exit 2 on duplicate day or missing run_id)
+autopsies/       generated autopsy reports (append-only)
+run_weekly_review.py  weekly research review (roadmap 1.2): ISO-week windowing of journaled runs, registry table, autopsies, benchmark row `unset (1.1 pending)`; append-only per week
+reviews/         weekly review reports
+grading.py       screener grading (RES-2) + edge-decay detection (RES-3); spec 017 recommendations
+grading_job.py   weekly grading job — emits machine `{week}.json` + human `{week}.md` with "Next stage recommendations" (spec 017 GRD-3/5)
+event_study.py   CAR harness with seeded bootstrap CIs + regime slicing (RES-4); `n_days`/`ci_reliable` disclosure
+run_backlog_event_studies.py  backlog-idea event studies (RES-4): same-UTC-day session gating on oi-purge, append-only `--run-id` rejection
 band_accuracy.py RES-4 whale band-accuracy parsing + weekly trend math
 band_accuracy_job.py  weekly band-accuracy job (shells out to `whale_study`)
 run_band_accuracy.py  CLI for the above (exit 2 on unavailable data)

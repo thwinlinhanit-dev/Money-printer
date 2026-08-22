@@ -120,6 +120,13 @@ can't verify via venue API-key info endpoints).
   and the monthly report (spec 009).
 - **EXE-12** First trading venue: Binance testnet, then Binance live-small.
   Adapter fixture tests per COL-13 pattern for the private streams.
+- **EXE-13 (SWG-7)** Decision cadence drops to bar-close for swing strategies:
+  the sim/paper engine dispatches a `Daily`/`FourHour`-cadence strategy ONLY on
+  bar close (feature updates AND its own timers — a mid-bar timer is deferred
+  to the next bar boundary, never dropped). Legacy `Event`-cadence strategies
+  keep per-event dispatch. Standard limit/market orders are sufficient; no
+  iceberg/spoofing/queue-jump detection is required. Order state machine and
+  fill-reconciliation requirements (EXE-2/3/5/6/9/11) carry over unchanged.
 
 ## Acceptance criteria
 - [x] Risk gate: clean order passes; each of RG-1..11 rejects in order (EXE-1). `exe_1_gate_passes_a_clean_order`, `exe_1_gate_rejects_each_check_in_order`, `exe_10_kill_switch_blocks_orders`.
@@ -128,6 +135,7 @@ can't verify via venue API-key info endpoints).
 - [x] UNKNOWN resolves by query (Acked / NotFound→Failed) (EXE-4). `exe_4_unknown_resolves_by_query`.
 - [x] Reconciler clean + foreign-position divergence (EXE-6). `exe_6_reconciler_clean_and_diverged`.
 - [x] Kill switch one-way latch + human-only reset (EXE-7). `exe_7_kill_switch_is_one_way_latch`.
+- [x] Bar-close decision cadence (EXE-13, spec 035 SWG-7). `swg_7_*` in `sim/tests/swing_execution.rs`: swing (`Daily`/`FourHour`) strategy dispatched only on bar boundaries (3 intents from 9 hourly events on 4h bars), legacy `Event` cadence keeps per-event dispatch (9/18 intents), and a swing strategy's mid-bar timer is deferred to the next bar close (never dropped) while standard market orders still fill. Existing fill/reconciliation tests unchanged.
 - [ ] Live paper/testnet e2e, WAL crash chaos, `oms doctor` key check (EXE-5/8/10/12) — need the venue adapter (network); deferred.
 
 ## Decisions

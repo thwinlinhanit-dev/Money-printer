@@ -100,6 +100,30 @@ docker compose -f ops/compose.yaml ps
 
 ## 7. Backups (OPS-5)
 
-Nightly encrypted tarball of `journal/`, `runs/index.sqlite`, configs, funnel
-state → off-host (rclone). Quarterly: run `ops/restore-drill.sh` — an untested
-backup is a hope, not a backup.
+Two tiers:
+
+1. **Local mirror** (same volume — protects against deletion, NOT disk
+   failure): `ops/scripts/backup_data.ps1 -Register` → `C:/mp-backup`.
+2. **Off-host encrypted tier** (protects against the dead disk that takes
+   the local mirror with it): `ops/scripts/offhost_backup.ps1` encrypts the
+   corpus + durable state per-file with age and pushes to an rclone remote
+   (incremental copy). Tooling is vendored at `ops/tools/` (rclone + age
+   portable binaries, fetched by `ops/scripts/fetch_tools.ps1`); the age
+   keypair lives at `ops/keys/offhost.agekey` (gitignored) with the PUBLIC
+   key committed as `offhost.age.pub`.
+
+```sh
+# one-time: vendor tools + generate keypair + pick a remote
+powershell -File ops/scripts/fetch_tools.ps1
+rclone config                     # add your cloud remote (b2:/s3:/drive:)
+powershell -File ops/scripts/offhost_backup.ps1 -Remote "b2:money-printer" -Register
+```
+
+**The age PRIVATE key must also be stored off-host by the owner** — an
+encrypted backup whose key lives on the same dead disk is not a backup.
+
+Test quarterly: `powershell -File ops/scripts/offhost_restore_drill.ps1
+-Remote "b2:money-printer"` — an untested backup is a hope, not a backup.
+The drill pulls → decrypts → size-verifies against the manifest → runs the
+sim golden test from restored state. A local-only pipeline test:
+`-Remote "localdrill:offhost"` (rclone `local` remote).

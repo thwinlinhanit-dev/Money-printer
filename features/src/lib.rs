@@ -17,16 +17,24 @@ pub mod engine;
 pub mod hit_journal;
 pub mod leverage;
 pub mod liquidation;
+pub mod options_flow;
+pub mod options_greeks;
+pub mod options_iv;
 pub mod screener;
 pub mod signal_catalog;
+pub mod swing;
 pub mod whale;
 
 use mp_core::Venue;
 
 pub use bar::{Bar, BarBuilder};
-pub use catalog::{BookDepth, BookDepthKind, LiqDist, LiqRate, LiqVol, TapeBpsDelta, TapeTps};
+pub use catalog::{
+    BookDepth, BookDepthKind, LiqDist, LiqRate, LiqVol, Microprice, SpreadBp, SpreadRegime,
+    TapeBpsDelta, TapeTps,
+};
 pub use config::{
-    BookDepthParams, ConfigError, FeaturesConfig, LiqDeltaParams, LiqFlowParams, TapeParams,
+    BookDepthParams, ConfigError, FeaturesConfig, LiqDeltaParams, LiqFlowParams,
+    MicrostructureParams, TapeParams,
 };
 pub use engine::{BarFeature, FeatureEngine, FeatureUpdate, Locality, TickFeature};
 pub use hit_journal::{HitJournal, HitRecord};
@@ -34,7 +42,24 @@ pub use leverage::{calibrate_leverage_weights, tier_leverages, LeverageTierCalib
 pub use liquidation::{
     band_accuracy, BandAccuracy, BandObservation, LiqAgg, LiqDelta, LiqEstBands, WhaleBandStudy,
 };
+pub use options_flow::{
+    bs_delta, flow_tenor, moneyness_bucket, window_label, FlowFeature, FlowMetric, FlowParams,
+    MoneynessBucket,
+};
+pub use options_greeks::{
+    gex_at, ChainMap, ChainScalar, ChainScalarFeature, ContractKey, GreeksAggregator,
+    HigherOrderGreek, TickerSnap,
+};
+pub use options_iv::{
+    vrp, IvAtm, IvIndex, IvPercentileFeature, IvSkew, IvSurfaceAggregator, IvTerm, VolRegime,
+};
 pub use screener::{Cond, Op, Rule, Screener, ScreenerHit};
+pub use swing::{
+    atr, compressed_range, realized_vol, sweep_of, trend_strength, value_area, volume_levels,
+    LevelKind, LevelSide, RangeField, RollingVwap, SweepEvent, SweepField, SweepSide, SwingAtr,
+    SwingClose, SwingNearestLevel, SwingRange, SwingRealizedVol, SwingRollingVwap, SwingSweep,
+    SwingTrendStrength, SwingValueArea, ValueArea, ValueAreaField, VolumeLevels,
+};
 pub use whale::{WhaleNet, WhaleNetDelta};
 
 /// Build a [`FeatureEngine`] from a [`FeaturesConfig`] — the one-code-path
@@ -47,12 +72,14 @@ pub use whale::{WhaleNet, WhaleNetDelta};
 ///
 /// Bar features without config params (`delta.bar`, `vol.rv`, `breakout`)
 /// are not registered here — footprint covers order-flow bar logic through
-/// the `[footprint]` section's buckets + `bar_tf_ns`.
+/// the `[footprint]` section's buckets + `bar_tf_ns`, and the swing family
+/// (spec 035 SWG-2) is registered through its own `[swing]` section.
 pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigError> {
     let mut e = FeatureEngine::new(cfg.bar_tf_ns);
     for slug in &cfg.cvd.venues {
-        let venue = Venue::from_slug(slug)
-            .ok_or_else(|| ConfigError::Parse(format!("cvd.venues: unknown venue slug '{slug}'")))?;
+        let venue = Venue::from_slug(slug).ok_or_else(|| {
+            ConfigError::Parse(format!("cvd.venues: unknown venue slug '{slug}'"))
+        })?;
         e.register_tick(move || Box::new(crate::catalog::Cvd::new(venue)));
     }
     for slug in &cfg.whale_print.venues {
@@ -70,7 +97,10 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
         e.register_tick(move || Box::new(WhaleNet::with_stale_after(venue, stale)));
         e.register_tick(move || Box::new(WhaleNetDelta::with_stale_after(venue, stale)));
     }
-    let (wc, mn) = (cfg.liq_cluster.window_ns, cfg.liq_cluster.min_cluster_notional);
+    let (wc, mn) = (
+        cfg.liq_cluster.window_ns,
+        cfg.liq_cluster.min_cluster_notional,
+    );
     e.register_tick(move || Box::new(crate::catalog::LiqCluster::new(wc, mn)));
     let (dw, aw) = (cfg.liq_agg.dedup_window_ns, cfg.liq_agg.agg_window_ns);
     e.register_tick(move || Box::new(LiqAgg::new(dw, aw)));
@@ -86,11 +116,15 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
         let (min_usd, max_usd) = (b.min_usd, b.max_usd);
         let name = b.name.clone();
         e.register_tick(move || {
-            Box::new(crate::catalog::FootprintDelta::new(tf, &name, min_usd, max_usd))
+            Box::new(crate::catalog::FootprintDelta::new(
+                tf, &name, min_usd, max_usd,
+            ))
         });
         let name = b.name.clone();
         e.register_tick(move || {
-            Box::new(crate::catalog::FootprintImbalance::new(tf, &name, min_usd, max_usd))
+            Box::new(crate::catalog::FootprintImbalance::new(
+                tf, &name, min_usd, max_usd,
+            ))
         });
     }
     // Always-on pure passthroughs (no config params):
@@ -102,6 +136,20 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
     for &pct in &cfg.book_depth.bands {
         e.register_tick(move || Box::new(BookDepth::new(pct, BookDepthKind::Gauge)));
         e.register_tick(move || Box::new(BookDepth::new(pct, BookDepthKind::Total)));
+    }
+    // Book microstructure (research-driven edge): microprice, quoted spread
+    // in bps, and the wide-spread regime gate — one instance per configured
+    // venue (book-based; no-op on venues without a book stream).
+    let wide_bps = cfg.microstructure.wide_spread_bps;
+    for slug in &cfg.microstructure.venues {
+        let venue = Venue::from_slug(slug).ok_or_else(|| {
+            ConfigError::Parse(format!(
+                "microstructure.venues: unknown venue slug '{slug}'"
+            ))
+        })?;
+        e.register_tick(move || Box::new(Microprice::for_venue(venue)));
+        e.register_tick(move || Box::new(SpreadBp::for_venue(venue)));
+        e.register_tick(move || Box::new(SpreadRegime::for_venue(venue, wide_bps)));
     }
     // Liquidation flow (COL-29 real liq source): rolling notional by side +
     // rolling event rate over the shared window, plus liq price-distance
@@ -137,5 +185,251 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
     let tf_secs = tf_secs as f64;
     let tf = format!("{tf}s");
     e.register_bar(move || Box::new(TapeTps::new(&tf, tf_secs)));
+    // Swing HTF regime/structure (spec 035 SWG-2): bar-only realized vol,
+    // signed trend strength, value area (POC/high/low) and rolling VWAP —
+    // none depend on L2 order book or trade-tape (SWG-2 MUST NOT require
+    // tick inputs). Windows are in bar counts; each feature warms per FEA-3.
+    let rv_window = cfg.swing.realized_vol_window;
+    let sqrt_bars_per_year = cfg.swing.sqrt_bars_per_year.unwrap_or_else(|| {
+        // Derive from bar_tf_ns: bars/year = 365.25d × 86400s / tf_secs.
+        (31_557_600.0 / (cfg.bar_tf_ns as f64 / 1_000_000_000.0)).sqrt()
+    });
+    e.register_bar(move || Box::new(SwingRealizedVol::new(rv_window, sqrt_bars_per_year)));
+    let trend_lookback = cfg.swing.trend_lookback;
+    e.register_bar(move || Box::new(SwingTrendStrength::new(trend_lookback)));
+    let (va_window, va_bucket) = (cfg.swing.value_area_window, cfg.swing.value_area_bucket);
+    e.register_bar(move || {
+        Box::new(SwingValueArea::new(
+            va_window,
+            va_bucket,
+            ValueAreaField::Poc,
+        ))
+    });
+    e.register_bar(move || {
+        Box::new(SwingValueArea::new(
+            va_window,
+            va_bucket,
+            ValueAreaField::High,
+        ))
+    });
+    e.register_bar(move || {
+        Box::new(SwingValueArea::new(
+            va_window,
+            va_bucket,
+            ValueAreaField::Low,
+        ))
+    });
+    let rv_bars = cfg.swing.rolling_vwap_bars;
+    e.register_bar(move || Box::new(SwingRollingVwap::new(rv_bars)));
+    // Liquidity-structure family (spec 036 SLQ): ATR, compressed-range
+    // boundaries, the sweep-reclaim event pair (extreme + companion stop,
+    // per side), and nearest HVN/LVN levels — all bar-only (SWG-2).
+    let atr_n = cfg.swing.sweep_atr_n;
+    e.register_bar(move || Box::new(SwingAtr::new(atr_n)));
+    e.register_bar(|| Box::new(crate::swing::SwingClose));
+    let (range_n, compress_frac) = (cfg.swing.sweep_range_n, cfg.swing.sweep_compress_frac);
+    e.register_bar(move || {
+        Box::new(SwingRange::new(
+            range_n,
+            compress_frac,
+            atr_n,
+            RangeField::High,
+        ))
+    });
+    e.register_bar(move || {
+        Box::new(SwingRange::new(
+            range_n,
+            compress_frac,
+            atr_n,
+            RangeField::Low,
+        ))
+    });
+    let (atr_mult, reclaim_z, vol_mult, stop_buf) = (
+        cfg.swing.sweep_atr_mult,
+        cfg.swing.sweep_reclaim_z,
+        cfg.swing.sweep_vol_mult,
+        cfg.swing.sweep_stop_buffer_atr,
+    );
+    for side in [Some(SweepSide::Low), Some(SweepSide::High)] {
+        e.register_bar(move || {
+            Box::new(SwingSweep::new(
+                range_n,
+                compress_frac,
+                atr_n,
+                atr_mult,
+                reclaim_z,
+                vol_mult,
+                stop_buf,
+                side,
+                SweepField::Extreme,
+            ))
+        });
+        e.register_bar(move || {
+            Box::new(SwingSweep::new(
+                range_n,
+                compress_frac,
+                atr_n,
+                atr_mult,
+                reclaim_z,
+                vol_mult,
+                stop_buf,
+                side,
+                SweepField::Stop,
+            ))
+        });
+    }
+    let (prof_win, prof_bucket, hvn_frac, lvn_frac) = (
+        cfg.swing.profile_window,
+        cfg.swing.value_area_bucket,
+        cfg.swing.profile_hvn_frac,
+        cfg.swing.profile_lvn_frac,
+    );
+    for kind in [LevelKind::Hvn, LevelKind::Lvn] {
+        for side in [LevelSide::Above, LevelSide::Below] {
+            e.register_bar(move || {
+                Box::new(SwingNearestLevel::new(
+                    prof_win,
+                    prof_bucket,
+                    hvn_frac,
+                    lvn_frac,
+                    kind,
+                    side,
+                ))
+            });
+        }
+    }
+    register_options_families(&mut e, cfg)?;
     Ok(e)
+}
+
+/// Options analytics families (specs 037/038/039): global tick features
+/// (FEA-20 — chain aggregation spans every option symbol of an underlying).
+/// Disabled when the family's `underlyings` list is empty (the default), so
+/// enabling is an explicit config decision. Public so tests and offline
+/// runners share the exact registration path (one-code-path, FEA-4).
+pub fn register_options_families(
+    e: &mut FeatureEngine,
+    cfg: &FeaturesConfig,
+) -> Result<(), ConfigError> {
+    use crate::options_flow::{FlowFeature, FlowMetric, FlowParams};
+    use crate::options_greeks::{ChainScalar, ChainScalarFeature, HigherOrderGreek};
+    use crate::options_iv::{
+        IvAtm, IvIndex, IvPercentileFeature, IvSkew, IvTerm,
+    };
+
+    // Spec 037 — chain-level Greeks scalars + FD higher-order Greeks.
+    if !cfg.options_greeks.underlyings.is_empty() {
+        let mult = cfg.options_greeks.contract_multiplier;
+        if !mult.is_finite() || mult <= 0.0 {
+            return Err(ConfigError::Parse(
+                "options_greeks.contract_multiplier must be finite > 0".into(),
+            ));
+        }
+        for u in &cfg.options_greeks.underlyings {
+            let un = u.to_ascii_lowercase();
+            for kind in [
+                ChainScalar::GexNet,
+                ChainScalar::MaxPain,
+                ChainScalar::NetDelta,
+                ChainScalar::NetVega,
+                ChainScalar::NetTheta,
+            ] {
+                let un = un.clone();
+                e.register_global_tick(move || {
+                    Box::new(ChainScalarFeature::new(kind, &un, mult))
+                });
+            }
+            for maker in [
+                HigherOrderGreek::vanna as fn(&str, f64) -> _,
+                HigherOrderGreek::volga,
+                HigherOrderGreek::charm,
+            ] {
+                let un = un.clone();
+                e.register_global_tick(move || Box::new(maker(&un, mult)));
+            }
+        }
+    }
+
+    // Spec 038 — IV surface analytics.
+    if !cfg.options_iv.underlyings.is_empty() {
+        for u in &cfg.options_iv.underlyings {
+            let un = u.to_ascii_lowercase();
+            let un_atm = un.clone();
+            e.register_global_tick(move || Box::new(IvAtm::new(&un_atm)));
+            let un_idx = un.clone();
+            e.register_global_tick(move || Box::new(IvIndex::new(&un_idx)));
+            let un_rr = un.clone();
+            e.register_global_tick(move || Box::new(IvSkew::risk_reversal(&un_rr)));
+            let un_wing = un.clone();
+            e.register_global_tick(move || Box::new(IvSkew::wing_richness(&un_wing)));
+            for t in &cfg.options_iv.tenors {
+                let (un, name, days) = (un.clone(), t.name.clone(), t.days);
+                e.register_global_tick(move || Box::new(IvTerm::new(&un, &name, days)));
+            }
+            let (un_pct, win_pct) = (un.clone(), cfg.options_iv.percentile_window_days);
+            e.register_global_tick(move || {
+                Box::new(IvPercentileFeature::percentile(&un_pct, win_pct))
+            });
+            let (un_reg, win_reg) = (un, cfg.options_iv.regime_lookback_days);
+            e.register_global_tick(move || {
+                Box::new(IvPercentileFeature::regime(&un_reg, win_reg))
+            });
+        }
+    }
+
+    // Spec 039 — windowed flow metrics (emit on window close).
+    if !cfg.options_flow.underlyings.is_empty() {
+        if cfg.options_flow.windows_ns.is_empty() {
+            return Err(ConfigError::Parse(
+                "options_flow.windows_ns must not be empty when underlyings are set".into(),
+            ));
+        }
+        let p = FlowParams {
+            contract_multiplier: cfg.options_flow.contract_multiplier,
+            block_threshold_usd: cfg.options_flow.block_threshold_usd,
+            whale_floor_usd: cfg.options_flow.whale_floor_usd,
+            k_whale: cfg.options_flow.k_whale,
+            atm_threshold: cfg.options_flow.atm_threshold,
+            itm_cap: cfg.options_flow.itm_cap,
+            otm_cap: cfg.options_flow.otm_cap,
+            tenor_bounds: [
+                cfg.options_flow.weekly_max_days,
+                cfg.options_flow.monthly_max_days,
+                cfg.options_flow.quarterly_max_days,
+            ],
+        };
+        for u in &cfg.options_flow.underlyings {
+            let un = u.to_ascii_lowercase();
+            for &w in &cfg.options_flow.windows_ns {
+                if w <= 0 {
+                    return Err(ConfigError::Parse(
+                        "options_flow.windows_ns entries must be > 0".into(),
+                    ));
+                }
+                for metric in [
+                    FlowMetric::NetPremium,
+                    FlowMetric::Block,
+                    FlowMetric::NetDelta,
+                    FlowMetric::ItmFlow,
+                    FlowMetric::AtmFlow,
+                    FlowMetric::OtmFlow,
+                    FlowMetric::CallPutRatio,
+                    FlowMetric::WeeklyFlow,
+                    FlowMetric::MonthlyFlow,
+                    FlowMetric::QuarterlyFlow,
+                    FlowMetric::LeapFlow,
+                    FlowMetric::WhaleCount,
+                    FlowMetric::WhaleNet,
+                    FlowMetric::Acceleration,
+                    FlowMetric::CrossVenueDivergence,
+                ] {
+                    let (un, p) = (un.clone(), p.clone());
+                    e.register_global_tick(move || {
+                        Box::new(FlowFeature::new(metric, &un, w, p.clone()))
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }

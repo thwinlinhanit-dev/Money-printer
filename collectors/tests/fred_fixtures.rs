@@ -64,15 +64,15 @@ fn mac_1_hip3_via_existing_hyperliquid_normalizer() {
     )
     .unwrap();
     assert_eq!(out.len(), 1);
-    match &out[0].body {
-        MarketEvent::Trade {
-            price, qty, side, ..
-        } => {
-            assert_eq!(*price, 25372.0);
-            assert_eq!(*qty, 0.0353);
-            assert_eq!(*side, Side::Buy);
+    match out[0].body.trade_view() {
+        Some((price, qty, side, _, taker_addr)) => {
+            assert_eq!(price, 25372.0);
+            assert_eq!(qty, 0.0353);
+            assert_eq!(side, Side::Buy);
+            // No `users` in this frame ⇒ empty address (spec 033 WAL-4).
+            assert_eq!(taker_addr, Some(""));
         }
-        other => panic!("expected Trade, got {other:?}"),
+        other => panic!("expected trade, got {other:?}"),
     }
 }
 

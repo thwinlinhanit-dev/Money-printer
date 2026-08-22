@@ -87,7 +87,29 @@ pub trait Strategy {
     }
 
     /// Return a new instance with the given walk-forward param overrides.
-    /// Default impl: returns a new instance with default params (override for
-    /// strategies that have a param grid).
+    /// Strategies without a param grid may ignore the map and return a fresh
+    /// default instance (there is no default impl — every strategy must
+    /// provide one; `params()` declares which keys the grid may set).
     fn with_params(&self, _params: &BTreeMap<String, f64>) -> Box<dyn Strategy>;
+
+    // ---- swing-horizon metadata (spec 035, SWG-3) --------------------------
+    //
+    // These are HINTS for sim/risk/sizing, NOT hard rules. Swing strategies
+    // override them; the v1 per-tick strategies keep the event-driven default
+    // (`Event` — evaluated on every event, the sim's legacy behavior, SWG-7).
+
+    /// `[min_bars, max_bars]` holding-period window. Default `[1, MAX]` —
+    /// any horizon. Sizing uses it only to compute expected funding drag; the
+    /// risk gate's own stops/DD limits still rule (SWG-6, 000 PD-5).
+    fn holding_period_bars(&self) -> mp_core::BarRange {
+        mp_core::BarRange::new(1, u32::MAX)
+    }
+
+    /// When the strategy may re-evaluate (spec 035 SWG-3). Swing strategies
+    /// override with `Daily`/`FourHour` and the sim dispatches them ONLY on
+    /// bar close (SWG-7). Legacy per-tick strategies keep the default `Event`
+    /// cadence — every event, unchanged.
+    fn rebalance_cadence(&self) -> mp_core::RebalanceCadence {
+        mp_core::RebalanceCadence::Event
+    }
 }

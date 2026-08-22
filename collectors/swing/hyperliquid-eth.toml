@@ -1,0 +1,8 @@
+# Swing-only Hyperliquid collector — ETH (spec 035 SWG-1 / spec 036 SLQ-D).
+# Keep: trades (OHLCV) + activeAssetCtx (mark/funding/OI). Drop: l2Book.
+venue = "hyperliquid"
+symbol = "ETH"
+data_dir = "data"
+channel_capacity = 10000
+backpressure = "drop_oldest"
+swing_only = true

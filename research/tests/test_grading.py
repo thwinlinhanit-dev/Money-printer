@@ -4,10 +4,12 @@ from pytest import approx
 
 from grading import (
     Hit,
+    RuleGrade,
     decay_flag,
     forward_return,
     grade_hits,
     leaderboard,
+    recommendation,
 )
 
 MIN = 60_000_000_000  # 1 minute in ns
@@ -63,3 +65,57 @@ def test_res_3_decay_flag_fires_on_fading_edge_only():
     assert decay_flag([0.01] * 4) is False
     # A never-positive rule is a kill decision, not a decay flag.
     assert decay_flag([-0.02] * 12) is False
+
+
+def _grade(excesses: list[float]) -> RuleGrade:
+    """RuleGrade consistent with its own excesses (win_rate = wins / n)."""
+    return RuleGrade(
+        rule="r",
+        horizon_ns=MIN,
+        n=len(excesses),
+        wins=sum(1 for x in excesses if x > 0),
+        sum_excess=sum(excesses),
+        excesses=excesses,
+    )
+
+
+def test_grd_5_promotion_recommendation():
+    # promote: hit rate >= 60% AND Sharpe > 1.0 (spec 017 GRD-3).
+    assert recommendation(_grade([0.10, 0.11, 0.09, 0.10, 0.11])) == "promote"
+    # demote: hit rate < 40%, not killed (Sharpe >= 0).
+    assert recommendation(_grade([0.30, 0.02, -0.10, -0.08, -0.05, -0.01])) == "demote"
+    # kill: hit rate < 20% (stricter than demote — kill wins).
+    assert recommendation(_grade([0.10] + [-0.05] * 9)) == "kill"
+    # kill: negative Sharpe AND hit rate < 50%.
+    assert recommendation(_grade([0.01, -0.02, -0.03, 0.01, -0.01])) == "kill"
+    # hold: everything else (high hit rate but Sharpe <= 1.0).
+    assert recommendation(_grade([0.05, -0.02, 0.03, 0.01])) == "hold"
+
+
+def test_grd_5_degenerate_variance_never_promotes():
+    # All identical excesses: Sharpe degenerates to 0.0 (PD-5 — a rule with
+    # no variance evidence is not promoted on a made-up Sharpe).
+    g = _grade([0.05, 0.05, 0.05, 0.05])
+    assert g.sharpe == 0.0
+    assert recommendation(g) == "hold"
+
+
+def test_grd_4_grading_produces_report(tmp_path):
+    """GRD-5: the weekly job emits the machine {week}.json AND the
+    human-readable {week}.md with a "Next stage recommendations" section."""
+    from grading_job import run_weekly_grading
+
+    prices = {"BTC": [(0, 100.0), (MIN, 110.0), (2 * MIN, 121.0)]}
+    hits = [Hit("pump", "BTC", 0), Hit("pump", "BTC", MIN)]
+    path, ran = run_weekly_grading(
+        "2026-W29", hits, prices, MIN, {"BTC": 0.05}, tmp_path
+    )
+    assert ran and path.exists()
+    report = tmp_path / "2026-W29.md"
+    assert report.exists()
+    text = report.read_text(encoding="utf-8")
+    assert "# Screener grading report — 2026-W29" in text
+    assert "| 1 | pump |" in text
+    assert "## Next stage recommendations" in text
+    # Recommendations are concrete per rule (GRD-3).
+    assert any(line.startswith("- **") for line in text.splitlines())

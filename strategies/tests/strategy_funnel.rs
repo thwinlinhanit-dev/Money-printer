@@ -167,6 +167,26 @@ fn str_3_funnel_full_lifecycle_and_gates() {
 }
 
 #[test]
+fn str_12_carry_passes_funnel() {
+    // STR-12 (spec 015): carry-v1 must pass the funnel — hypothesis →
+    // backtest → walk-forward → paper → live-small. Live-small is
+    // human-gated (PD-1): an agent alone can never pass it.
+    let mut s = FunnelState::register(StrategyId::new("carry-v1"), true);
+    s.promote(Stage::Hypothesis, false, vec![], NOW).unwrap();
+    s.promote(Stage::Backtest, false, vec![], NOW).unwrap();
+    s.promote(Stage::WalkForward, false, ev("run:wf1"), NOW)
+        .unwrap();
+    s.promote(Stage::Paper, false, ev("run:oos1"), NOW).unwrap();
+    assert_eq!(
+        s.promote(Stage::LiveSmall, false, ev("run:paper1"), NOW),
+        Err(FunnelError::NeedsHuman)
+    );
+    s.promote(Stage::LiveSmall, true, ev("run:paper1"), NOW)
+        .unwrap();
+    assert_eq!(s.stage, Stage::LiveSmall);
+}
+
+#[test]
 fn str_5_transitions_journal_as_jsonl() {
     let mut s = FunnelState::register(StrategyId::new("x"), true);
     let t = s.promote(Stage::Hypothesis, false, vec![], NOW).unwrap();
@@ -273,7 +293,12 @@ fn str_1_strategy_trait_matches_design_and_ctx_exposes_no_io() {
 #[test]
 fn str_8_launch_strategies_have_written_hypotheses() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    for dir in ["carry-v1", "trend-breadth-v1", "liq-fade-v1"] {
+    for dir in [
+        "carry-v1",
+        "trend-breadth-v1",
+        "liq-fade-v1",
+        "swing-range-reclaim-v1",
+    ] {
         let p = root.join(dir).join("hypothesis.md");
         let text = std::fs::read_to_string(&p)
             .unwrap_or_else(|_| panic!("{} must exist (STR-8)", p.display()));

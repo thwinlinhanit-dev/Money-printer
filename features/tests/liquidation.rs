@@ -170,9 +170,11 @@ fn liq_5_no_new_event_variant() {
     // events only — THIS spec added no event variant (LIQ-5). The schema was
     // amended to 3 by the owner-approved specs 028/030/031 (WhalePosition /
     // MacroPoint / Option* variants, CONV-20), never by 029: the only 2→3
-    // additions are those append-only variants. Guard the exact version so a
-    // future amendment updates this test deliberately.
-    assert_eq!(mp_core::SCHEMA_VER, 3);
+    // additions are those append-only variants. Schema 4 (2026-08-18) came
+    // from owner-approved specs 033/034 (TradeWithAddr / NetflowSnapshot /
+    // Venue::Ethereum), never from 029. Guard the exact version so a future
+    // amendment updates this test deliberately.
+    assert_eq!(mp_core::SCHEMA_VER, 4);
 }
 
 #[test]

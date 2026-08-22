@@ -1,0 +1,19 @@
+# Swing-scoped FRED macro collector (spec 030, MAC-7).
+# Higher-timeframe macro backdrop: DXY, 10Y/2Y yields, SOFR, Fed Funds. These
+# are daily-rate series — perfect for the daily cross-asset "macro proxy" that
+# spec 035 SWG-1 lists. Correlation-grade, NOT execution-grade (MAC-5).
+# Requires FRED_API_KEY env var (MAC-2, PD-2 — never in this file).
+# Run via .\swing_collectors.ps1 (supervised), or manually:
+#   FRED_API_KEY=... cargo run -p mp-collectors --features live-http --bin mp-macro -- \
+#     --config collectors/swing/macro.toml
+# Writes data/raw/{date}_fred_macro.log (MacroPoint events).
+data_dir = "data"
+
+# DXY, 10Y, 2Y, SOFR, Fed Funds Effective Rate.
+series = ["DTWEXBGS", "DGS10", "DGS2", "SOFR", "DFF"]
+
+# Daily poll cadence (MAC-4; default 1/day) — low bandwidth.
+poll_cadence_s = 86400
+
+# Initial backfill window: 90 calendar days of history for a meaningful HTF lookback.
+backfill_days = 90

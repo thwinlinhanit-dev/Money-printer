@@ -569,7 +569,8 @@ pub fn parse_force_orders(raw: &serde_json::Value) -> Result<Vec<ForceOrder>, No
         if str_field(v, "status") != Some("FILLED") {
             continue;
         }
-        let order_id = u64_field(v, "orderId").ok_or(NormError::Parse("forceOrder orderId".into()))?;
+        let order_id =
+            u64_field(v, "orderId").ok_or(NormError::Parse("forceOrder orderId".into()))?;
         let price = f64_field(v, "avgPrice")
             .filter(|p| *p > 0.0)
             .or_else(|| f64_field(v, "price"))
@@ -666,7 +667,10 @@ pub fn fetch_force_orders_blocking(
         format!("https://fapi.binance.com/fapi/v1/allForceOrders?{query}&signature={signature}");
     let resp = rest_client()
         .get(&url)
-        .header(reqwest::header::HeaderName::from_static("x-mbx-apikey"), api_key)
+        .header(
+            reqwest::header::HeaderName::from_static("x-mbx-apikey"),
+            api_key,
+        )
         .send()?;
     let status = resp.status();
     if status.as_u16() == 429 {
@@ -681,7 +685,9 @@ pub fn fetch_force_orders_blocking(
             retry_after_s = wait,
             "binance allForceOrders 429 — RetryAfter"
         );
-        return Err(format!("Binance allForceOrders rate-limited (429); Retry-After {wait}s").into());
+        return Err(
+            format!("Binance allForceOrders rate-limited (429); Retry-After {wait}s").into(),
+        );
     }
     if !status.is_success() {
         // USER_DATA errors are JSON bodies; surface the venue's message so a
@@ -1015,9 +1021,7 @@ impl Normalizer for BinanceNormalizer {
             }
             "forceOrder" => {
                 if self.suppress_ws_liquidations {
-                    tracing::debug!(
-                        "forceOrder frame dropped: REST allForceOrders source active"
-                    );
+                    tracing::debug!("forceOrder frame dropped: REST allForceOrders source active");
                     return Ok(());
                 }
                 let o = d
@@ -1665,12 +1669,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.len(), 1);
-        let MarketEvent::Liquidation {
-            price,
-            qty,
-            side,
-        } = out[0].body
-        else {
+        let MarketEvent::Liquidation { price, qty, side } = out[0].body else {
             panic!("expected Liquidation");
         };
         let ws = (price, qty, side);
@@ -1691,12 +1690,7 @@ mod tests {
             &mut out2,
         );
         assert_eq!(out2.len(), 1);
-        let MarketEvent::Liquidation {
-            price,
-            qty,
-            side,
-        } = out2[0].body
-        else {
+        let MarketEvent::Liquidation { price, qty, side } = out2[0].body else {
             panic!("expected Liquidation");
         };
         assert_eq!(ws, (price, qty, side));

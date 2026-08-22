@@ -67,12 +67,12 @@ Runs weekly (configurable). Produces per rule:
 - **GRD-5** Results MUST be human-readable Markdown + machine-readable JSON.
 
 ## Acceptance criteria
-- [ ] Hit journal writes correctly
-- [ ] Test: `grd_1_hit_persisted_with_snapshot` — verify JSONL output
-- [ ] Test: `grd_2_forward_return_computed_correctly` — known price path, verify return
-- [ ] Test: `grd_3_no_look_ahead` — hit at T, return computed from T+1 only
-- [ ] Test: `grd_4_grading_produces_report` — run on 30 days, verify output format
-- [ ] Test: `grd_5_promotion_recommendation` — rule with 60% hit rate → promote; 40% → kill
+- [x] Test: `test_res_2_forward_return_step_lookup_and_short_series_guard` — known price path, verify return (GRD-2 math)
+- [ ] GRD-1: `ScreenerHit` journal writer (`journal/screener-hits/YYYY-MM-DD.jsonl`) — NOT implemented; the grading job consumes a materialized hit bundle (see Decisions 2026-08-17)
+- [ ] GRD-2: backfill journal writer — NOT implemented (the forward-return math is; see Decisions 2026-08-17)
+- [ ] GRD-4 letter check (`grd_3_no_look_ahead`): entry = first price strictly after `ts_ns` — NOT implemented; `grading.py` uses as-of-at-`ts_ns` (see Decisions 2026-08-17)
+- [x] Test: `test_grd_4_grading_produces_report` — run on a week of hits, verify Markdown + JSON output (GRD-3/5)
+- [x] Test: `test_grd_5_promotion_recommendation` — promote / demote / kill / hold thresholds (GRD-3)
 - [ ] Integration: 30 days of hits, manual verification of 5 random samples
 
 ## Decisions
@@ -80,6 +80,7 @@ Runs weekly (configurable). Produces per rule:
 - 2026-07-19: Grading frequency: weekly (aligns with research ritual).
 - 2026-07-19: Report format: Markdown for human, JSON for funnel API.
 - 2026-07-19: Backfill uses a separate `backfill/` journal (immutable primary journal, append-only backfill).
+- 2026-08-17: GRD-3/5 implemented for real (audit E4): `research/grading_job.py` now also emits a per-run Markdown report `{week}.md` with a "Next stage recommendations" section (GRD-3/5), alongside the machine `{week}.json`. Recommendation thresholds follow the spec's promote/demote/kill/hold rule with kill evaluated before demote (the stricter verdict wins); "hit rate" = wins / hits-with-computable-returns (total evaluations are not tracked — honest denominator, `grading.py`); Sharpe = per-period mean/std of per-hit excess returns, not annualized, scoring 0.0 on degenerate variance so a no-variance rule is never promoted (PD-5). Honest status of the rest: GRD-1 (hit-journal writer) and GRD-2 (backfill journal writer) are NOT implemented — the job consumes a materialized hit bundle and writes grades only; GRD-4's letter (entry = first price strictly after `ts_ns`) is approximated as as-of-at-`ts_ns` in `grading.py` (documented in its docstring). Those acceptance boxes stay unchecked until implemented; they are not silently claimed.
 
 ## Open questions
 - None.

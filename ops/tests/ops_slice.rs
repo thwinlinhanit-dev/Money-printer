@@ -586,6 +586,8 @@ fn ops_3_kill_latch_makes_the_real_gate_reject_with_rg10() {
         reduce_only: false,
         contract_multiplier: 1.0,
         allowed: &allowed,
+        open_positions: 0,
+        corr_adjusted_exposure_notional: 0.0,
     };
     let limits = RiskLimits::default();
 
@@ -762,6 +764,8 @@ fn ops_3_kill_needs_confirm_and_flatten_needs_double_confirm() {
             reduce_only: false,
             contract_multiplier: 1.0,
             allowed: &allowed,
+            open_positions: 0,
+            corr_adjusted_exposure_notional: 0.0,
         },
     );
     assert_eq!(verdict, Verdict::Reject(RejectReason::KillSwitchTripped));
@@ -1517,6 +1521,471 @@ fn ops_9_telegram_flush_failure_keeps_batch_and_never_logs_delivered() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---- OPS-15: storage-budget growth watch -----------------------------------
+
+#[test]
+fn ops_15_storage_budget_fires_when_growth_trends_to_cap() {
+    // A corpus adding a constant 1 GB/day over 6 days (cumulative 6 GB),
+    // budget 10 GB: 4 GB remaining / 1 GB/day ⇒ 4 days ≤ the 14-day horizon
+    // ⇒ storage-budget P2. A CONSTANT rate is the case a trend-of-the-rate
+    // (slope) model would miss — the disk still fills in a predictable time.
+    let day = 20_700; // arbitrary epoch days
+    let samples: Vec<(i64, u64)> = (0..6).map(|i| (day + i, 1_000_000_000u64)).collect();
+    let p = mp_ops::project_storage(&samples, 10_000_000_000, 7).expect("samples project");
+    assert_eq!(p.current_bytes, 6_000_000_000);
+    assert_eq!(p.growth_bytes_per_day, Some(1_000_000_000.0));
+    assert_eq!(p.days_to_cap, Some(4.0));
+
+    let a = mp_ops::storage_budget_alert(
+        &samples,
+        10_000_000_000,
+        7,
+        14.0,
+        86_400_000_000_000,
+        "data/raw",
+    )
+    .expect("growing toward the cap within the horizon must alert");
+    assert_eq!(a.id, "storage-budget");
+    assert_eq!(a.severity, Severity::P2);
+    assert_eq!(a.runbook, "ops/runbooks/storage-budget.md");
+    assert!(a.detail.contains("6.0 GB used"), "{}", a.detail);
+    assert!(a.detail.contains("1.00 GB/day"), "{}", a.detail);
+    assert!(a.detail.contains("in 4.0 days"), "{}", a.detail);
+
+    // At/over the cap fires regardless of the growth rate (the corpus is
+    // there — the rate no longer matters).
+    let over = vec![(day, 25_000_000_000u64), (day + 1, 24_000_000_000)];
+    let a = mp_ops::storage_budget_alert(
+        &over,
+        20_000_000_000,
+        7,
+        14.0,
+        86_400_000_000_000,
+        "data/raw",
+    )
+    .expect("at/over the cap must alert");
+    assert!(a.detail.contains("at/over"), "{}", a.detail);
+}
+
+#[test]
+fn ops_15_storage_budget_silent_on_flat_shrinking_or_young() {
+    let day = 20_700;
+    let dedupe = 86_400_000_000_000;
+    // Nothing being added: rate 0 ⇒ no projection toward the cap, never an
+    // alert (a cleaned-up corpus is not heading for the cap).
+    let idle: Vec<(i64, u64)> = (0..6).map(|i| (day + i, 0u64)).collect();
+    assert!(
+        mp_ops::storage_budget_alert(&idle, 20_000_000_000, 7, 14.0, dedupe, "data/raw").is_none()
+    );
+    // One old bulk load, nothing since: the mean rate overstates the run
+    // rate, but the projection (54 days) stays beyond the horizon ⇒ silent.
+    let burst: Vec<(i64, u64)> = (0..6)
+        .map(|i| (day + i, if i == 0 { 10_000_000_000 } else { 0 }))
+        .collect();
+    assert!(
+        mp_ops::storage_budget_alert(&burst, 100_000_000_000, 7, 14.0, dedupe, "data/raw")
+            .is_none()
+    );
+    // Too young: one sample's rate (1 GB/day) still leaves 99 days to the
+    // 100 GB cap ⇒ beyond the horizon, silent.
+    assert!(mp_ops::storage_budget_alert(
+        &[(day, 1_000_000_000)],
+        100_000_000_000,
+        7,
+        14.0,
+        dedupe,
+        "data/raw"
+    )
+    .is_none());
+    // Slow fill: 0.1 GB/day ⇒ 194 days > 14 ⇒ silent.
+    let slow: Vec<(i64, u64)> = (0..6).map(|i| (day + i, 100_000_000u64)).collect();
+    assert!(
+        mp_ops::storage_budget_alert(&slow, 20_000_000_000, 7, 14.0, dedupe, "data/raw").is_none()
+    );
+    // No data at all ⇒ silent.
+    assert!(
+        mp_ops::storage_budget_alert(&[], 20_000_000_000, 7, 14.0, dedupe, "data/raw").is_none()
+    );
+    // Month rollover is linear on the day axis: 20260731 → 20260801 is one
+    // day, so a trend crossing a month boundary keeps its slope.
+    assert_eq!(
+        mp_ops::days_from_yyyymmdd(20260801).unwrap()
+            - mp_ops::days_from_yyyymmdd(20260731).unwrap(),
+        1
+    );
+}
+
+#[test]
+fn ops_15_storage_budget_subcommand_reports_verdict() {
+    // storage-budget: JSON verdict over real per-day files — non-conforming
+    // names are skipped, the current day's partial file is excluded, a
+    // growing corpus inside the horizon alerts (exit 0), a far cap stays
+    // silent (alert:null), and an unconfigured budget fails closed (exit 2).
+    let dir = std::env::temp_dir().join(format!("mpts15-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_mp-ops");
+
+    // 6 completed days (2026-08-08..13) adding 100..600 B/day; a junk name,
+    // a .lock file, and today's (2026-08-15) 1 GB file that MUST be excluded
+    // as partial — the clock is pinned via --ts-ns.
+    for (i, day) in [
+        "20260808", "20260809", "20260810", "20260811", "20260812", "20260813",
+    ]
+    .iter()
+    .enumerate()
+    {
+        std::fs::write(
+            dir.join(format!("{day}_hyperliquid_BTC.log")),
+            vec![0u8; 100 + i * 100],
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        dir.join("trace_20260806_binance_BTCUSDT.log"),
+        vec![0u8; 9_999],
+    )
+    .unwrap();
+    std::fs::write(dir.join(".lock_hyperliquid_BTC"), b"held").unwrap();
+    std::fs::write(
+        dir.join("20260815_hyperliquid_BTC.log"),
+        vec![0u8; 1_000_000_000],
+    )
+    .unwrap();
+    let ts_ns = mp_ops::days_from_yyyymmdd(20260815).unwrap() * 86_400_000_000_000;
+
+    // Fires: 2100 B cumulative (sum of 100..600 B/day), rate 350 B/day, cap
+    // 1000 B ⇒ already at/over the cap, days_to_cap 0.
+    let out = std::process::Command::new(bin)
+        .args([
+            "storage-budget",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--cap-bytes",
+            "1000",
+            "--ts-ns",
+            &ts_ns.to_string(),
+        ])
+        .output()
+        .expect("run mp-ops (storage-budget fires)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("\"current_bytes\":2100"), "{stdout}");
+    assert!(
+        stdout.contains("\"growth_bytes_per_day\":350.0"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\"days_to_cap\":0.0"), "{stdout}");
+    assert!(stdout.contains("\"id\":\"storage-budget\""), "{stdout}");
+    assert!(stdout.contains("\"severity\":\"P2\""), "{stdout}");
+
+    // Healthy: a far cap stays silent (alert:null) with the same corpus
+    // numbers — current_bytes 2100 also proves today's 1 GB file was
+    // excluded as a partial day.
+    let out = std::process::Command::new(bin)
+        .args([
+            "storage-budget",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--cap-bytes",
+            "1000000000",
+            "--ts-ns",
+            &ts_ns.to_string(),
+        ])
+        .output()
+        .expect("run mp-ops (storage-budget healthy)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success());
+    assert!(stdout.contains("\"alert\":null"), "{stdout}");
+    assert!(stdout.contains("\"current_bytes\":2100"), "{stdout}");
+    assert!(
+        stdout.contains("\"growth_bytes_per_day\":350.0"),
+        "{stdout}"
+    );
+
+    // Unconfigured budget ⇒ fail closed (exit 2), never a silent skip.
+    let out = std::process::Command::new(bin)
+        .args(["storage-budget", "--dir", dir.to_str().unwrap()])
+        .env_remove("MP_STORAGE_BUDGET_BYTES")
+        .output()
+        .expect("run mp-ops (no budget)");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an unconfigured budget must fail closed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("MP_STORAGE_BUDGET_BYTES"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Bad flag values are rejected, not silently absorbed.
+    let out = std::process::Command::new(bin)
+        .args([
+            "storage-budget",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--cap-bytes",
+            "1000",
+            "--trend-days",
+            "1",
+        ])
+        .output()
+        .expect("run mp-ops (bad trend-days)");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("at least 2"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_15_held_drain_files_flags_landed_but_unreleased() {
+    // The drain manifest's "VPS is still holding it" state: action=landed
+    // with release NOT in {released, no_release} (ssh_failed / skipped).
+    // `kept` (A-B collision — never released by design), `no_release`, and
+    // entries predating the release field (release="") are never flagged.
+    use mp_ops::{held_drain_files, parse_drain_manifest_line, DrainManifestEntry};
+    let e = |ts: &str, file: &str, action: &str, release: &str| DrainManifestEntry {
+        ts_utc: ts.to_string(),
+        file: file.to_string(),
+        action: action.to_string(),
+        release: release.to_string(),
+    };
+    let entries = vec![
+        e(
+            "2026-08-16T08:21:01Z",
+            "raw/20260815_bybit_BTCUSDT.log",
+            "landed",
+            "released",
+        ),
+        e(
+            "2026-08-16T08:21:01Z",
+            "raw/20260815_bybit_ETHUSDT.log",
+            "landed",
+            "no_release",
+        ),
+        e(
+            "2026-08-16T08:21:01Z",
+            "raw/20260815_bybit_SOLUSDT.log",
+            "landed",
+            "ssh_failed",
+        ),
+        e(
+            "2026-08-16T08:21:01Z",
+            "raw/20260815_hyperliquid_BTC.log",
+            "collision",
+            "kept",
+        ),
+        e(
+            "2026-08-16T08:21:01Z",
+            "raw/20260814_bybit_BTCUSDT.log",
+            "landed",
+            "skipped: hash changed: expected abc got def",
+        ),
+        e(
+            "2026-08-14T16:20:14Z",
+            "raw/20260812_hyperliquid_ETH.log",
+            "landed",
+            "",
+        ),
+    ];
+    let held = held_drain_files(&entries);
+    let files: Vec<&str> = held.iter().map(|(f, _)| f.as_str()).collect();
+    assert_eq!(
+        files,
+        vec![
+            "raw/20260814_bybit_BTCUSDT.log",
+            "raw/20260815_bybit_SOLUSDT.log"
+        ]
+    );
+    // The reasons carry through (the release value itself).
+    let sol = held
+        .iter()
+        .find(|(f, _)| f == "raw/20260815_bybit_SOLUSDT.log")
+        .unwrap();
+    assert_eq!(sol.1, "ssh_failed");
+
+    // Latest-entry resolution: the manifest is append-only, so a later
+    // successful release clears an earlier failure (and must not keep firing).
+    let entries = vec![
+        e(
+            "2026-08-16T01:20:00Z",
+            "raw/20260815_bybit_BTCUSDT.log",
+            "landed",
+            "ssh_failed",
+        ),
+        e(
+            "2026-08-17T01:20:00Z",
+            "raw/20260815_bybit_BTCUSDT.log",
+            "landed",
+            "released",
+        ),
+    ];
+    assert!(held_drain_files(&entries).is_empty());
+    // ...and the reverse order flags it.
+    let entries = vec![
+        e(
+            "2026-08-16T01:20:00Z",
+            "raw/20260815_bybit_BTCUSDT.log",
+            "landed",
+            "released",
+        ),
+        e(
+            "2026-08-17T01:20:00Z",
+            "raw/20260815_bybit_BTCUSDT.log",
+            "landed",
+            "ssh_failed",
+        ),
+    ];
+    assert_eq!(held_drain_files(&entries).len(), 1);
+
+    // Parser round-trip on the real manifest line shape; junk lines parse to
+    // None (they never flag anything).
+    let line = r#"{"ts_utc":"2026-08-16T08:21:01.2471763Z","vps_host":"34.135.127.147","vps_base":"/opt/money-printer/data","file":"raw/20260810_draintest_A.log","size":25,"sha256":"aabc","action":"landed","release":"released","no_release":false}"#;
+    let parsed = parse_drain_manifest_line(line).expect("real line parses");
+    assert_eq!(parsed.file, "raw/20260810_draintest_A.log");
+    assert_eq!(parsed.release, "released");
+    assert!(parse_drain_manifest_line("not json").is_none());
+}
+
+#[test]
+fn ops_15_storage_budget_flags_held_drain_files() {
+    // --manifest: a landed-but-ssh_failed entry makes the storage-budget P2
+    // fire even with a far cap (the relay is holding a file — the "VPS never
+    // accumulates" contract is broken regardless of growth), and the verdict
+    // carries the held list. A clean manifest (released) with a far cap stays
+    // silent. An unreadable manifest fails closed (exit 2).
+    let dir = std::env::temp_dir().join(format!("mpts15h-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_mp-ops");
+    std::fs::write(dir.join("20260814_hyperliquid_BTC.log"), vec![0u8; 100]).unwrap();
+    let ts_ns = mp_ops::days_from_yyyymmdd(20260815).unwrap() * 86_400_000_000_000;
+    let manifest = dir.join("vps_drain_manifest.jsonl");
+    let far_cap = "99999999999";
+
+    // Held: fires the P2 with the held file named.
+    std::fs::write(
+        &manifest,
+        r#"{"ts_utc":"2026-08-16T08:21:01Z","file":"raw/20260815_bybit_BTCUSDT.log","action":"landed","release":"ssh_failed","no_release":false}"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args([
+            "storage-budget",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--cap-bytes",
+            far_cap,
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "--ts-ns",
+            &ts_ns.to_string(),
+        ])
+        .output()
+        .expect("run mp-ops (held fires)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("\"id\":\"storage-budget\""), "{stdout}");
+    assert!(stdout.contains("\"held_vps_count\":1"), "{stdout}");
+    assert!(stdout.contains("20260815_bybit_BTCUSDT"), "{stdout}");
+    assert!(stdout.contains("held VPS file(s)"), "{stdout}");
+
+    // Clean manifest (released) + far cap: silent.
+    std::fs::write(
+        &manifest,
+        r#"{"ts_utc":"2026-08-16T08:21:01Z","file":"raw/20260815_bybit_BTCUSDT.log","action":"landed","release":"released","no_release":false}"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args([
+            "storage-budget",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--cap-bytes",
+            far_cap,
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "--ts-ns",
+            &ts_ns.to_string(),
+        ])
+        .output()
+        .expect("run mp-ops (clean silent)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"alert\":null"), "{stdout}");
+    assert!(stdout.contains("\"held_vps_count\":0"), "{stdout}");
+
+    // Unreadable manifest: fail closed (exit 2), never a silent skip.
+    let out = std::process::Command::new(bin)
+        .args([
+            "storage-budget",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--cap-bytes",
+            far_cap,
+            "--manifest",
+            dir.join("missing_manifest.jsonl").to_str().unwrap(),
+            "--ts-ns",
+            &ts_ns.to_string(),
+        ])
+        .output()
+        .expect("run mp-ops (unreadable manifest)");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("read manifest"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ops_15_storage_budget_timer_runs_daily_and_reads_only_the_corpus() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let service = std::fs::read_to_string(root.join("systemd/storage-budget.service"))
+        .expect("storage-budget.service");
+    assert!(
+        service.contains("mp-ops storage-budget --dir /opt/money-printer/data/raw --telegram"),
+        "OPS-15: the service runs the daily storage-budget check with delivery"
+    );
+    assert!(
+        service.contains("EnvironmentFile=/etc/money-printer/ops.env"),
+        "OPS-15: the budget and Bot API credentials come from ops.env"
+    );
+    assert!(service.contains("WorkingDirectory=/opt/money-printer"));
+    assert!(service.contains("ProtectSystem=strict"));
+    assert!(
+        service.contains("ReadOnlyPaths=/opt/money-printer/data/raw"),
+        "OPS-15: the check is read-only on the corpus (W-6)"
+    );
+    assert!(service.contains("User=printer"));
+    assert!(service.contains("NoNewPrivileges=true"));
+
+    let timer = std::fs::read_to_string(root.join("systemd/storage-budget.timer"))
+        .expect("storage-budget.timer");
+    assert!(
+        timer.contains("OnCalendar=*-*-* 01:30:00"),
+        "OPS-15: daily at 01:30 UTC — after the 00:05 pipeline, clear of grading"
+    );
+    assert!(
+        timer.contains("Persistent=true"),
+        "OPS-15: missed fires are caught up"
+    );
+}
+
 // ---- OPS-14: near-real-time stale Telegram batch watch ---------------------
 
 #[test]
@@ -2204,8 +2673,14 @@ fn ops_9_p1_webhook_posts_dispatch_via_curl_to_stub() {
     assert!(req.contains("Content-Type: application/json"), "{req}");
     assert!(req.contains("\"id\":\"recon-diverged\""), "{req}");
     assert!(req.contains("\"severity\":\"P1\""), "{req}");
-    assert!(req.contains("\"detail\":\"BTCUSDT position mismatch\""), "{req}");
-    assert!(req.contains("\"runbook\":\"ops/runbooks/recon-diverged.md\""), "{req}");
+    assert!(
+        req.contains("\"detail\":\"BTCUSDT position mismatch\""),
+        "{req}"
+    );
+    assert!(
+        req.contains("\"runbook\":\"ops/runbooks/recon-diverged.md\""),
+        "{req}"
+    );
     assert!(req.contains("\"ts_ns\":1234"), "{req}");
 }
 

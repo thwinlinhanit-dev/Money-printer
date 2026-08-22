@@ -15,6 +15,7 @@ pub fn venue_slug(v: Venue) -> &'static str {
         Venue::KrakenFutures => "kraken_futures",
         Venue::Deribit => "deribit",
         Venue::Fred => "fred",
+        Venue::Ethereum => "ethereum",
     }
 }
 
@@ -30,6 +31,7 @@ pub fn venue_code(v: Venue) -> u16 {
         Venue::KrakenFutures => 6,
         Venue::Deribit => 7,
         Venue::Fred => 8,
+        Venue::Ethereum => 9,
     }
 }
 
@@ -44,6 +46,7 @@ pub fn venue_from_code(code: u16) -> Option<Venue> {
         6 => Some(Venue::KrakenFutures),
         7 => Some(Venue::Deribit),
         8 => Some(Venue::Fred),
+        9 => Some(Venue::Ethereum),
         _ => None,
     }
 }
@@ -53,7 +56,7 @@ pub fn venue_from_code(code: u16) -> Option<Venue> {
 /// `macro`, `options`) — never mixed into the live tick streams (W-6).
 pub fn stream_type_name(body: &MarketEvent) -> &'static str {
     match body {
-        MarketEvent::Trade { .. } => "trades",
+        MarketEvent::Trade { .. } | MarketEvent::TradeWithAddr { .. } => "trades",
         MarketEvent::BookDelta { .. } => "book_deltas",
         MarketEvent::BookSnapshot { .. } => "book_snapshots",
         MarketEvent::Funding { .. } => "funding",
@@ -67,6 +70,7 @@ pub fn stream_type_name(body: &MarketEvent) -> &'static str {
         MarketEvent::OptionTrade { .. }
         | MarketEvent::OptionBook { .. }
         | MarketEvent::OptionTicker { .. } => "options",
+        MarketEvent::NetflowSnapshot { .. } => "netflow",
     }
 }
 

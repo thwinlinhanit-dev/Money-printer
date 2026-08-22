@@ -72,6 +72,21 @@ class RuleGrade:
     def avg_excess(self) -> float:
         return self.sum_excess / self.n if self.n else 0.0
 
+    @property
+    def sharpe(self) -> float:
+        """Per-period Sharpe of the "buy the hit" strategy (spec 017 GRD-3),
+        computed on per-hit excess returns — consistent with ``avg_excess``
+        and ``win_rate``; not annualized. Degenerate samples (n < 2 or zero
+        variance) score 0.0: a rule with no variance evidence must never be
+        promoted on a made-up Sharpe (PD-5)."""
+        if self.n < 2:
+            return 0.0
+        mean = self.avg_excess
+        var = sum((x - mean) ** 2 for x in self.excesses) / (self.n - 1)
+        if var == 0.0:
+            return 0.0
+        return mean / var**0.5
+
 
 def grade_hits(
     hits: list[Hit],
@@ -110,6 +125,22 @@ def leaderboard(grades: dict[str, RuleGrade]) -> list[RuleGrade]:
         grades.values(),
         key=lambda g: (-g.avg_excess, -g.win_rate, g.rule),
     )
+
+
+def recommendation(g: RuleGrade) -> str:
+    """Next-stage recommendation for the funnel (spec 017 GRD-3): promote /
+    demote / kill / hold, per the spec's thresholds. ``win_rate`` is the hit
+    rate on the honest denominator (wins / hits with computable returns —
+    total evaluations are not tracked; see spec 017 Decisions 2026-08-17).
+    Kill is evaluated before demote so the stricter verdict wins (a <20% hit
+    rate rule is killed, not demoted)."""
+    if g.win_rate >= 0.60 and g.sharpe > 1.0:
+        return "promote"
+    if g.win_rate < 0.20 or (g.sharpe < 0.0 and g.win_rate < 0.50):
+        return "kill"
+    if g.win_rate < 0.40:
+        return "demote"
+    return "hold"
 
 
 def decay_flag(weekly_avg_excess: list[float]) -> bool:

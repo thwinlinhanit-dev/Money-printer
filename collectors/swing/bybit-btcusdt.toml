@@ -1,0 +1,11 @@
+# Swing-only Bybit collector — BTCUSDT (spec 035 SWG-1 / spec 036 SLQ-D).
+# Bybit is the credential-free live source for the `Liquidation` event from
+# this egress (COL-29), so it's the swing set's liquidation + breadth leg.
+# Keep: publicTrade (OHLCV) + tickers (funding/mark/OI) + allLiquidation.
+# Drop: orderbook.50 (L2 depth — swing never needs it).
+venue = "bybit"
+symbol = "BTCUSDT"
+data_dir = "data"
+channel_capacity = 10000
+backpressure = "drop_oldest"
+swing_only = true

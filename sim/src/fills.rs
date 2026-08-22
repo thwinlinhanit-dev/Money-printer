@@ -20,6 +20,18 @@ pub enum FillOptimism {
 }
 
 impl FillOptimism {
+    /// Merge to the worst-case (most optimistic) tag — a position built with
+    /// ANY optimistic leg must keep the optimistic tag even if the closing
+    /// fill is a conservative market fill, or the G1 optimism gate would miss
+    /// the entry-leg optimism (audit fix-all 2026-08-17, B4).
+    pub fn merge(self, other: FillOptimism) -> FillOptimism {
+        match (self, other) {
+            (FillOptimism::Maker, _) | (_, FillOptimism::Maker) => FillOptimism::Maker,
+            (FillOptimism::Tape, _) | (_, FillOptimism::Tape) => FillOptimism::Tape,
+            _ => FillOptimism::None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             FillOptimism::None => "none",

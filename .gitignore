@@ -41,3 +41,10 @@ __pycache__/
 *.pdb
 research/py_err.txt
 research/py_out.txt
+
+# Off-host backup tier — vendored portable binaries + age keys (PD-2)
+ops/tools/
+ops/keys/
+ops/offhost-drill/
+data/.offhost-staging/
+data/.offhost-drill/

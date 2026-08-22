@@ -122,3 +122,17 @@ window_ns = 300000000000
 # no-op until both legs record. Unknown slugs are a hard error.
 window_ns = 300000000000
 pairs = [["bybit", "binance"]]
+
+[swing]
+# HTF regime + value area + structural levels (spec 035 SWG-2). Bar-only —
+# none of these depend on L2 order book or trade-tape input (SWG-2 MUST NOT).
+# Windows are in bar counts on the engine's bar timeframe (bar_tf_ns).
+realized_vol_window = 20
+# sqrt(bars/year) annualization for swing.realized_vol. Default derives from
+# bar_tf_ns (≈725 for 60s bars); pinned here explicitly (no reliance on code
+# defaults, per this file's convention).
+sqrt_bars_per_year = 725.2
+trend_lookback = 20
+value_area_window = 48
+value_area_bucket = 50.0
+rolling_vwap_bars = 48
