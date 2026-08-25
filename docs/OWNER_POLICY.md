@@ -28,7 +28,8 @@ No live order may exist unless every gate between here and Phase 5 of
 ## 3. Benchmark definition
 
 Feeds the `## Benchmark` section of `research/run_weekly_review.py` reports
-(currently rendered as `unset (1.1 pending)`).
+(parsed from this section; the explicit `unset` row is rendered only when
+this file or a benchmark field is missing/unparseable).
 
 | Item | Decision |
 |---|---|
@@ -68,3 +69,4 @@ Append-only. Each amendment: date, what changed, why, owner initials.
 |---|---|---|
 | 2026-08-25 | Initial values drafted by coding agent at owner's explicit request; conservative defaults chosen where owner preference unknown ($200 live-small floor, 15%/1%/3% loss ladder, BTC benchmark) | Fill roadmap item 1.1; owner confirmation pending |
 | 2026-08-25 | Owner confirmed all initial values; status PROPOSED → BINDING | Owner reply "ok confirm"; roadmap item 1.1 closed |
+| 2026-08-25 | §3 intro sentence corrected: the weekly-review benchmark row now parses this section (fail-closed `unset` only when unparseable) — previously described as still rendering `unset (1.1 pending)` | Non-substantive accuracy fix by the coding agent; no policy value touched |
