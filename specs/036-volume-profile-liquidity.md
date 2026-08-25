@@ -5,7 +5,7 @@ renumbered into the repo spec sequence. Governs the `swl` requirement set.
 Addendum to spec 004 (feature engine), 006 (strategy API), 035 (swing focus) —
 it replaces none of them.
 
-**Status:** MVP scope approved by the owner 2026-08-21: §1–§4 implemented now;
+**Status:** §1–§6 implemented. §7 POC-flip + A/D classifier implemented 2026-08-22 (see §7 status); regime-tag plumbing remains deferred. Originally: MVP scope approved by the owner 2026-08-21;
 POC-flip state machine, accumulation/distribution classifier, and manual
 regime tag are deferred (see §7). Non-goals carry over unchanged from the
 draft §0: no fractal/cycle pattern matching, no sentiment/narrative inputs,
@@ -153,13 +153,10 @@ post-cost expectancy, DD within budget, no single trade dominating total PnL.
 Hard gate: bounded defined max loss per trade at entry — satisfied here by the
 close-evaluated invalidation level carried with every entry.
 
-## 7. Deferred work (not implemented in this pass)
+## 7. Deferred work (status updated 2026-08-22)
 
-- POC-flip state machine (`BelowPoc`/`AbovePoc`/`Flipping`, N=3 acceptance)
-  and its optional entry-confluence use.
-- Accumulation/distribution classifier (VAL/VAH volume trend + ATR(20)
-  compression, ratio confidence score).
-- Manual `regime_tag` plumbing (ops/config-only input; strategies must define
-  `Unknown` behavior — no silent dependence on a hand-maintained tag).
+- ~~POC-flip state machine~~ — **IMPLEMENTED** (2026-08-22): `swing.poc_flip.{up|down}.{window}` adapters over a shared detector; acceptance rule operationalized as "trailing N closes contain ≥ N−1 on the far side of the CURRENT POC and the latest close is on the far side" (the draft's "N consecutive with ≤1 crossing back", made deterministic against the rolling POC). Optional strategy confluence wired: `require_poc_flip` config + grid key (0/1), freshness-gated (`poc_flip_max_age_ns`).
+- ~~Accumulation/distribution classifier~~ — **IMPLEMENTED** (2026-08-22): `swing.ad.{accumulating|distributing}`; near-level volume = bars closing in the bottom/top tercile of the CURRENT value-area band, vr = mean(last K)/mean(prior K), cr = ATR(n) now vs K bars ago; fires iff vr>1 && cr<1, confidence = mean of clamped strengths. Historical positions judged against the current band (documented approximation — the band moves slowly vs K daily bars).
+- Manual `regime_tag` plumbing — still deferred (ops/config-only input; strategies must define Unknown behavior).
 - Any tick-derived volume-at-price path (would require revisiting the SWG-2
   bar-only contract explicitly; approx/tick families must never be blended).

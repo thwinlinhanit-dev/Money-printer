@@ -5,13 +5,10 @@
 use mp_core::event::{EventEnvelope, MarketEvent, OptionGreeks, OptionKind, Side};
 use mp_core::{SymbolId, Venue};
 use mp_features::options_flow::{
-    bs_delta, flow_tenor, moneyness_bucket, FlowFeature, FlowMetric, FlowParams,
-    MoneynessBucket,
+    bs_delta, flow_tenor, moneyness_bucket, FlowFeature, FlowMetric, FlowParams, MoneynessBucket,
 };
-use mp_features::options_greeks::{
-    ChainScalar, ChainScalarFeature, GreeksAggregator, HigherOrderGreek,
-};
-use mp_features::options_iv::{vrp, IvAtm, IvIndex, IvPercentileFeature, IvSkew, IvTerm, VolRegime};
+use mp_features::options_greeks::{ChainScalar, ChainScalarFeature, GreeksAggregator};
+use mp_features::options_iv::{vrp, IvAtm, IvIndex, IvPercentileFeature, IvSkew, VolRegime};
 use mp_features::{FeatureEngine, FeaturesConfig, TickFeature};
 
 const SEC: i64 = 1_000_000_000;
@@ -19,6 +16,7 @@ const DAY_NS: i64 = 86_400_000_000_000;
 /// Fixed base time (~2025-06-15) — event-time only, never wall clock.
 const T0: i64 = 1_750_000_000 * SEC;
 
+#[allow(clippy::too_many_arguments)]
 fn ticker(
     recv: i64,
     u: &str,
@@ -58,6 +56,7 @@ fn ticker(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn opt_trade(
     recv: i64,
     u: &str,
@@ -80,7 +79,13 @@ fn opt_trade(
         recv,
         recv,
         0,
-        MarketEvent::OptionTrade { leg, price, qty, side, trade_id: 0 },
+        MarketEvent::OptionTrade {
+            leg,
+            price,
+            qty,
+            side,
+            trade_id: 0,
+        },
     )
 }
 
@@ -101,7 +106,17 @@ underlyings = ["BTC"]
     let mut e = FeatureEngine::new(SEC);
     mp_features::register_options_families(&mut e, &cfg).unwrap();
     // One ticker batch lights the single-contract features up immediately.
-    let ev = ticker(T0, "BTC", T0 + 30 * DAY_NS, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 2e-5, -100.0, 0.02));
+    let ev = ticker(
+        T0,
+        "BTC",
+        T0 + 30 * DAY_NS,
+        100_000.0,
+        OptionKind::Call,
+        0.6,
+        10.0,
+        100_000.0,
+        (0.5, 2e-5, -100.0, 0.02),
+    );
     let ups = e.on_event(&ev);
     assert!(value(&e, &ups, "gex.net.btc").is_some());
     // Single strike chain: max pain is trivially that strike.
@@ -116,9 +131,48 @@ fn gre_2_gex_profile_signs_and_values() {
     let mut agg = GreeksAggregator::new(1.0);
     let exp = T0 + 30 * DAY_NS;
     let spot = 100_000.0;
-    agg.on_ticker(&ticker(T0, "BTC", exp, 90_000.0, OptionKind::Call, 0.7, 10.0, spot, (0.8, 2e-5, -50.0, 0.01)), "BTC");
-    agg.on_ticker(&ticker(T0, "BTC", exp, 100_000.0, OptionKind::Put, 0.4, 20.0, spot, (-0.45, 3e-5, -80.0, 0.01)), "BTC");
-    agg.on_ticker(&ticker(T0, "BTC", exp, 100_000.0, OptionKind::Call, 0.6, 5.0, spot, (0.5, 5e-5, -70.0, 0.02)), "BTC");
+    agg.on_ticker(
+        &ticker(
+            T0,
+            "BTC",
+            exp,
+            90_000.0,
+            OptionKind::Call,
+            0.7,
+            10.0,
+            spot,
+            (0.8, 2e-5, -50.0, 0.01),
+        ),
+        "BTC",
+    );
+    agg.on_ticker(
+        &ticker(
+            T0,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Put,
+            0.4,
+            20.0,
+            spot,
+            (-0.45, 3e-5, -80.0, 0.01),
+        ),
+        "BTC",
+    );
+    agg.on_ticker(
+        &ticker(
+            T0,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            0.6,
+            5.0,
+            spot,
+            (0.5, 5e-5, -70.0, 0.02),
+        ),
+        "BTC",
+    );
     let profile = agg.gex_profile("BTC");
     assert_eq!(profile.len(), 2);
     let gex_90 = 2e-5 * 10.0 * spot * spot; // +2e6 (call positive)
@@ -135,10 +189,36 @@ fn gre_2_gex_replaces_on_update() {
     let mut agg = GreeksAggregator::new(1.0);
     let exp = T0 + 30 * DAY_NS;
     let spot = 100_000.0;
-    agg.on_ticker(&ticker(T0, "BTC", exp, 100_000.0, OptionKind::Call, 0.6, 10.0, spot, (0.5, 1e-5, 0.0, 0.0)), "BTC");
+    agg.on_ticker(
+        &ticker(
+            T0,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            0.6,
+            10.0,
+            spot,
+            (0.5, 1e-5, 0.0, 0.0),
+        ),
+        "BTC",
+    );
     assert!((agg.net_gex("BTC").unwrap() - 1e6).abs() < 1e-3);
     // Same contract re-ticked with OI=25: REPLACES (2.5e6), not appends (3.5e6).
-    agg.on_ticker(&ticker(T0 + SEC, "BTC", exp, 100_000.0, OptionKind::Call, 0.6, 25.0, spot, (0.5, 1e-5, 0.0, 0.0)), "BTC");
+    agg.on_ticker(
+        &ticker(
+            T0 + SEC,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            0.6,
+            25.0,
+            spot,
+            (0.5, 1e-5, 0.0, 0.0),
+        ),
+        "BTC",
+    );
     assert!((agg.net_gex("BTC").unwrap() - 2.5e6).abs() < 1e-3);
     assert_eq!(agg.gex_profile("BTC").len(), 1);
 }
@@ -148,7 +228,17 @@ fn gre_3_max_pain_correct_on_fixture() {
     let mut agg = GreeksAggregator::new(1.0);
     let exp = T0 + 30 * DAY_NS;
     let s = |strike: f64, kind, oi: f64| {
-        ticker(T0, "BTC", exp, strike, kind, 0.5, oi, 100_000.0, (0.5, 0.0, 0.0, 0.0))
+        ticker(
+            T0,
+            "BTC",
+            exp,
+            strike,
+            kind,
+            0.5,
+            oi,
+            100_000.0,
+            (0.5, 0.0, 0.0, 0.0),
+        )
     };
     // Calls: OI@100k=10, OI@110k=5; Puts: OI@90k=8, OI@100k=12.
     agg.on_ticker(&s(100_000.0, OptionKind::Call, 10.0), "BTC");
@@ -165,8 +255,27 @@ fn gre_4_implied_prob_sums_to_one_and_symmetric() {
     let exp = T0 + 30 * DAY_NS;
     let spot = 100_000.0;
     // Symmetric call-delta surface: deltas sum (as probabilities) around ATM.
-    for (k, d) in [(80e3, 0.9), (90e3, 0.75), (100e3, 0.5), (110e3, 0.25), (120e3, 0.1)] {
-        agg.on_ticker(&ticker(T0, "BTC", exp, k, OptionKind::Call, 0.6, 10.0, spot, (d, 1e-6, 0.0, 0.0)), "BTC");
+    for (k, d) in [
+        (80e3, 0.9),
+        (90e3, 0.75),
+        (100e3, 0.5),
+        (110e3, 0.25),
+        (120e3, 0.1),
+    ] {
+        agg.on_ticker(
+            &ticker(
+                T0,
+                "BTC",
+                exp,
+                k,
+                OptionKind::Call,
+                0.6,
+                10.0,
+                spot,
+                (d, 1e-6, 0.0, 0.0),
+            ),
+            "BTC",
+        );
     }
     let dist = agg.implied_prob_distribution("BTC").unwrap();
     let total: f64 = dist.iter().map(|(_, m)| m).sum();
@@ -184,10 +293,36 @@ fn gre_5_higher_greeks_suppressed_until_warmup_then_correct() {
     let exp = T0 + 30 * DAY_NS;
     let spot = 100_000.0;
     // Snapshot 1: net delta = 0.5×10 = 5; mean IV = 0.60.
-    agg.on_ticker(&ticker(T0, "BTC", exp, 100_000.0, OptionKind::Call, 0.60, 10.0, spot, (0.5, 0.0, 0.0, 0.0)), "BTC");
+    agg.on_ticker(
+        &ticker(
+            T0,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            0.60,
+            10.0,
+            spot,
+            (0.5, 0.0, 0.0, 0.0),
+        ),
+        "BTC",
+    );
     assert!(agg.advance_fd("BTC", T0).is_none()); // warmup: no emission
-    // Snapshot 2: net delta = 0.6×10 = 6; mean IV = 0.62 → Δ=+1 / Δσ=+0.02.
-    agg.on_ticker(&ticker(T0 + SEC, "BTC", exp, 100_000.0, OptionKind::Call, 0.62, 10.0, spot, (0.6, 0.0, 0.0, 0.0)), "BTC");
+                                                  // Snapshot 2: net delta = 0.6×10 = 6; mean IV = 0.62 → Δ=+1 / Δσ=+0.02.
+    agg.on_ticker(
+        &ticker(
+            T0 + SEC,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            0.62,
+            10.0,
+            spot,
+            (0.6, 0.0, 0.0, 0.0),
+        ),
+        "BTC",
+    );
     let (vanna, _volga, charm) = agg.advance_fd("BTC", T0 + SEC).unwrap();
     assert!((vanna.unwrap() - 50.0).abs() < 1e-9); // 1 / 0.02
     assert!(charm.unwrap() > 0.0); // +1 delta per snapshot interval
@@ -213,8 +348,34 @@ fn gre_10_underlying_price_from_ticker() {
     let mut a = GreeksAggregator::new(1.0);
     let mut b = GreeksAggregator::new(1.0);
     let exp = T0 + 30 * DAY_NS;
-    a.on_ticker(&ticker(T0, "BTC", exp, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 2e-5, 0.0, 0.0)), "BTC");
-    b.on_ticker(&ticker(T0, "BTC", exp, 100_000.0, OptionKind::Call, 0.6, 10.0, 120_000.0, (0.5, 2e-5, 0.0, 0.0)), "BTC");
+    a.on_ticker(
+        &ticker(
+            T0,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            0.6,
+            10.0,
+            100_000.0,
+            (0.5, 2e-5, 0.0, 0.0),
+        ),
+        "BTC",
+    );
+    b.on_ticker(
+        &ticker(
+            T0,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            0.6,
+            10.0,
+            120_000.0,
+            (0.5, 2e-5, 0.0, 0.0),
+        ),
+        "BTC",
+    );
     let ratio = b.net_gex("BTC").unwrap() / a.net_gex("BTC").unwrap();
     assert!((ratio - (1.2_f64).powi(2)).abs() < 1e-9);
 }
@@ -224,8 +385,34 @@ fn gre_11_per_expiry_decomposition_sums_to_aggregate() {
     let mut agg = GreeksAggregator::new(1.0);
     for exp_days in [7_i64, 30, 90] {
         let exp = T0 + exp_days * DAY_NS;
-        agg.on_ticker(&ticker(T0, "BTC", exp, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, -10.0, 0.01)), "BTC");
-        agg.on_ticker(&ticker(T0, "BTC", exp, 110_000.0, OptionKind::Put, 0.4, 5.0, 100_000.0, (-0.3, 1e-5, -20.0, 0.01)), "BTC");
+        agg.on_ticker(
+            &ticker(
+                T0,
+                "BTC",
+                exp,
+                100_000.0,
+                OptionKind::Call,
+                0.6,
+                10.0,
+                100_000.0,
+                (0.5, 1e-5, -10.0, 0.01),
+            ),
+            "BTC",
+        );
+        agg.on_ticker(
+            &ticker(
+                T0,
+                "BTC",
+                exp,
+                110_000.0,
+                OptionKind::Put,
+                0.4,
+                5.0,
+                100_000.0,
+                (-0.3, 1e-5, -20.0, 0.01),
+            ),
+            "BTC",
+        );
     }
     let by_expiry = agg.net_greeks_by_expiry("BTC");
     assert_eq!(by_expiry.len(), 3);
@@ -242,12 +429,66 @@ fn gre_12_cross_underlying_isolation() {
     let mut f = ChainScalarFeature::new(ChainScalar::GexNet, "BTC", 1.0);
     let exp = T0 + 30 * DAY_NS;
     // ETH ticker must not move the BTC feature.
-    assert!(f.on_event(&ticker(T0, "ETH", exp, 5_000.0, OptionKind::Call, 0.6, 10.0, 5_000.0, (0.5, 1e-4, 0.0, 0.0))).is_none());
+    assert!(f
+        .on_event(&ticker(
+            T0,
+            "ETH",
+            exp,
+            5_000.0,
+            OptionKind::Call,
+            0.6,
+            10.0,
+            5_000.0,
+            (0.5, 1e-4, 0.0, 0.0)
+        ))
+        .is_none());
     let btc_v = 2e-5 * 20.0 * 100_000.0 * 100_000.0; // γ×OI×spot²
-    assert!((f.on_event(&ticker(T0 + SEC, "BTC", exp, 100_000.0, OptionKind::Call, 0.6, 20.0, 100_000.0, (0.5, 2e-5, 0.0, 0.0))).unwrap() - btc_v).abs() < 1e-3);
+    assert!(
+        (f.on_event(&ticker(
+            T0 + SEC,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            0.6,
+            20.0,
+            100_000.0,
+            (0.5, 2e-5, 0.0, 0.0)
+        ))
+        .unwrap()
+            - btc_v)
+            .abs()
+            < 1e-3
+    );
     // And an ETH update still leaves BTC's stored chain untouched.
-    f.on_event(&ticker(T0 + 2 * SEC, "ETH", exp, 5_000.0, OptionKind::Put, 0.6, 99.0, 5_000.0, (-0.5, 1e-3, 0.0, 0.0)));
-    assert!((f.on_event(&ticker(T0 + 3 * SEC, "BTC", exp, 100_000.0, OptionKind::Call, 0.6, 20.0, 100_000.0, (0.5, 2e-5, 0.0, 0.0))).unwrap() - btc_v).abs() < 1e-3);
+    f.on_event(&ticker(
+        T0 + 2 * SEC,
+        "ETH",
+        exp,
+        5_000.0,
+        OptionKind::Put,
+        0.6,
+        99.0,
+        5_000.0,
+        (-0.5, 1e-3, 0.0, 0.0),
+    ));
+    assert!(
+        (f.on_event(&ticker(
+            T0 + 3 * SEC,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            0.6,
+            20.0,
+            100_000.0,
+            (0.5, 2e-5, 0.0, 0.0)
+        ))
+        .unwrap()
+            - btc_v)
+            .abs()
+            < 1e-3
+    );
 }
 
 use proptest::prelude::*;
@@ -290,13 +531,57 @@ fn ivs_2_atm_iv_interpolation_correct_and_uses_ticker_spot() {
     let mut f = IvAtm::new("BTC");
     let exp = T0 + 30 * DAY_NS;
     // Strikes 90k (IV .80) / 100k (IV .60), ticker spot 95k → interpolated .70.
-    let e1 = f.on_event(&ticker(T0, "BTC", exp, 90_000.0, OptionKind::Call, 0.80, 10.0, 95_000.0, (0.6, 1e-5, 0.0, 0.0)));
-    let e2 = f.on_event(&ticker(T0, "BTC", exp, 100_000.0, OptionKind::Call, 0.60, 10.0, 95_000.0, (0.4, 1e-5, 0.0, 0.0)));
-    let v = f.on_event(&ticker(T0 + SEC, "BTC", exp, 100_000.0, OptionKind::Put, 0.60, 5.0, 95_000.0, (-0.4, 1e-5, 0.0, 0.0)));
-    assert!((v.unwrap() - 0.70).abs() <= 1e-10, "ivs_2 got {v:?} spot={:?} (e1={e1:?} e2={e2:?})", f.aggregator().chains().spot("btc"));
+    let e1 = f.on_event(&ticker(
+        T0,
+        "BTC",
+        exp,
+        90_000.0,
+        OptionKind::Call,
+        0.80,
+        10.0,
+        95_000.0,
+        (0.6, 1e-5, 0.0, 0.0),
+    ));
+    let e2 = f.on_event(&ticker(
+        T0,
+        "BTC",
+        exp,
+        100_000.0,
+        OptionKind::Call,
+        0.60,
+        10.0,
+        95_000.0,
+        (0.4, 1e-5, 0.0, 0.0),
+    ));
+    let v = f.on_event(&ticker(
+        T0 + SEC,
+        "BTC",
+        exp,
+        100_000.0,
+        OptionKind::Put,
+        0.60,
+        5.0,
+        95_000.0,
+        (-0.4, 1e-5, 0.0, 0.0),
+    ));
+    assert!(
+        (v.unwrap() - 0.70).abs() <= 1e-10,
+        "ivs_2 got {v:?} spot={:?} (e1={e1:?} e2={e2:?})",
+        f.aggregator().chains().spot("btc")
+    );
     // IVS-2/GRE-10: the spot comes from the ticker — re-tick with spot 92.5k
     // and the interpolation point moves (weights 2.5/7.5 → .75).
-    let v2 = f.on_event(&ticker(T0 + 2 * SEC, "BTC", exp, 100_000.0, OptionKind::Put, 0.60, 5.0, 92_500.0, (-0.4, 1e-5, 0.0, 0.0)));
+    let v2 = f.on_event(&ticker(
+        T0 + 2 * SEC,
+        "BTC",
+        exp,
+        100_000.0,
+        OptionKind::Put,
+        0.60,
+        5.0,
+        92_500.0,
+        (-0.4, 1e-5, 0.0, 0.0),
+    ));
     assert!((v2.unwrap() - 0.75).abs() <= 1e-10, "ivs_2 v2 got {v2:?}");
 }
 
@@ -306,11 +591,41 @@ fn ivs_3_term_structure_falls_back_to_nearest() {
     let mut f = IvTerm::new("BTC", "1m", 30.0);
     let exp28 = T0 + 28 * DAY_NS;
     let exp40 = T0 + 40 * DAY_NS;
-    f.on_event(&ticker(T0, "BTC", exp28, 100_000.0, OptionKind::Call, 0.55, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
-    f.on_event(&ticker(T0, "BTC", exp40, 100_000.0, OptionKind::Call, 0.75, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        exp28,
+        100_000.0,
+        OptionKind::Call,
+        0.55,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    ));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        exp40,
+        100_000.0,
+        OptionKind::Call,
+        0.75,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    ));
     // No exact 30d expiry → nearest is 28d → ATM IV = 0.55 (not interpolated
     // across expiries, not synthesized — IVS-3).
-    let v = f.on_event(&ticker(T0 + SEC, "BTC", exp28, 100_000.0, OptionKind::Put, 0.55, 5.0, 100_000.0, (-0.5, 1e-5, 0.0, 0.0)));
+    let v = f.on_event(&ticker(
+        T0 + SEC,
+        "BTC",
+        exp28,
+        100_000.0,
+        OptionKind::Put,
+        0.55,
+        5.0,
+        100_000.0,
+        (-0.5, 1e-5, 0.0, 0.0),
+    ));
     assert!((v.unwrap() - 0.55).abs() < 1e-10);
 }
 
@@ -320,17 +635,105 @@ fn ivs_4_risk_reversal_sign_and_value() {
     let mut f = IvSkew::risk_reversal("BTC");
     let exp = T0 + 30 * DAY_NS;
     let s = 100_000.0;
-    f.on_event(&ticker(T0, "BTC", exp, 90_000.0, OptionKind::Call, 0.70, 10.0, s, (0.25, 1e-5, 0.0, 0.0)));
-    f.on_event(&ticker(T0, "BTC", exp, 100_000.0, OptionKind::Call, 0.60, 10.0, s, (0.5, 1e-5, 0.0, 0.0)));
-    f.on_event(&ticker(T0, "BTC", exp, 110_000.0, OptionKind::Put, 0.70, 10.0, s, (-0.25, 1e-5, 0.0, 0.0)));
-    f.on_event(&ticker(T0, "BTC", exp, 100_000.0, OptionKind::Put, 0.60, 10.0, s, (-0.5, 1e-5, 0.0, 0.0)));
-    assert!((f.on_event(&ticker(T0 + SEC, "BTC", exp, 100_000.0, OptionKind::Call, 0.60, 5.0, s, (0.5, 1e-5, 0.0, 0.0))).unwrap() - 0.0).abs() < 1e-10);
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        exp,
+        90_000.0,
+        OptionKind::Call,
+        0.70,
+        10.0,
+        s,
+        (0.25, 1e-5, 0.0, 0.0),
+    ));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        exp,
+        100_000.0,
+        OptionKind::Call,
+        0.60,
+        10.0,
+        s,
+        (0.5, 1e-5, 0.0, 0.0),
+    ));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        exp,
+        110_000.0,
+        OptionKind::Put,
+        0.70,
+        10.0,
+        s,
+        (-0.25, 1e-5, 0.0, 0.0),
+    ));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        exp,
+        100_000.0,
+        OptionKind::Put,
+        0.60,
+        10.0,
+        s,
+        (-0.5, 1e-5, 0.0, 0.0),
+    ));
+    assert!(
+        (f.on_event(&ticker(
+            T0 + SEC,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            0.60,
+            5.0,
+            s,
+            (0.5, 1e-5, 0.0, 0.0)
+        ))
+        .unwrap()
+            - 0.0)
+            .abs()
+            < 1e-10
+    );
     // Put wing richer: put 25Δ IV = .80 vs call 25Δ = .70 → RR = −0.10.
     let mut g = IvSkew::risk_reversal("ETH");
     let exp2 = T0 + 30 * DAY_NS;
-    g.on_event(&ticker(T0, "ETH", exp2, 2_000.0, OptionKind::Call, 0.70, 10.0, 3_000.0, (0.25, 1e-5, 0.0, 0.0)));
-    g.on_event(&ticker(T0, "ETH", exp2, 3_000.0, OptionKind::Put, 0.80, 10.0, 3_000.0, (-0.25, 1e-5, 0.0, 0.0)));
-    let rr = g.on_event(&ticker(T0 + SEC, "ETH", exp2, 3_000.0, OptionKind::Call, 0.60, 5.0, 3_000.0, (0.5, 1e-5, 0.0, 0.0))).unwrap();
+    g.on_event(&ticker(
+        T0,
+        "ETH",
+        exp2,
+        2_000.0,
+        OptionKind::Call,
+        0.70,
+        10.0,
+        3_000.0,
+        (0.25, 1e-5, 0.0, 0.0),
+    ));
+    g.on_event(&ticker(
+        T0,
+        "ETH",
+        exp2,
+        3_000.0,
+        OptionKind::Put,
+        0.80,
+        10.0,
+        3_000.0,
+        (-0.25, 1e-5, 0.0, 0.0),
+    ));
+    let rr = g
+        .on_event(&ticker(
+            T0 + SEC,
+            "ETH",
+            exp2,
+            3_000.0,
+            OptionKind::Call,
+            0.60,
+            5.0,
+            3_000.0,
+            (0.5, 1e-5, 0.0, 0.0),
+        ))
+        .unwrap();
     assert!((rr - (-0.10)).abs() < 1e-10);
 }
 
@@ -348,14 +751,44 @@ fn ivs_7_dvol_positive_finite_and_zero_oi_excluded() {
     let s = 100_000.0;
     // OI=0 strike must not contribute; OI-weighted variance mean of
     // (.50 w=30) and (.70 w=10): sqrt((30·.25 + 10·.49)/40) ≈ 0.559017.
-    f.on_event(&ticker(T0, "BTC", exp, 90_000.0, OptionKind::Call, 0.50, 0.0, s, (0.6, 1e-5, 0.0, 0.0)));
-    f.on_event(&ticker(T0, "BTC", exp, 95_000.0, OptionKind::Call, 0.50, 30.0, s, (0.6, 1e-5, 0.0, 0.0)));
-    let v = f.on_event(&ticker(T0 + SEC, "BTC", exp, 105_000.0, OptionKind::Call, 0.70, 10.0, s, (0.6, 1e-5, 0.0, 0.0)));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        exp,
+        90_000.0,
+        OptionKind::Call,
+        0.50,
+        0.0,
+        s,
+        (0.6, 1e-5, 0.0, 0.0),
+    ));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        exp,
+        95_000.0,
+        OptionKind::Call,
+        0.50,
+        30.0,
+        s,
+        (0.6, 1e-5, 0.0, 0.0),
+    ));
+    let v = f.on_event(&ticker(
+        T0 + SEC,
+        "BTC",
+        exp,
+        105_000.0,
+        OptionKind::Call,
+        0.70,
+        10.0,
+        s,
+        (0.6, 1e-5, 0.0, 0.0),
+    ));
     assert!((v.unwrap() - ((30.0 * 0.25 + 10.0 * 0.49) / 40.0_f64).sqrt()).abs() < 1e-12);
 }
 
 #[test]
-fn ivs_6_regime_thresholds_and_ivs_11_percentile_skips_missing_days() {
+fn ivs_6_regime_thresholds() {
     // 79 observed days all at IV = 0.50 (days 1..=79), then a gap (day 80
     // missing), then day 81 samples.
     let mut pct = IvPercentileFeature::percentile("BTC", 90);
@@ -364,7 +797,17 @@ fn ivs_6_regime_thresholds_and_ivs_11_percentile_skips_missing_days() {
     // still be live (nearest-expiry selection ignores expired tenors).
     let exp = T0 + 365 * DAY_NS;
     let s = |ts: i64, iv: f64| {
-        ticker(ts, "BTC", exp, 100_000.0, OptionKind::Call, iv, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0))
+        ticker(
+            ts,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            iv,
+            10.0,
+            100_000.0,
+            (0.5, 1e-5, 0.0, 0.0),
+        )
     };
     for d in 1..=79 {
         pct.on_event(&s(T0 + d * DAY_NS, 0.50));
@@ -372,17 +815,47 @@ fn ivs_6_regime_thresholds_and_ivs_11_percentile_skips_missing_days() {
     }
     // Day 81 (day 80 skipped): current IV above ALL 79 past days →
     // percentile 1.0 with denominator n=79, NOT a diluted n=80/90 (IVS-11).
-    let hi = ticker(T0 + 81 * DAY_NS, "BTC", exp, 100_000.0, OptionKind::Call, 0.55, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0));
+    let hi = ticker(
+        T0 + 81 * DAY_NS,
+        "BTC",
+        exp,
+        100_000.0,
+        OptionKind::Call,
+        0.55,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    );
     assert!((pct.on_event(&hi).unwrap() - 1.0).abs() < 1e-12);
     // ≥66th percentile → Rich → REVERSE-ORDINAL encoding 0.
     assert_eq!(reg.on_event(&hi).unwrap(), VolRegime::Rich.encode());
     // Day 82 sample equal to most of history: below = 0, equal = 79, plus
     // day-81's 0.55 is ABOVE current → pct = 0.5×79/80 = 0.49375 → Fair.
-    let eq = ticker(T0 + 82 * DAY_NS, "BTC", exp, 100_000.0, OptionKind::Call, 0.50, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0));
+    let eq = ticker(
+        T0 + 82 * DAY_NS,
+        "BTC",
+        exp,
+        100_000.0,
+        OptionKind::Call,
+        0.50,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    );
     assert!((pct.on_event(&eq).unwrap() - 0.5 * 79.0 / 80.0).abs() < 1e-12);
     assert_eq!(reg.on_event(&eq).unwrap(), VolRegime::Fair.encode());
     // Below all history → 0.0 ≤ 33rd → Cheap (2).
-    let lo = ticker(T0 + 83 * DAY_NS, "BTC", exp, 100_000.0, OptionKind::Call, 0.45, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0));
+    let lo = ticker(
+        T0 + 83 * DAY_NS,
+        "BTC",
+        exp,
+        100_000.0,
+        OptionKind::Call,
+        0.45,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    );
     assert!((pct.on_event(&lo).unwrap() - 0.0).abs() < 1e-12);
     assert_eq!(reg.on_event(&lo).unwrap(), VolRegime::Cheap.encode());
 }
@@ -395,8 +868,31 @@ fn ivs_8_deterministic_golden() {
         let mut ups = Vec::new();
         for i in 0..5 {
             let iv = 0.60 + 0.01 * i as f64;
-            f.on_event(&ticker(T0 + i * SEC, "BTC", exp, 100_000.0, OptionKind::Call, iv, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
-            ups.push(f.on_event(&ticker(T0 + i * SEC + 1, "BTC", exp, 100_000.0, OptionKind::Put, iv, 10.0, 100_000.0, (-0.5, 1e-5, 0.0, 0.0))).unwrap());
+            f.on_event(&ticker(
+                T0 + i * SEC,
+                "BTC",
+                exp,
+                100_000.0,
+                OptionKind::Call,
+                iv,
+                10.0,
+                100_000.0,
+                (0.5, 1e-5, 0.0, 0.0),
+            ));
+            ups.push(
+                f.on_event(&ticker(
+                    T0 + i * SEC + 1,
+                    "BTC",
+                    exp,
+                    100_000.0,
+                    OptionKind::Put,
+                    iv,
+                    10.0,
+                    100_000.0,
+                    (-0.5, 1e-5, 0.0, 0.0),
+                ))
+                .unwrap(),
+            );
         }
         ups
     };
@@ -411,8 +907,30 @@ fn ivs_12_cross_underlying_isolation() {
     let mut f = IvAtm::new("BTC");
     let exp = T0 + 30 * DAY_NS;
     // ETH-only chain: BTC feature must stay suppressed.
-    f.on_event(&ticker(T0, "ETH", exp, 3_000.0, OptionKind::Call, 0.70, 10.0, 3_000.0, (0.5, 1e-5, 0.0, 0.0)));
-    assert!(f.on_event(&ticker(T0 + SEC, "ETH", exp, 3_000.0, OptionKind::Put, 0.70, 5.0, 3_000.0, (-0.5, 1e-5, 0.0, 0.0))).is_none());
+    f.on_event(&ticker(
+        T0,
+        "ETH",
+        exp,
+        3_000.0,
+        OptionKind::Call,
+        0.70,
+        10.0,
+        3_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    ));
+    assert!(f
+        .on_event(&ticker(
+            T0 + SEC,
+            "ETH",
+            exp,
+            3_000.0,
+            OptionKind::Put,
+            0.70,
+            5.0,
+            3_000.0,
+            (-0.5, 1e-5, 0.0, 0.0)
+        ))
+        .is_none());
 }
 
 // ===========================================================================
@@ -433,27 +951,110 @@ const EXP: i64 = T0 + 30 * DAY_NS; // 30d expiry → monthly tenor
 fn ofi_2_block_detection_correct() {
     let mut f = flow_feature(FlowMetric::Block, 60 * SEC);
     // $150k buy call → block (+150k); $50k → not a block.
-    let spot = ticker(T0, "BTC", EXP, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0));
+    let spot = ticker(
+        T0,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        0.6,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    );
     f.on_event(&spot);
-    assert!(f.on_event(&opt_trade(T0 + SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_500.0, 100.0, Side::Buy)).is_none()); // in-window
-    let closed = f.on_event(&opt_trade(T0 + 61 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 500.0, 100.0, Side::Buy)).unwrap();
+    assert!(f
+        .on_event(&opt_trade(
+            T0 + SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_500.0,
+            100.0,
+            Side::Buy
+        ))
+        .is_none()); // in-window
+    let closed = f
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            500.0,
+            100.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert!((closed - 150_000.0).abs() < 1e-6); // only the $150k block counted
 }
 
 #[test]
 fn ofi_3_net_premium_signs_correct() {
     let mut f = flow_feature(FlowMetric::NetPremium, 60 * SEC);
-    let spot = ticker(T0, "BTC", EXP, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0));
-    let spot_put = ticker(T0, "BTC", EXP, 95_000.0, OptionKind::Put, 0.5, 10.0, 100_000.0, (-0.3, 1e-5, 0.0, 0.0));
+    let spot = ticker(
+        T0,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        0.6,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    );
+    let spot_put = ticker(
+        T0,
+        "BTC",
+        EXP,
+        95_000.0,
+        OptionKind::Put,
+        0.5,
+        10.0,
+        100_000.0,
+        (-0.3, 1e-5, 0.0, 0.0),
+    );
     f.on_event(&spot);
     f.on_event(&spot_put);
     // Window 1: buy call @ $1000 × 50 = +$50k (buy aggressor = +premium).
-    f.on_event(&opt_trade(T0 + SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 50.0, Side::Buy));
+    f.on_event(&opt_trade(
+        T0 + SEC,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        1_000.0,
+        50.0,
+        Side::Buy,
+    ));
     // This trade lands in window 2 → CLOSES window 1 → emit +50_000.
-    let npf = f.on_event(&opt_trade(T0 + 61 * SEC, "BTC", EXP, 95_000.0, OptionKind::Put, 800.0, 25.0, Side::Sell)).unwrap();
+    let npf = f
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            EXP,
+            95_000.0,
+            OptionKind::Put,
+            800.0,
+            25.0,
+            Side::Sell,
+        ))
+        .unwrap();
     assert!((npf - 50_000.0).abs() < 1e-6);
     // Sell put @ $800 × 25 = −$20k; that was window 2's only trade.
-    let npf2 = f.on_event(&opt_trade(T0 + 121 * SEC, "BTC", EXP, 95_000.0, OptionKind::Put, 800.0, 25.0, Side::Sell)).unwrap();
+    let npf2 = f
+        .on_event(&opt_trade(
+            T0 + 121 * SEC,
+            "BTC",
+            EXP,
+            95_000.0,
+            OptionKind::Put,
+            800.0,
+            25.0,
+            Side::Sell,
+        ))
+        .unwrap();
     assert!((npf2 - (-20_000.0)).abs() < 1e-6);
 }
 
@@ -462,22 +1063,121 @@ fn ofi_4_delta_adjusted_flow_signs_and_suppression() {
     // Buy call (δ +0.5) → +; buy put (δ −0.4) → −; sell put (δ −0.4) → +;
     // |δ| > 1 trade suppressed (CONV-8).
     let mut f = flow_feature(FlowMetric::NetDelta, 60 * SEC);
-    f.on_event(&ticker(T0, "BTC", EXP, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
-    f.on_event(&ticker(T0, "BTC", EXP, 100_000.0, OptionKind::Put, 0.5, 10.0, 100_000.0, (-0.4, 1e-5, 0.0, 0.0)));
-    f.on_event(&ticker(T0, "BTC", EXP, 90_000.0, OptionKind::Put, 0.5, 10.0, 100_000.0, (-1.5, 1e-5, 0.0, 0.0))); // |δ|>1
-    // w1: buy call $100k × 0.5 = +50k.
-    f.on_event(&opt_trade(T0 + SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy));
-    let d1 = f.on_event(&opt_trade(T0 + 61 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy)).unwrap();
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        0.6,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    ));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Put,
+        0.5,
+        10.0,
+        100_000.0,
+        (-0.4, 1e-5, 0.0, 0.0),
+    ));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        EXP,
+        90_000.0,
+        OptionKind::Put,
+        0.5,
+        10.0,
+        100_000.0,
+        (-1.5, 1e-5, 0.0, 0.0),
+    )); // |δ|>1
+        // w1: buy call $100k × 0.5 = +50k.
+    f.on_event(&opt_trade(
+        T0 + SEC,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        1_000.0,
+        100.0,
+        Side::Buy,
+    ));
+    let d1 = f
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            100.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert!((d1 - 50_000.0).abs() < 1e-6);
     // w2: buy put −40k; the $100k |δ|>1 trade is suppressed (contributes 0);
     // PLUS the w1-closing trade itself (+50k) landed in w2 → total +10k.
-    f.on_event(&opt_trade(T0 + 61 * SEC, "BTC", EXP, 100_000.0, OptionKind::Put, 1_000.0, 100.0, Side::Buy));
-    f.on_event(&opt_trade(T0 + 62 * SEC, "BTC", EXP, 90_000.0, OptionKind::Put, 1_000.0, 100.0, Side::Buy));
-    let d2 = f.on_event(&opt_trade(T0 + 121 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy)).unwrap();
+    f.on_event(&opt_trade(
+        T0 + 61 * SEC,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Put,
+        1_000.0,
+        100.0,
+        Side::Buy,
+    ));
+    f.on_event(&opt_trade(
+        T0 + 62 * SEC,
+        "BTC",
+        EXP,
+        90_000.0,
+        OptionKind::Put,
+        1_000.0,
+        100.0,
+        Side::Buy,
+    ));
+    let d2 = f
+        .on_event(&opt_trade(
+            T0 + 121 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            100.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert!((d2 - 10_000.0).abs() < 1e-6);
     // w3: sell put (+40k) plus the w2-closing trade (+50k) = +90k.
-    f.on_event(&opt_trade(T0 + 121 * SEC, "BTC", EXP, 100_000.0, OptionKind::Put, 1_000.0, 100.0, Side::Sell));
-    let d3 = f.on_event(&opt_trade(T0 + 181 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy)).unwrap();
+    f.on_event(&opt_trade(
+        T0 + 121 * SEC,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Put,
+        1_000.0,
+        100.0,
+        Side::Sell,
+    ));
+    let d3 = f
+        .on_event(&opt_trade(
+            T0 + 181 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            100.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert!((d3 - 90_000.0).abs() < 1e-6);
 }
 
@@ -489,20 +1189,82 @@ fn ofi_4_bs_delta_fallback_used_without_ticker_match() {
     // Window-ALIGNED base: T0 is not a multiple of 60s, and misaligned
     // buckets would silently pull the w1 trade into w2.
     let wbase = (T0 / (60 * SEC)) * (60 * SEC);
-    f.on_event(&ticker(wbase, "BTC", EXP, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
+    f.on_event(&ticker(
+        wbase,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        0.6,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    ));
     // w1: two ticker-matched trades (K=100k, δ=0.5) → +100k total.
-    f.on_event(&opt_trade(wbase + SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy));
-    f.on_event(&opt_trade(wbase + 30 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy));
+    f.on_event(&opt_trade(
+        wbase + SEC,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        1_000.0,
+        100.0,
+        Side::Buy,
+    ));
+    f.on_event(&opt_trade(
+        wbase + 30 * SEC,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        1_000.0,
+        100.0,
+        Side::Buy,
+    ));
     // The BS-fallback trade (K=105k, NO ticker) opens w2 as its ONLY member.
-    f.on_event(&opt_trade(wbase + 61 * SEC, "BTC", EXP, 105_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy));
+    f.on_event(&opt_trade(
+        wbase + 61 * SEC,
+        "BTC",
+        EXP,
+        105_000.0,
+        OptionKind::Call,
+        1_000.0,
+        100.0,
+        Side::Buy,
+    ));
     // Register the |δ|>1 contract, then close w2 with a trade on it — it
     // contributes exactly 0 (suppressed), so `d` is purely the BS fallback.
-    f.on_event(&ticker(wbase + 70 * SEC, "BTC", EXP, 90_000.0, OptionKind::Put, 0.5, 10.0, 100_000.0, (-1.5, 1e-5, 0.0, 0.0)));
-    let d = f.on_event(&opt_trade(wbase + 121 * SEC, "BTC", EXP, 90_000.0, OptionKind::Put, 1_000.0, 100.0, Side::Buy)).unwrap();
+    f.on_event(&ticker(
+        wbase + 70 * SEC,
+        "BTC",
+        EXP,
+        90_000.0,
+        OptionKind::Put,
+        0.5,
+        10.0,
+        100_000.0,
+        (-1.5, 1e-5, 0.0, 0.0),
+    ));
+    let d = f
+        .on_event(&opt_trade(
+            wbase + 121 * SEC,
+            "BTC",
+            EXP,
+            90_000.0,
+            OptionKind::Put,
+            1_000.0,
+            100.0,
+            Side::Buy,
+        ))
+        .unwrap();
     // Exact event-time T as the implementation computes it.
     let t_years = (EXP - (wbase + 61 * SEC)) as f64 / (365.25 * 86_400_000_000_000.0);
-    let expected = 100_000.0 * bs_delta(100_000.0, 105_000.0, t_years, 0.6, OptionKind::Call).unwrap();
-    assert!((d - expected).abs() < 1e-6, "ofi_4_bs d={d} expected={expected} t={t_years}");
+    let expected =
+        100_000.0 * bs_delta(100_000.0, 105_000.0, t_years, 0.6, OptionKind::Call).unwrap();
+    assert!(
+        (d - expected).abs() < 1e-6,
+        "ofi_4_bs d={d} expected={expected} t={t_years}"
+    );
     assert!(expected > 0.0 && expected < 100_000.0);
 }
 
@@ -515,31 +1277,97 @@ fn ofi_5_moneyness_classification_and_kind_aware_regression() {
     // Spec examples: 105k call → OTM; 102k put → ITM. (Review note: the
     // spec's original "98k put → ITM" was factually wrong — a 98k put at
     // spot 100k is OTM, max(0, K−S) = 0.)
-    assert_eq!(moneyness_bucket(OptionKind::Call, 105_000.0, s, atm, itm_cap, otm_cap), Some(MoneynessBucket::Otm));
-    assert_eq!(moneyness_bucket(OptionKind::Put, 102_000.0, s, atm, itm_cap, otm_cap), Some(MoneynessBucket::Itm));
+    assert_eq!(
+        moneyness_bucket(OptionKind::Call, 105_000.0, s, atm, itm_cap, otm_cap),
+        Some(MoneynessBucket::Otm)
+    );
+    assert_eq!(
+        moneyness_bucket(OptionKind::Put, 102_000.0, s, atm, itm_cap, otm_cap),
+        Some(MoneynessBucket::Itm)
+    );
     // And indeed: 98k put with spot at 100k is OTM.
-    assert_eq!(moneyness_bucket(OptionKind::Put, 98_000.0, s, atm, itm_cap, otm_cap), Some(MoneynessBucket::Otm));
+    assert_eq!(
+        moneyness_bucket(OptionKind::Put, 98_000.0, s, atm, itm_cap, otm_cap),
+        Some(MoneynessBucket::Otm)
+    );
     // REGRESSION (review fix): 104k call with spot 100k is OTM — the naive
     // |K/S − 1| < band formula would call it ITM.
-    assert_eq!(moneyness_bucket(OptionKind::Call, 104_000.0, s, atm, itm_cap, otm_cap), Some(MoneynessBucket::Otm));
+    assert_eq!(
+        moneyness_bucket(OptionKind::Call, 104_000.0, s, atm, itm_cap, otm_cap),
+        Some(MoneynessBucket::Otm)
+    );
     // And the mirror: 104k put IS ITM.
-    assert_eq!(moneyness_bucket(OptionKind::Put, 104_000.0, s, atm, itm_cap, otm_cap), Some(MoneynessBucket::Itm));
+    assert_eq!(
+        moneyness_bucket(OptionKind::Put, 104_000.0, s, atm, itm_cap, otm_cap),
+        Some(MoneynessBucket::Itm)
+    );
     // ATM band: ±2% regardless of kind/side.
-    assert_eq!(moneyness_bucket(OptionKind::Call, 101_000.0, s, atm, itm_cap, otm_cap), Some(MoneynessBucket::Atm));
-    assert_eq!(moneyness_bucket(OptionKind::Put, 99_000.0, s, atm, itm_cap, otm_cap), Some(MoneynessBucket::Atm));
+    assert_eq!(
+        moneyness_bucket(OptionKind::Call, 101_000.0, s, atm, itm_cap, otm_cap),
+        Some(MoneynessBucket::Atm)
+    );
+    assert_eq!(
+        moneyness_bucket(OptionKind::Put, 99_000.0, s, atm, itm_cap, otm_cap),
+        Some(MoneynessBucket::Atm)
+    );
     // Deep OTM excluded: 150k call (50% OTM) and beyond.
-    assert_eq!(moneyness_bucket(OptionKind::Call, 149_000.0, s, atm, itm_cap, otm_cap), Some(MoneynessBucket::Otm));
-    assert_eq!(moneyness_bucket(OptionKind::Call, 151_000.0, s, atm, itm_cap, otm_cap), None);
+    assert_eq!(
+        moneyness_bucket(OptionKind::Call, 149_000.0, s, atm, itm_cap, otm_cap),
+        Some(MoneynessBucket::Otm)
+    );
+    assert_eq!(
+        moneyness_bucket(OptionKind::Call, 151_000.0, s, atm, itm_cap, otm_cap),
+        None
+    );
 }
 
 #[test]
 fn ofi_5_deep_otm_excluded_from_aggregation() {
     let mut f = flow_feature(FlowMetric::OtmFlow, 60 * SEC);
-    f.on_event(&ticker(T0, "BTC", EXP, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        0.6,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    ));
     // Normal OTM trade counts; deep-OTM (200% away) does not.
-    f.on_event(&opt_trade(T0 + SEC, "BTC", EXP, 130_000.0, OptionKind::Call, 100.0, 100.0, Side::Buy)); // +$10k
-    f.on_event(&opt_trade(T0 + SEC, "BTC", EXP, 300_000.0, OptionKind::Call, 5.0, 20_000.0, Side::Buy)); // excluded
-    let otm = f.on_event(&opt_trade(T0 + 61 * SEC, "BTC", EXP, 130_000.0, OptionKind::Call, 100.0, 100.0, Side::Buy)).unwrap();
+    f.on_event(&opt_trade(
+        T0 + SEC,
+        "BTC",
+        EXP,
+        130_000.0,
+        OptionKind::Call,
+        100.0,
+        100.0,
+        Side::Buy,
+    )); // +$10k
+    f.on_event(&opt_trade(
+        T0 + SEC,
+        "BTC",
+        EXP,
+        300_000.0,
+        OptionKind::Call,
+        5.0,
+        20_000.0,
+        Side::Buy,
+    )); // excluded
+    let otm = f
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            EXP,
+            130_000.0,
+            OptionKind::Call,
+            100.0,
+            100.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert!((otm - 10_000.0).abs() < 1e-6);
 }
 
@@ -555,12 +1383,62 @@ fn ofi_6_tenor_classification() {
     let mut monthly = flow_feature(FlowMetric::MonthlyFlow, 60 * SEC);
     let exp3 = T0 + 3 * DAY_NS;
     for f in [&mut weekly, &mut monthly] {
-        f.on_event(&ticker(T0, "BTC", exp3, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
+        f.on_event(&ticker(
+            T0,
+            "BTC",
+            exp3,
+            100_000.0,
+            OptionKind::Call,
+            0.6,
+            10.0,
+            100_000.0,
+            (0.5, 1e-5, 0.0, 0.0),
+        ));
     }
-    weekly.on_event(&opt_trade(T0 + SEC, "BTC", exp3, 100_000.0, OptionKind::Call, 1_000.0, 50.0, Side::Buy));
-    monthly.on_event(&opt_trade(T0 + SEC, "BTC", exp3, 100_000.0, OptionKind::Call, 1_000.0, 50.0, Side::Buy));
-    let w = weekly.on_event(&opt_trade(T0 + 61 * SEC, "BTC", exp3, 100_000.0, OptionKind::Call, 1_000.0, 50.0, Side::Buy)).unwrap();
-    let m = monthly.on_event(&opt_trade(T0 + 61 * SEC, "BTC", exp3, 100_000.0, OptionKind::Call, 1_000.0, 50.0, Side::Buy)).unwrap();
+    weekly.on_event(&opt_trade(
+        T0 + SEC,
+        "BTC",
+        exp3,
+        100_000.0,
+        OptionKind::Call,
+        1_000.0,
+        50.0,
+        Side::Buy,
+    ));
+    monthly.on_event(&opt_trade(
+        T0 + SEC,
+        "BTC",
+        exp3,
+        100_000.0,
+        OptionKind::Call,
+        1_000.0,
+        50.0,
+        Side::Buy,
+    ));
+    let w = weekly
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            exp3,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            50.0,
+            Side::Buy,
+        ))
+        .unwrap();
+    let m = monthly
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            exp3,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            50.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert!((w - 50_000.0).abs() < 1e-6); // 3d expiry → weekly
     assert!((m - 0.0).abs() < 1e-12); // nothing monthly in that window
 }
@@ -568,15 +1446,67 @@ fn ofi_6_tenor_classification() {
 #[test]
 fn ofi_7_acceleration_suppressed_until_warmup() {
     let mut f = flow_feature(FlowMetric::Acceleration, 60 * SEC);
-    f.on_event(&ticker(T0, "BTC", EXP, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        0.6,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    ));
     // w1: +$50k; closes on the w2 trade → first close has NO predecessor.
-    f.on_event(&opt_trade(T0 + SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 50.0, Side::Buy));
-    assert!(f.on_event(&opt_trade(T0 + 61 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 50.0, Side::Buy)).is_none());
+    f.on_event(&opt_trade(
+        T0 + SEC,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        1_000.0,
+        50.0,
+        Side::Buy,
+    ));
+    assert!(f
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            50.0,
+            Side::Buy
+        ))
+        .is_none());
     // w3 trade closes w2 (+50k) → acceleration = 50k − 50k = 0.
-    let a1 = f.on_event(&opt_trade(T0 + 121 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy)).unwrap();
+    let a1 = f
+        .on_event(&opt_trade(
+            T0 + 121 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            100.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert!((a1 - 0.0).abs() < 1e-9);
     // w4 trade closes w3 (+100k) → acceleration = +50k.
-    let a2 = f.on_event(&opt_trade(T0 + 181 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 50.0, Side::Buy)).unwrap();
+    let a2 = f
+        .on_event(&opt_trade(
+            T0 + 181 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            50.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert!((a2 - 50_000.0).abs() < 1e-6);
 }
 
@@ -587,15 +1517,65 @@ fn ofi_8_whale_threshold_dynamic() {
     let mut floor_case = flow_feature(FlowMetric::WhaleCount, 60 * SEC);
     let mut net_case = flow_feature(FlowMetric::WhaleNet, 60 * SEC);
     for f in [&mut floor_case, &mut net_case] {
-        f.on_event(&ticker(T0, "BTC", EXP, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
+        f.on_event(&ticker(
+            T0,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            0.6,
+            10.0,
+            100_000.0,
+            (0.5, 1e-5, 0.0, 0.0),
+        ));
         for _ in 0..19 {
-            f.on_event(&opt_trade(T0 + SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy)); // $100k each
+            f.on_event(&opt_trade(
+                T0 + SEC,
+                "BTC",
+                EXP,
+                100_000.0,
+                OptionKind::Call,
+                1_000.0,
+                100.0,
+                Side::Buy,
+            )); // $100k each
         }
-        f.on_event(&opt_trade(T0 + SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 6_000.0, 100.0, Side::Buy)); // $600k
+        f.on_event(&opt_trade(
+            T0 + SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            6_000.0,
+            100.0,
+            Side::Buy,
+        )); // $600k
     }
-    let count = floor_case.on_event(&opt_trade(T0 + 61 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy)).unwrap();
+    let count = floor_case
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            100.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert_eq!(count, 1.0);
-    let net = net_case.on_event(&opt_trade(T0 + 61 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy)).unwrap();
+    let net = net_case
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            100.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert!((net - 600_000.0).abs() < 1e-6);
 
     // K-path case (floor lowered to $10k): 19×$50k + 1×$600k → exact-sort
@@ -604,12 +1584,51 @@ fn ofi_8_whale_threshold_dynamic() {
     let mut params = flow_params();
     params.whale_floor_usd = 10_000.0;
     let mut g = FlowFeature::new(FlowMetric::WhaleCount, "BTC", 60 * SEC, params);
-    g.on_event(&ticker(T0, "BTC", EXP, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
+    g.on_event(&ticker(
+        T0,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        0.6,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    ));
     for _ in 0..19 {
-        g.on_event(&opt_trade(T0 + SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 500.0, 100.0, Side::Buy)); // $50k
+        g.on_event(&opt_trade(
+            T0 + SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            500.0,
+            100.0,
+            Side::Buy,
+        )); // $50k
     }
-    g.on_event(&opt_trade(T0 + SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 6_000.0, 100.0, Side::Buy)); // $600k
-    let c = g.on_event(&opt_trade(T0 + 61 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy)).unwrap();
+    g.on_event(&opt_trade(
+        T0 + SEC,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        6_000.0,
+        100.0,
+        Side::Buy,
+    )); // $600k
+    let c = g
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            100.0,
+            Side::Buy,
+        ))
+        .unwrap();
     assert_eq!(c, 1.0);
 }
 
@@ -617,12 +1636,31 @@ fn ofi_8_whale_threshold_dynamic() {
 fn ofi_9_deterministic_golden() {
     let replay = || {
         let mut f = flow_feature(FlowMetric::NetPremium, 60 * SEC);
-        f.on_event(&ticker(T0, "BTC", EXP, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
+        f.on_event(&ticker(
+            T0,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            0.6,
+            10.0,
+            100_000.0,
+            (0.5, 1e-5, 0.0, 0.0),
+        ));
         let mut out = Vec::new();
         for i in 0..6u32 {
             let side = if i % 2 == 0 { Side::Buy } else { Side::Sell };
             let ts = T0 + (i * 61 + 1) as i64 * SEC;
-            if let Some(v) = f.on_event(&opt_trade(ts, "BTC", EXP, 100_000.0, OptionKind::Call, 500.0, 100.0, side)) {
+            if let Some(v) = f.on_event(&opt_trade(
+                ts,
+                "BTC",
+                EXP,
+                100_000.0,
+                OptionKind::Call,
+                500.0,
+                100.0,
+                side,
+            )) {
                 out.push(v);
             }
         }
@@ -647,12 +1685,42 @@ whale_treshold_usd = 5.0
 #[test]
 fn ofi_12_xdiv_suppressed_single_venue() {
     let mut f = flow_feature(FlowMetric::CrossVenueDivergence, 60 * SEC);
-    f.on_event(&ticker(T0, "BTC", EXP, 100_000.0, OptionKind::Call, 0.6, 10.0, 100_000.0, (0.5, 1e-5, 0.0, 0.0)));
+    f.on_event(&ticker(
+        T0,
+        "BTC",
+        EXP,
+        100_000.0,
+        OptionKind::Call,
+        0.6,
+        10.0,
+        100_000.0,
+        (0.5, 1e-5, 0.0, 0.0),
+    ));
     for i in 0..3u32 {
-        f.on_event(&opt_trade(T0 + SEC * (i + 1) as i64, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy));
+        f.on_event(&opt_trade(
+            T0 + SEC * (i + 1) as i64,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            100.0,
+            Side::Buy,
+        ));
     }
     // Deribit-only: divergence emits NOTHING — never a fake zero (OFI-12).
-    assert!(f.on_event(&opt_trade(T0 + 61 * SEC, "BTC", EXP, 100_000.0, OptionKind::Call, 1_000.0, 100.0, Side::Buy)).is_none());
+    assert!(f
+        .on_event(&opt_trade(
+            T0 + 61 * SEC,
+            "BTC",
+            EXP,
+            100_000.0,
+            OptionKind::Call,
+            1_000.0,
+            100.0,
+            Side::Buy
+        ))
+        .is_none());
 }
 
 #[test]
@@ -675,7 +1743,11 @@ windows_ns = [60000000000]
     let mut sorted = names.clone();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), names.len(), "duplicate feature ids registered");
+    assert_eq!(
+        sorted.len(),
+        names.len(),
+        "duplicate feature ids registered"
+    );
 }
 
 #[test]
@@ -719,6 +1791,216 @@ underlyings = ["BTC"]
 }
 
 #[test]
+fn gre_6_deterministic_golden() {
+    // Same fixture replayed twice → byte-identical feature outputs (GRE-6,
+    // CONV-9). Compare f64 bit patterns, not just approximate equality.
+    let replay = || {
+        let mut agg = GreeksAggregator::new(1.0);
+        let exp = T0 + 30 * DAY_NS;
+        for i in 0..5u32 {
+            let strike = 90_000.0 + i as f64 * 5_000.0;
+            agg.on_ticker(
+                &ticker(
+                    T0 + i as i64 * SEC,
+                    "BTC",
+                    exp,
+                    strike,
+                    OptionKind::Call,
+                    0.6,
+                    10.0 + i as f64,
+                    100_000.0,
+                    (0.5, 1e-5 + i as f64 * 1e-6, -10.0, 0.01),
+                ),
+                "BTC",
+            );
+        }
+        (agg.gex_profile("BTC"), agg.net_gex("BTC").unwrap())
+    };
+    let a = replay();
+    let b = replay();
+    assert_eq!(a.0.len(), b.0.len());
+    for (x, y) in a.0.iter().zip(b.0.iter()) {
+        assert_eq!(x.0.to_bits(), y.0.to_bits(), "strike bit-identical");
+        assert_eq!(x.1.to_bits(), y.1.to_bits(), "gex bit-identical");
+    }
+    assert_eq!(a.1.to_bits(), b.1.to_bits());
+}
+
+#[test]
+fn gre_7_catalog_locality_and_version() {
+    // GRE-7: features register as GLOBAL (FEA-20) tick features with the
+    // default version and cold-start warmup semantics.
+    let cfg: FeaturesConfig = toml::from_str(
+        r#"
+[options_greeks]
+underlyings = ["BTC"]
+"#,
+    )
+    .unwrap();
+    let mut e = FeatureEngine::new(SEC);
+    mp_features::register_options_families(&mut e, &cfg).unwrap();
+    for expect in [
+        "gex.net.btc",
+        "gex.max_pain.btc",
+        "vanna.btc",
+        "charm.btc",
+        "net.delta.btc",
+    ] {
+        assert!(e.name_to_id(expect).is_some(), "{expect} not registered");
+    }
+    // One BTC ticker batch emits net.delta.btc with ver=1.
+    let ev = ticker(
+        T0,
+        "BTC",
+        T0 + 30 * DAY_NS,
+        100_000.0,
+        OptionKind::Call,
+        0.6,
+        10.0,
+        100_000.0,
+        (0.5, 2e-5, -1.0, 0.01),
+    );
+    let ups = e.on_event(&ev);
+    let u = ups
+        .iter()
+        .rev()
+        .find(|u| u.name == "net.delta.btc")
+        .expect("net.delta.btc emitted");
+    assert_eq!(u.ver, 1);
+    assert!((u.value - 0.5 * 10.0).abs() < 1e-12);
+}
+
+#[test]
+fn ivs_1_catalog_registration() {
+    let cfg: FeaturesConfig = toml::from_str(
+        r#"
+[options_iv]
+underlyings = ["BTC"]
+"#,
+    )
+    .unwrap();
+    let mut e = FeatureEngine::new(SEC);
+    mp_features::register_options_families(&mut e, &cfg).unwrap();
+    let names = e.name_map().values().cloned().collect::<Vec<_>>();
+    for expect in [
+        "iv.atm.btc",
+        "iv.index.btc",
+        "iv.skew.btc.rr25",
+        "iv.skew.btc.wing25",
+        "iv.term.btc.1m",
+        "iv.percentile.btc",
+        "iv.regime.btc",
+    ] {
+        assert!(names.contains(&expect.to_string()), "missing {expect}");
+    }
+}
+
+#[test]
+fn ivs_9_check_config_rejects_unknown_fields() {
+    let res: Result<FeaturesConfig, _> = toml::from_str(
+        r#"
+[options_iv]
+underlyings = ["BTC"]
+percentil_days = 3
+"#,
+    );
+    assert!(res.is_err()); // typo'd key → reject (deny_unknown_fields)
+}
+
+#[test]
+fn ivs_11_percentile_skips_missing_days() {
+    let mut pct = IvPercentileFeature::percentile("BTC", 90);
+    let exp = T0 + 365 * DAY_NS;
+    let s = |ts: i64, iv: f64| {
+        ticker(
+            ts,
+            "BTC",
+            exp,
+            100_000.0,
+            OptionKind::Call,
+            iv,
+            10.0,
+            100_000.0,
+            (0.5, 1e-5, 0.0, 0.0),
+        )
+    };
+    for d in 1..=79 {
+        pct.on_event(&s(T0 + d * DAY_NS, 0.50));
+    }
+    // Day 80 missing (collector downtime). Day 81 above everything:
+    // denominator is 79 OBSERVED days, NOT 80/90 (IVS-11).
+    let hi = s(T0 + 81 * DAY_NS, 0.55);
+    assert!((pct.on_event(&hi).unwrap() - 1.0).abs() < 1e-12);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+    #[test]
+    fn ivs_10_proptest_vrp_bounded_by_iv_and_rv(
+        iv in 0.0f64..2.0,
+        rv in 0.0f64..2.0,
+    ) {
+        if let Some(v) = vrp(iv, rv) {
+            prop_assert!((v - (iv - rv)).abs() < 1e-9);
+        }
+        // Fail-closed whenever either side is non-finite (IVS-5).
+        prop_assert!(vrp(f64::NAN, rv).is_none());
+        prop_assert!(vrp(iv, f64::NAN).is_none());
+    }
+}
+
+#[test]
+fn ofi_1_catalog_registration() {
+    let cfg: FeaturesConfig = toml::from_str(
+        r#"
+[options_flow]
+underlyings = ["BTC"]
+windows_ns = [3600000000000]
+"#,
+    )
+    .unwrap();
+    let mut e = FeatureEngine::new(SEC);
+    mp_features::register_options_families(&mut e, &cfg).unwrap();
+    let names = e.name_map().values().cloned().collect::<Vec<_>>();
+    for expect in [
+        "flow.net_premium.btc.1h",
+        "flow.block.btc.1h",
+        "flow.net_delta.btc.1h",
+        "flow.call_put_ratio.btc.1h",
+        "flow.by_expiry.weekly.btc.1h",
+        "flow.accl.btc.1h",
+        "flow.xdiv.btc.1h",
+    ] {
+        assert!(names.contains(&expect.to_string()), "missing {expect}");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+    #[test]
+    fn ofi_11_proptest_signed_premium_and_delta_math(
+        price in 1.0f64..1e6,
+        qty in 0.001f64..1e3,
+        delta in -1.0f64..1.0,
+    ) {
+        let notional = price * qty;
+        prop_assert!(notional.is_finite() && notional > 0.0);
+        // Signed premium: buy aggressor = +notional (OFI-3).
+        let buy_signed = 1.0 * notional;
+        prop_assert!((buy_signed - notional).abs() < 1e-6);
+        let sell_signed = -notional;
+        prop_assert!((sell_signed + notional).abs() < 1e-6);
+        // Delta-adjusted: call positive, put negative, |·| ≤ notional.
+        prop_assert!((delta * notional).abs() <= notional);
+        // BS fallback sanity: ATM call in (0,1), ATM put in (-1,0) (OFI-4).
+        let dc = bs_delta(100_000.0, 100_000.0, 0.1, 0.6, OptionKind::Call).unwrap();
+        prop_assert!(dc > 0.0 && dc < 1.0);
+        let dp = bs_delta(100_000.0, 100_000.0, 0.1, 0.6, OptionKind::Put).unwrap();
+        prop_assert!(dp < 0.0 && dp > -1.0);
+    }
+}
+
+#[test]
 fn window_label_helper_matches_feature_ids() {
     use mp_features::options_flow::window_label;
     assert_eq!(window_label(3_600_000_000_000), "1h");
@@ -727,15 +2009,80 @@ fn window_label_helper_matches_feature_ids() {
     assert_eq!(window_label(90 * SEC), "90s");
 }
 
+// ---- spec 040: IBIT integration -------------------------------------------
 
+#[test]
+fn ibi_4_greeks_work_on_ibit_with_multiplier_100() {
+    // Pure-math leg: GEX scales exactly by the contract multiplier.
+    let exp = T0 + 30 * DAY_NS;
+    let spot = 51.2;
+    let mk = |mult: f64| {
+        let mut agg = GreeksAggregator::new(mult);
+        agg.on_ticker(
+            &ticker(
+                T0,
+                "IBIT",
+                exp,
+                50.0,
+                OptionKind::Call,
+                0.62,
+                10.0,
+                spot,
+                (0.55, 0.03, -0.02, 4.1),
+            ),
+            "IBIT",
+        );
+        agg.gex_profile("IBIT")[0].1
+    };
+    let gex_1 = mk(1.0);
+    let gex_100 = mk(100.0);
+    assert!(
+        (gex_100 / gex_1 - 100.0).abs() < 1e-9,
+        "multiplier must scale GEX x100"
+    );
 
-
-
-
-
-
-
-
-
-
-
+    // Engine leg: an IBIT-underlying config registers the underlying-scoped
+    // ids and they emit from a CBOE-venue ticker.
+    let cfg: FeaturesConfig = toml::from_str(
+        r#"
+[options_greeks]
+underlyings = ["IBIT"]
+contract_multiplier = 100.0
+"#,
+    )
+    .unwrap();
+    let mut e = FeatureEngine::new(SEC);
+    mp_features::register_options_families(&mut e, &cfg).unwrap();
+    let leg = mp_core::OptionLeg {
+        underlying: "IBIT".into(),
+        strike: 50.0,
+        expiry_ts_ns: exp,
+        kind: OptionKind::Call,
+    };
+    let ev = EventEnvelope::new(
+        Venue::Cboe,
+        SymbolId(11),
+        T0,
+        T0,
+        1,
+        MarketEvent::OptionTicker {
+            leg,
+            mark_iv: 0.62,
+            mark_price: 7.0,
+            underlying_price: spot,
+            open_interest: 10.0,
+            greeks: Some(OptionGreeks {
+                delta: 0.55,
+                gamma: 0.03,
+                theta: -0.02,
+                vega: 4.1,
+            }),
+        },
+    );
+    let ups = e.on_event(&ev);
+    let id = e
+        .name_to_id("net.delta.ibit")
+        .expect("net.delta.ibit registered");
+    let v = ups.iter().rev().find(|u| u.feature == id).map(|u| u.value);
+    assert!(v.is_some(), "net.delta.ibit emits from a CBOE ticker");
+}

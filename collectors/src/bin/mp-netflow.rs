@@ -44,7 +44,12 @@ mod impl_ {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    pub const ETHERSCAN_API_URL: &str = "https://api.etherscan.io/api";
+    /// Etherscan API **V2** — the V1 route (`/api`) was deprecated venue-side
+    /// (2025-08 migration; V1 now answers `status=0 "deprecated"`), which
+    /// surfaced as silent per-wallet fetch failures until probed directly.
+    pub const ETHERSCAN_API_URL: &str = "https://api.etherscan.io/v2/api";
+    /// Chain id for Ethereum mainnet (V2 routes all chains through one host).
+    pub const ETHERSCAN_CHAIN_ID: u32 = 1;
 
     fn config_from_args(args: &[String]) -> Result<NetflowConfig, String> {
         let path = binutil::flag(args, "--config")
@@ -66,17 +71,25 @@ mod impl_ {
         }
     }
 
-    /// Fetch one wallet's balance and return the wrapped payload the
-    /// normalizer consumes: `{"address", "asset", "result"}`.
-    fn fetch_balance_blocking(key: &str, entry: &WatchEntry) -> Result<serde_json::Value, String> {
+    /// Build one balance-query URL (V2 route, mainnet chain id; token
+    /// balance when a contract is set, native ETH balance otherwise).
+    pub(crate) fn build_balance_url(key: &str, entry: &WatchEntry) -> String {
         let mut url = format!(
-            "{ETHERSCAN_API_URL}?module=account&action={action}&address={addr}&tag=latest&apikey={key}",
+            "{ETHERSCAN_API_URL}?chainid={chain}&module=account&action={action}&address={addr}&tag=latest&apikey={key}",
+            chain = ETHERSCAN_CHAIN_ID,
             action = etherscan_action(&entry.contract),
             addr = entry.address,
         );
         if !entry.contract.is_empty() {
             url.push_str(&format!("&contractaddress={}", entry.contract));
         }
+        url
+    }
+
+    /// Fetch one wallet's balance and return the wrapped payload the
+    /// normalizer consumes: `{"address", "asset", "result"}`.
+    fn fetch_balance_blocking(key: &str, entry: &WatchEntry) -> Result<serde_json::Value, String> {
+        let url = build_balance_url(key, entry);
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -265,3 +278,42 @@ mod impl_ {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "live-http")]
+mod tests {
+    use super::impl_::build_balance_url;
+    use mp_collectors::netflow::{etherscan_action, WatchEntry};
+
+    #[test]
+    fn nfl_url_uses_v2_route_with_mainnet_chainid() {
+        // Etherscan deprecated the V1 `/api` route (answers status=0
+        // "deprecated"); the poller MUST hit /v2/api with a chain id or
+        // every wallet fetch fails closed.
+        let usdt = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
+        let e = WatchEntry {
+            label: "t".into(),
+            address: "0xABC".into(),
+            asset: "USDT".into(),
+            contract: usdt.into(),
+        };
+        let url = build_balance_url("KEY", &e);
+        assert!(url.starts_with("https://api.etherscan.io/v2/api"), "{url}");
+        assert!(url.contains("chainid=1"), "{url}");
+        assert!(url.contains("action=tokenbalance"), "token contract => tokenbalance");
+        assert!(url.contains(&format!("contractaddress={usdt}")));
+
+        // Native ETH entry (empty contract) → plain balance action, no
+        // contractaddress param.
+        let eth = WatchEntry {
+            label: "e".into(),
+            address: "0xDEF".into(),
+            asset: "ETH".into(),
+            contract: String::new(),
+        };
+        let url = build_balance_url("K", &eth);
+        assert!(url.contains(&format!("action={}", etherscan_action(""))));
+        assert!(!url.contains("contractaddress"));
+    }
+}
+

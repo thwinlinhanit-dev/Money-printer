@@ -23,6 +23,7 @@ pub mod etherscan;
 pub mod fred;
 pub mod hyperliquid;
 pub mod hyperliquid_positions;
+pub mod ibit;
 pub mod json;
 pub mod kraken;
 pub mod netflow;
@@ -71,6 +72,10 @@ pub fn normalizer_for(venue: mp_core::Venue) -> Box<dyn Normalizer> {
         // Ethereum mainnet is a REST poller (mp-netflow), not a WS
         // normalizer; the entry exists so `normalizer_for` stays total.
         Ethereum => Box::new(EtherscanNormalizer::new()),
+        // CBOE IBIT options chain is a REST poller (mp-ibit, spec 040),
+        // not a WS normalizer; the entry exists so `normalizer_for` stays
+        // total over `Venue`.
+        Cboe => Box::new(crate::ibit::CboeChainNormalizer::new()),
     }
 }
 

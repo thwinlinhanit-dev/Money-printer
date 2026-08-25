@@ -167,9 +167,14 @@ def test_cli_seed_check_render_round_trip(tmp_path):
     # Seeding again never overwrites curated records (idempotent scaffold).
     again = _run_registry_cli(tmp_path, "seed")
     assert "nothing added" in again.stdout
+    # One record per DISCOVERED candidate (strategies + docs/BACKLOG.md,
+    # slug-deduped) — the count tracks discovery, never a magic number.
+    import run_registry
+
+    expected = len({c.id for c in run_registry._discover()})
     assert (
         len((tmp_path / "registry.jsonl").read_text(encoding="utf-8").splitlines())
-        == 14
+        == expected
     )
 
     ok = _run_registry_cli(tmp_path, "check")

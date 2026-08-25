@@ -10,13 +10,18 @@
 //! tracked in spec 004 Decisions.
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod accumulation;
 pub mod bar;
 pub mod catalog;
+pub mod cohort;
 pub mod config;
 pub mod engine;
 pub mod hit_journal;
+pub mod ibit_cross;
 pub mod leverage;
 pub mod liquidation;
+pub mod netflow_flow;
+pub mod oi_regime;
 pub mod options_flow;
 pub mod options_greeks;
 pub mod options_iv;
@@ -27,10 +32,15 @@ pub mod whale;
 
 use mp_core::Venue;
 
+pub use accumulation::{AccumulationConfig, AccumulationDetector, SubSignal};
 pub use bar::{Bar, BarBuilder};
 pub use catalog::{
     BookDepth, BookDepthKind, LiqDist, LiqRate, LiqVol, Microprice, SpreadBp, SpreadRegime,
     TapeBpsDelta, TapeTps,
+};
+pub use cohort::{
+    journal_changes, load_snapshot, save_snapshot, Cohort, CohortConfig, CohortFeature,
+    CohortField, CohortSnapshot, WalletMetrics, WalletScorer,
 };
 pub use config::{
     BookDepthParams, ConfigError, FeaturesConfig, LiqDeltaParams, LiqFlowParams,
@@ -38,10 +48,12 @@ pub use config::{
 };
 pub use engine::{BarFeature, FeatureEngine, FeatureUpdate, Locality, TickFeature};
 pub use hit_journal::{HitJournal, HitRecord};
+pub use ibit_cross::{CrossDayClose, CrossField, IbitCrossDaily, IbitCrossParams, IbitDerivCross};
 pub use leverage::{calibrate_leverage_weights, tier_leverages, LeverageTierCalibration};
 pub use liquidation::{
     band_accuracy, BandAccuracy, BandObservation, LiqAgg, LiqDelta, LiqEstBands, WhaleBandStudy,
 };
+pub use oi_regime::{OiLevelDelta, OiQuadrant, OiRegimeConfig, TrendRegime};
 pub use options_flow::{
     bs_delta, flow_tenor, moneyness_bucket, window_label, FlowFeature, FlowMetric, FlowParams,
     MoneynessBucket,
@@ -56,9 +68,10 @@ pub use options_iv::{
 pub use screener::{Cond, Op, Rule, Screener, ScreenerHit};
 pub use swing::{
     atr, compressed_range, realized_vol, sweep_of, trend_strength, value_area, volume_levels,
-    LevelKind, LevelSide, RangeField, RollingVwap, SweepEvent, SweepField, SweepSide, SwingAtr,
-    SwingClose, SwingNearestLevel, SwingRange, SwingRealizedVol, SwingRollingVwap, SwingSweep,
-    SwingTrendStrength, SwingValueArea, ValueArea, ValueAreaField, VolumeLevels,
+    AdKind, AdState, LevelKind, LevelSide, PocFlipField, PocSide, RangeField, RollingVwap,
+    SweepEvent, SweepField, SweepSide, SwingAd, SwingAtr, SwingClose, SwingNearestLevel,
+    SwingPocFlip, SwingRange, SwingRealizedVol, SwingRollingVwap, SwingSweep, SwingTrendStrength,
+    SwingValueArea, ValueArea, ValueAreaField, VolumeLevels,
 };
 pub use whale::{WhaleNet, WhaleNetDelta};
 
@@ -298,7 +311,153 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
             });
         }
     }
+    // Spec 036 §7: POC-flip state machine + A/D classifier.
+    let poc_n = cfg.swing.poc_flip_n;
+    for field in [PocFlipField::Up, PocFlipField::Down] {
+        e.register_bar(move || Box::new(SwingPocFlip::new(prof_win, prof_bucket, poc_n, field)));
+    }
+    let ad_k = cfg.swing.ad_k_windows;
+    let ad_atr_n = cfg.swing.sweep_atr_n;
+    for kind in [AdKind::Accumulating, AdKind::Distributing] {
+        e.register_bar(move || {
+            Box::new(SwingAd::new(
+                prof_win,
+                prof_bucket,
+                hvn_frac,
+                lvn_frac,
+                ad_k,
+                ad_atr_n,
+                kind,
+            ))
+        });
+    }
     register_options_families(&mut e, cfg)?;
+    // Spec 045 sub-signal inputs — oi.delta.{w}, oi.quadrant.{w} and
+    // regime.trend, the feature families the accumulation detector consumes.
+    // Disabled when `[oi_regime] enabled` is false (the default).
+    if cfg.oi_regime.enabled {
+        use crate::oi_regime::{OiLevelDelta, OiQuadrant, TrendRegime};
+        let inner = &cfg.oi_regime.inner;
+        for &w in &inner.windows_ns {
+            e.register_tick(move || Box::new(OiLevelDelta::new(w)));
+            e.register_tick(move || Box::new(OiQuadrant::new(w)));
+        }
+        let (lookback, threshold) = (inner.trend_lookback_bars, inner.trend_threshold);
+        e.register_bar(move || Box::new(TrendRegime::new(lookback, threshold)));
+    }
+    // Spec 042 — wallet cohort grading (WCG-7): FOUR global tick families
+    // computed from a pre-scored weekly snapshot. The snapshot loads once at
+    // build time from `[cohort].snapshot_path` when set; absent/None ⇒ the
+    // fail-closed suppression path (WCG-8) until an operator provides one.
+    if cfg.cohort.enabled {
+        use crate::cohort::{Cohort, CohortField};
+        let inner = &cfg.cohort.inner;
+        let max_age = inner.snapshot_max_age_ns;
+        let snap = inner
+            .snapshot_path
+            .as_deref()
+            .and_then(|p| crate::cohort::load_snapshot(std::path::Path::new(p)));
+        let flow_w = inner.smart_flow_window_ns;
+        let snap_wr = snap.clone();
+        e.register_global_tick(move || {
+            Box::new(crate::cohort::CohortFeature::with_windows(
+                snap_wr.clone(),
+                CohortField::WhaleRatio,
+                max_age,
+                flow_w,
+            ))
+        });
+        for c in [
+            Cohort::SmartMoney,
+            Cohort::Whale,
+            Cohort::Retail,
+            Cohort::Dormant,
+        ] {
+            let snap_nd = snap.clone();
+            e.register_global_tick(move || {
+                Box::new(crate::cohort::CohortFeature::with_windows(
+                    snap_nd.clone(),
+                    CohortField::NetDelta(c),
+                    max_age,
+                    flow_w,
+                ))
+            });
+        }
+        let snap_sf = snap.clone();
+        e.register_global_tick(move || {
+            Box::new(crate::cohort::CohortFeature::with_windows(
+                snap_sf.clone(),
+                CohortField::SmartFlow,
+                max_age,
+                flow_w,
+            ))
+        });
+        let snap_hh = snap.clone();
+        e.register_global_tick(move || {
+            Box::new(crate::cohort::CohortFeature::with_windows(
+                snap_hh.clone(),
+                CohortField::Concentration,
+                max_age,
+                flow_w,
+            ))
+        });
+    }
+    // Spec 043 — CEX flow velocity: per-field TickFeature instances
+    // consuming NetflowSnapshot events. Enabled when `netflow_flow.enabled`.
+    if cfg.netflow_flow.enabled {
+        use crate::netflow_flow::{NetflowField, NetflowFlowFeature};
+        let nf_cfg = cfg.netflow_flow.inner.clone();
+        for (i, _) in nf_cfg.windows_ns.iter().enumerate() {
+            let c = nf_cfg.clone();
+            e.register_tick(move || {
+                Box::new(NetflowFlowFeature::new(
+                    c.clone(),
+                    NetflowField::Velocity(i),
+                ))
+            });
+            let c = nf_cfg.clone();
+            e.register_tick(move || {
+                Box::new(NetflowFlowFeature::new(
+                    c.clone(),
+                    NetflowField::Acceleration(i),
+                ))
+            });
+        }
+        {
+            let c = nf_cfg.clone();
+            e.register_tick(move || {
+                Box::new(NetflowFlowFeature::new(c.clone(), NetflowField::Cumulative))
+            });
+        }
+        {
+            let c = nf_cfg.clone();
+            e.register_tick(move || {
+                Box::new(NetflowFlowFeature::new(c.clone(), NetflowField::Regime))
+            });
+        }
+        {
+            let c = nf_cfg.clone();
+            e.register_tick(move || {
+                Box::new(NetflowFlowFeature::new(c.clone(), NetflowField::ZScore))
+            });
+        }
+    }
+    // IBIT ↔ Deribit cross-market family (spec 040 IBI-5/6): global tick
+    // features, enabled when `deriv_underlying` is set. Four instances —
+    // divergence + flow correlations at lags 0..2 — each keeping identical
+    // independent state (determinism by construction).
+    if !cfg.ibit_cross.deriv_underlying.is_empty() {
+        let p = cfg.ibit_cross.clone();
+        e.register_global_tick(move || {
+            Box::new(IbitDerivCross::new(p.clone(), CrossField::IvDivergence))
+        });
+        for lag in [0u8, 1, 2] {
+            let p = cfg.ibit_cross.clone();
+            e.register_global_tick(move || {
+                Box::new(IbitDerivCross::new(p.clone(), CrossField::FlowCorr(lag)))
+            });
+        }
+    }
     Ok(e)
 }
 
@@ -313,9 +472,7 @@ pub fn register_options_families(
 ) -> Result<(), ConfigError> {
     use crate::options_flow::{FlowFeature, FlowMetric, FlowParams};
     use crate::options_greeks::{ChainScalar, ChainScalarFeature, HigherOrderGreek};
-    use crate::options_iv::{
-        IvAtm, IvIndex, IvPercentileFeature, IvSkew, IvTerm,
-    };
+    use crate::options_iv::{IvAtm, IvIndex, IvPercentileFeature, IvSkew, IvTerm};
 
     // Spec 037 — chain-level Greeks scalars + FD higher-order Greeks.
     if !cfg.options_greeks.underlyings.is_empty() {
@@ -335,9 +492,7 @@ pub fn register_options_families(
                 ChainScalar::NetTheta,
             ] {
                 let un = un.clone();
-                e.register_global_tick(move || {
-                    Box::new(ChainScalarFeature::new(kind, &un, mult))
-                });
+                e.register_global_tick(move || Box::new(ChainScalarFeature::new(kind, &un, mult)));
             }
             for maker in [
                 HigherOrderGreek::vanna as fn(&str, f64) -> _,
@@ -371,9 +526,7 @@ pub fn register_options_families(
                 Box::new(IvPercentileFeature::percentile(&un_pct, win_pct))
             });
             let (un_reg, win_reg) = (un, cfg.options_iv.regime_lookback_days);
-            e.register_global_tick(move || {
-                Box::new(IvPercentileFeature::regime(&un_reg, win_reg))
-            });
+            e.register_global_tick(move || Box::new(IvPercentileFeature::regime(&un_reg, win_reg)));
         }
     }
 

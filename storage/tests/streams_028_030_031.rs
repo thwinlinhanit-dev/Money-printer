@@ -409,3 +409,75 @@ fn opt_5_writes_raw_and_cold_options_append_only() {
     assert_eq!(stats2.options_files_skipped, 1);
     assert!(mp_storage::prune::verify_prunable(&root, Venue::Deribit, "2026-07-10").is_ok());
 }
+
+// ---- spec 040: IBIT (venue=cboe) lands in the SAME cold/options layout ----
+
+#[test]
+fn ibi_3_parquet_writes_to_cold_options() {
+    let root = tmp("ibi3");
+    let (syms, instr) = table(Venue::Cboe, "IBIT260918C00045000");
+    let leg = OptionLeg {
+        underlying: "IBIT".into(),
+        strike: 45.0,
+        expiry_ts_ns: 1_789_689_600_000_000_000,
+        kind: OptionKind::Call,
+    };
+    let events: Vec<EventEnvelope> = vec![
+        EventEnvelope::new(
+            Venue::Cboe,
+            instr,
+            10,
+            10,
+            1,
+            MarketEvent::OptionTicker {
+                leg: leg.clone(),
+                mark_iv: 0.62,
+                mark_price: 7.05,
+                underlying_price: 51.2,
+                open_interest: 1234.0,
+                greeks: Some(mp_core::OptionGreeks {
+                    delta: 0.55,
+                    gamma: 0.03,
+                    theta: -0.02,
+                    vega: 4.1,
+                }),
+            },
+        ),
+        EventEnvelope::new(
+            Venue::Cboe,
+            instr,
+            20,
+            20,
+            2,
+            MarketEvent::OptionTrade {
+                leg,
+                price: 7.05,
+                qty: 210.0,
+                side: Side::Buy,
+                trade_id: 9001,
+            },
+        ),
+    ];
+    let stats = compact(&root, Venue::Cboe, "2026-08-22", events, &syms);
+    assert_eq!(stats.options_files_written, 1);
+    assert_eq!(stats.option_rows, 2);
+
+    let path = mp_storage::layout::partition_file(
+        &root,
+        "options",
+        Venue::Cboe,
+        "IBIT260918C00045000",
+        "2026-08-22",
+    );
+    let p = path.display().to_string();
+    assert!(path.exists(), "cold/options file exists: {p}");
+    assert!(p.contains("venue=cboe"), "cboe partition in path: {p}");
+
+    // Roundtrip through the dataset reader — same schema, no special case.
+    let ds = Dataset::open(&root);
+    let back = ds
+        .options_day(Venue::Cboe, "IBIT260918C00045000", "2026-08-22")
+        .unwrap();
+    assert_eq!(back.len(), 2);
+    assert!(back.iter().all(|e| e.venue == Venue::Cboe));
+}

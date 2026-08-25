@@ -1,0 +1,42 @@
+# Exchange-reserve balance poller (spec 034) — LIVE watchlist.
+# Key comes from the environment ONLY (PD-2): $env:MP_ETHERSCAN_KEY
+# Addresses are well-known PUBLIC exchange hot wallets (Etherscan-labeled).
+# Labels are for operator logs only — never recorded into events (NFL-3).
+
+data_dir = "data"
+
+# NFL-1 default cadence.
+poll_interval_s = 300
+
+# Etherscan free tier: 5 calls/sec — 250ms per wallet keeps us under it.
+min_poll_gap_ms = 250
+
+[[watchlist]]
+label = "binance-hot-14"
+address = "0x28C6c06298d514Db089934071355E5743bf21d60"
+asset = "USDT"
+contract = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+
+[[watchlist]]
+label = "binance-hot-15"
+address = "0x21a31Ee1afC51d94C2eFcCAa2092aD1028285549"
+asset = "USDT"
+contract = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+
+[[watchlist]]
+label = "bybit-hot"
+address = "0xf89d7b9c864f589bbF53a82105107622B35EaA40"
+asset = "USDT"
+contract = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+
+[[watchlist]]
+label = "okx-hot"
+address = "0x6cc5F688a315f3dc28A7781717a9A798a59fDA7b"
+asset = "USDT"
+contract = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+
+[[watchlist]]
+label = "kraken-cold"
+address = "0x267be1C1D684F78cb4F6a176C4911b741E4Ffdc0"
+asset = "USDT"
+contract = "0xdAC17F958D2ee523a2206206994597C13D831ec7"

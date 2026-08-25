@@ -16,6 +16,7 @@ pub fn venue_slug(v: Venue) -> &'static str {
         Venue::Deribit => "deribit",
         Venue::Fred => "fred",
         Venue::Ethereum => "ethereum",
+        Venue::Cboe => "cboe",
     }
 }
 
@@ -32,6 +33,7 @@ pub fn venue_code(v: Venue) -> u16 {
         Venue::Deribit => 7,
         Venue::Fred => 8,
         Venue::Ethereum => 9,
+        Venue::Cboe => 10,
     }
 }
 
@@ -47,6 +49,7 @@ pub fn venue_from_code(code: u16) -> Option<Venue> {
         7 => Some(Venue::Deribit),
         8 => Some(Venue::Fred),
         9 => Some(Venue::Ethereum),
+        10 => Some(Venue::Cboe),
         _ => None,
     }
 }

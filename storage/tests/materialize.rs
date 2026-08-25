@@ -728,7 +728,7 @@ fn evt_8_stream_merge_matches_eager_merge_order_and_remap() {
     let eager = load_logs_merged(&[log_a.clone(), log_b.clone()]).unwrap();
     let mut streamed = stream_logs_merged(&[log_a, log_b]).unwrap();
     let mut got = Vec::new();
-    while let Some(item) = streamed.next() {
+    for item in streamed.by_ref() {
         let ev = item.unwrap();
         got.push((ev.recv_ts_ns, ev.stream_seq, ev.symbol.0, ev.body));
     }
@@ -845,7 +845,7 @@ fn mat_5_merge_round_trips_shared_symbol_table() {
 
     // Round-trip through the eager loader: same events, same symbol count,
     // ids resolve to the shared table (BTCUSDT id 0, ETHUSDT id 1).
-    let loaded = load_logs_merged(&[merged_log.clone()]).unwrap();
+    let loaded = load_logs_merged(std::slice::from_ref(&merged_log)).unwrap();
     assert_eq!(loaded.events.len(), 6);
     assert_eq!(loaded.symbols.metas().len(), 2);
     assert_eq!(loaded.symbols.metas()[0].venue_symbol, "BTCUSDT");
@@ -861,4 +861,118 @@ fn mat_5_merge_round_trips_shared_symbol_table() {
     assert_eq!(replayed[5].recv_ts_ns, DAY0 + 3 * 1_000_000_000);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ibi_10_cli_cross_out_writes_leadlag_table() {
+    // End-to-end through the shipped binary (CARGO_BIN_EXE_mp-materialize):
+    // two venue logs + --cross-out produce the lead-lag Parquet table.
+    let dir = tmpdir("ibi10cli");
+    let cboe = dir.join("cboe.log");
+    let deribit = dir.join("deribit.log");
+
+    // Minimal symbol tables: one IBIT contract (cboe) + one BTC perp ticker
+    // symbol (deribit). Events are OptionTickers on consecutive days.
+    let mut cboe_syms = mp_core::SymbolTable::new();
+    let ibit_sym = cboe_syms.intern(Venue::Cboe, "IBIT260918C00045000", |id| {
+        let mut m = mp_core::SymbolMeta::new(
+            id,
+            Venue::Cboe,
+            "IBIT260918C00045000",
+            "IBIT",
+            "USD",
+            mp_core::InstrumentKind::Option,
+            0.01,
+            0.01,
+            1.0,
+        );
+        m.contract_multiplier = 100.0;
+        m
+    });
+    let mut deriv_syms = mp_core::SymbolTable::new();
+    let btc_sym = deriv_syms.intern(Venue::Deribit, "BTC-PERPETUAL", |id| {
+        mp_core::SymbolMeta::new(
+            id,
+            Venue::Deribit,
+            "BTC-PERPETUAL",
+            "BTC",
+            "USD",
+            mp_core::InstrumentKind::Perp,
+            0.5,
+            0.01,
+            1.0,
+        )
+    });
+
+    let day_ns = 86_400_000_000_000i64;
+    let mk = |venue: Venue, sym: SymbolId, day: i64, iv: f64, oi: f64, delta: f64| {
+        (
+            day * day_ns + 3_600_000_000_000,
+            sym,
+            MarketEvent::OptionTicker {
+                leg: mp_core::OptionLeg {
+                    underlying: if venue == Venue::Cboe {
+                        "IBIT".into()
+                    } else {
+                        "BTC".into()
+                    },
+                    strike: 50.0,
+                    expiry_ts_ns: 0,
+                    kind: mp_core::OptionKind::Call,
+                },
+                mark_iv: iv,
+                mark_price: 5.0,
+                underlying_price: 100.0,
+                open_interest: oi,
+                greeks: Some(mp_core::OptionGreeks {
+                    delta,
+                    gamma: 0.0,
+                    theta: 0.0,
+                    vega: 0.0,
+                }),
+            },
+        )
+    };
+
+    let mut cboe_events: Vec<(i64, SymbolId, MarketEvent)> = Vec::new();
+    let mut deribit_events: Vec<(i64, SymbolId, MarketEvent)> = Vec::new();
+    for d in 1..=3i64 {
+        cboe_events.push(mk(Venue::Cboe, ibit_sym, d, 0.40, 1000.0, 0.5));
+        deribit_events.push(mk(Venue::Deribit, btc_sym, d, 0.55, 100.0, 0.4));
+    }
+    write_log_at(&cboe, &cboe_syms, &cboe_events, Venue::Cboe);
+    write_log_at(&deribit, &deriv_syms, &deribit_events, Venue::Deribit);
+
+    let cfg = dir.join("features.toml");
+    std::fs::write(
+        &cfg,
+        "[ibit_cross]\nderiv_underlying = \"BTC\"\nmin_overlap_days = 1\n",
+    )
+    .unwrap();
+    let cross_out = dir.join("cross/leadlag.parquet");
+    let bin = env!("CARGO_BIN_EXE_mp-materialize");
+    let out_handle = std::process::Command::new(bin)
+        .args([
+            "--log",
+            cboe.to_str().unwrap(),
+            "--log",
+            deribit.to_str().unwrap(),
+            "--config",
+            cfg.to_str().unwrap(),
+            "--cross-out",
+            cross_out.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out_handle.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out_handle.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out_handle.stdout);
+    assert!(stdout.contains("cross-market rows="), "{stdout}");
+
+    let rows = mp_storage::ibit_leadlag::read_leadlag(&cross_out).unwrap();
+    assert_eq!(rows.len(), 2, "days 1 and 2 completed by days 2/3");
+    assert!((rows[0].iv_divergence - (0.40 - 0.55)).abs() < 1e-12);
 }

@@ -31,7 +31,11 @@ pub mod wall_clock;
 /// `NetflowSnapshot` variants to `MarketEvent`, appended `Venue::Ethereum`.
 /// Append-only, so schema-3 frames decode with the current types (see
 /// `log.rs` schema-ver dispatch).
-pub const SCHEMA_VER: u16 = 4;
+/// 5 (2026-08-22, spec 040): appended `Venue::Cboe` (IBIT ETF options
+/// chain recorder) and `InstrumentKind::Option`. No `MarketEvent` change —
+/// OptionTrade/OptionTicker are reused verbatim. Append-only, so schema-4
+/// frames decode with the current types (see `log.rs` schema-ver dispatch).
+pub const SCHEMA_VER: u16 = 5;
 
 pub use arena::{Arena, EventRef};
 pub use book::BookMirror;

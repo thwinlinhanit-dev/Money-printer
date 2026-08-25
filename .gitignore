@@ -21,6 +21,7 @@ secrets*
 /research/out
 /journal/briefs
 /journal/telegram
+/journal/cohort_changes.jsonl
 *.parquet
 *.ndjson.zst
 *.log
@@ -29,6 +30,7 @@ secrets*
 # Local scratch (ad-hoc binaries/inspectors — hygiene, audit L-series)
 .freebuff/
 /scratch
+/bin_local/
 scratch_*
 stdout.txt
 stderr.txt
@@ -41,6 +43,10 @@ __pycache__/
 *.pdb
 research/py_err.txt
 research/py_out.txt
+
+# Test-artifact data written under a crate dir by materialize/query tests
+# (W-6: recorded/test data never enters git; root /data is covered above).
+/storage/data/
 
 # Off-host backup tier — vendored portable binaries + age keys (PD-2)
 ops/tools/

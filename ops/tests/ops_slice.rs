@@ -33,6 +33,29 @@ fn wsl(p: &std::path::Path) -> String {
     }
 }
 
+/// True when the wrapper-script tests below can actually run here: native
+/// Linux/CI (raw paths work under bash) or Windows with a WSL distro installed
+/// (`wslpath` translates paths). On a Windows host without WSL — git-bash may
+/// still be on PATH but cannot execute these POSIX scripts with Windows paths —
+/// the tests SKIP cleanly instead of failing (same posture as `curl_available`:
+/// an honest environment-gated skip, never a fake pass and never a red suite).
+///
+/// Intended home for these tests: Linux CI / the VPS; on Windows they need WSL.
+fn bash_runner_available() -> bool {
+    if !cfg!(windows) {
+        return std::process::Command::new("bash")
+            .args(["-c", "command -v bash"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+    }
+    std::process::Command::new("bash")
+        .args(["-c", "command -v wslpath"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 // ---- Alert framework (OPS-4, OPS-9) -------------------------------------
 
 #[test]
@@ -674,6 +697,10 @@ fn ops_1_systemd_units_pin_restart_and_resource_limits() {
 
 #[test]
 fn ops_5_restore_drill_script_exists_and_refuses_without_backup() {
+    if !bash_runner_available() {
+        eprintln!("SKIPPED: no WSL/bash runner on this host");
+        return;
+    }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     assert!(
         root.join("restore-drill.sh").exists(),
@@ -783,6 +810,10 @@ fn ops_3_kill_needs_confirm_and_flatten_needs_double_confirm() {
 
 #[test]
 fn ops_5_restore_drill_restores_a_backup_and_verifies() {
+    if !bash_runner_available() {
+        eprintln!("SKIPPED: no WSL/bash runner on this host");
+        return;
+    }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let dir = std::env::temp_dir().join(format!("mpdrill-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -1033,6 +1064,10 @@ fn ops_13_band_accuracy_decay_ignores_healthy_and_young_trends() {
 
 #[test]
 fn ops_13_weekly_wrapper_invokes_decay_check_after_study() {
+    if !bash_runner_available() {
+        eprintln!("SKIPPED: no WSL/bash runner on this host");
+        return;
+    }
     // After the study, `run_whale_study_weekly.sh` runs `mp-ops
     // band-accuracy-decay --trend <out>/band_accuracy.jsonl` on the freshly
     // updated journal (OPS-13). A stub MP_OPS_CMD proves the wiring; a
@@ -2352,6 +2387,10 @@ fn ops_9_mp_ops_decay_telegram_unconfigured_is_gated() {
 
 #[test]
 fn ops_9_weekly_wrapper_batches_and_flushes_decay_telegram() {
+    if !bash_runner_available() {
+        eprintln!("SKIPPED: no WSL/bash runner on this host");
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("mptg9w-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -2411,6 +2450,10 @@ fn ops_9_weekly_wrapper_batches_and_flushes_decay_telegram() {
 
 #[test]
 fn ops_9_weekly_wrapper_warns_on_failed_check_and_never_flushes() {
+    if !bash_runner_available() {
+        eprintln!("SKIPPED: no WSL/bash runner on this host");
+        return;
+    }
     // A FAILED decay check (corrupt journal, exit 2) must surface loudly in
     // stderr and must NEVER gate a batch flush — only a clean verdict does.
     let dir = std::env::temp_dir().join(format!("mptg9f-{}", std::process::id()));
@@ -2488,6 +2531,10 @@ fn ops_9_weekly_wrapper_warns_on_failed_check_and_never_flushes() {
 
 #[test]
 fn liq_10_whale_study_timer_skips_without_logs_and_journals_runs() {
+    if !bash_runner_available() {
+        eprintln!("SKIPPED: no WSL/bash runner on this host");
+        return;
+    }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
 
     // The weekly schedule + skip gate exist and are shaped right (LIQ-10).
@@ -2721,4 +2768,77 @@ fn ops_9_p1_webhook_rejects_non_2xx_sink_response() {
     assert_eq!(out.status.code(), Some(2), "non-2xx must fail closed");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("non-2xx"), "{stderr}");
+}
+
+// ---- INCIDENT 2026-08-22 regression: reader/writer version skew -------------
+//
+// The incident: a deployed mp-ops rejected CURRENT-schema recordings
+// ("legacy_or_malformed: unsupported event schema version 4") while the same
+// deploy's collectors wrote them — every nightly scorecard reported
+// `event_count: 0` for three days while the corpus was healthy. The dead-man
+// only checked that a scorecard EXISTED, so the blind gate never alerted.
+//
+// This test pins the contract that failed: a log written by the current
+// `EventLogWriter` must decode through the same audit surface mp-ops uses and
+// report `event_count > 0`. If a reader/writer split ever ships again, this
+// goes red before the nightly gate can go blind (INCIDENT follow-up #2).
+
+#[test]
+fn regression_incident_2026_08_22_current_schema_log_audits_nonzero() {
+    use mp_core::event::{EventEnvelope, MarketEvent, Side};
+    use mp_core::log::{EventLogWriter, LogReader};
+
+    let root = std::env::temp_dir().join(format!("mpvskew-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let raw_dir = root.join("data").join("raw");
+    std::fs::create_dir_all(&raw_dir).unwrap();
+    let log_path = raw_dir.join("20260822_hyperliquid_BTC.log");
+
+    // Write with the CURRENT writer — the same code path the collectors use:
+    // header + symbol frame + schema-current event frames.
+    let ev = |recv_ns: i64| {
+        EventEnvelope::new(
+            Venue::Hyperliquid,
+            mp_core::SymbolId(0),
+            recv_ns,
+            recv_ns,
+            1,
+            MarketEvent::Trade { price: 100.0, qty: 1.0, side: Side::Buy, trade_id: 0 },
+        )
+    };
+    {
+        let (mut w, _) = EventLogWriter::open(&log_path).unwrap();
+        w.write_symbols(&[]).unwrap();
+        for i in 1..=10i64 {
+            w.append(&ev(i * 1_000_000_000)).unwrap();
+        }
+        w.sync().unwrap();
+    }
+
+    // Shared-reader agreement first: the same LogReader mp-ops links must
+    // decode every frame the current writer produced.
+    let decoded = LogReader::open(&log_path).unwrap().filter_map(|e| e.ok()).count();
+    assert_eq!(decoded, 10, "shared LogReader must decode every written frame");
+
+    // The actual incident surface: `mp-ops audit` on that file must report a
+    // nonzero event_count — never a silent all-zero scorecard input.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
+        .args(["audit", "--date", "20260822", "--venue", "hyperliquid", "--symbol", "BTC"])
+        .current_dir(&root)
+        .output()
+        .expect("run mp-ops audit");
+    assert!(
+        out.status.success(),
+        "audit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("audit stdout not JSON ({e}): {stdout}"));
+    let count = json["event_count"].as_u64().unwrap_or(0);
+    let rejected = stdout.contains("unsupported event schema")
+        || stdout.contains("legacy_or_malformed");
+    assert!(!rejected, "current-schema log rejected by the audit path: {stdout}");
+    assert!(count > 0, "schema-current log audited as ZERO events: {json}");
+    let _ = std::fs::remove_dir_all(&root);
 }

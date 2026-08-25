@@ -13,7 +13,7 @@
 //! KIND-AWARE per the review fix in spec 039 (a 105k call with spot 100k is
 //! OTM; the naive `|K/S − 1|` band misclassifies it).
 
-use crate::options_greeks::{ContractKey, NS_PER_DAY, TickerSnap, YEAR_DAYS};
+use crate::options_greeks::{ContractKey, TickerSnap, NS_PER_DAY, YEAR_DAYS};
 use mp_core::event::{EventEnvelope, MarketEvent, OptionKind, OptionLeg, Side, Venue};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -71,7 +71,12 @@ pub fn moneyness_bucket(
 
 /// Days-to-expiry tenor bucket (OFI-6; boundaries configurable, defaults
 /// 7/45/180).
-pub fn flow_tenor(days: f64, weekly_max: f64, monthly_max: f64, quarterly_max: f64) -> &'static str {
+pub fn flow_tenor(
+    days: f64,
+    weekly_max: f64,
+    monthly_max: f64,
+    quarterly_max: f64,
+) -> &'static str {
     if days <= weekly_max {
         "weekly"
     } else if days <= monthly_max {
@@ -102,13 +107,7 @@ fn norm_cdf(x: f64) -> f64 {
 
 /// Black-Scholes delta fallback (OFI-4) when no ticker delta matches.
 /// `None` when inputs are non-finite, σ ≤ 0, or T ≤ 0 (fail-closed).
-pub fn bs_delta(
-    spot: f64,
-    strike: f64,
-    t_years: f64,
-    iv: f64,
-    kind: OptionKind,
-) -> Option<f64> {
+pub fn bs_delta(spot: f64, strike: f64, t_years: f64, iv: f64, kind: OptionKind) -> Option<f64> {
     if !(spot.is_finite() && strike.is_finite() && t_years.is_finite() && iv.is_finite())
         || spot <= 0.0
         || strike <= 0.0
@@ -226,8 +225,7 @@ impl FlowWindow {
                             self.spot = Some(snap.spot);
                         }
                         if let Some(g) = snap.greeks {
-                            let key =
-                                ContractKey::new(leg.expiry_ts_ns, leg.strike, leg.kind);
+                            let key = ContractKey::new(leg.expiry_ts_ns, leg.strike, leg.kind);
                             if g.delta.is_finite() && g.delta.abs() <= 1.0 {
                                 self.deltas.insert(key, (g.delta, snap.mark_iv));
                             } else {
@@ -241,12 +239,17 @@ impl FlowWindow {
                     }
                 }
             }
-            MarketEvent::OptionTrade { leg, price, qty, side, .. } => {
-                if leg.underlying.eq_ignore_ascii_case(&self.underlying)
-                    && price.is_finite()
-                    && qty.is_finite()
-                    && *qty > 0.0
-                {
+            MarketEvent::OptionTrade {
+                leg,
+                price,
+                qty,
+                side,
+                ..
+            } => {
+                if !leg.underlying.eq_ignore_ascii_case(&self.underlying) {
+                    return rolled;
+                }
+                if price.is_finite() && qty.is_finite() && *qty > 0.0 {
                     rolled = self.on_trade(ev.recv_ts_ns, leg, *price, *qty, *side, ev.venue);
                 }
             }
@@ -311,8 +314,7 @@ impl FlowWindow {
                         .values()
                         .map(|&(_, iv)| iv)
                         .find(|iv| iv.is_finite() && *iv > 0.0);
-                    let t = (leg.expiry_ts_ns - ts_ns).max(0) as f64
-                        / (YEAR_DAYS * NS_PER_DAY);
+                    let t = (leg.expiry_ts_ns - ts_ns).max(0) as f64 / (YEAR_DAYS * NS_PER_DAY);
                     match (self.spot, iv) {
                         (Some(s), Some(iv)) => bs_delta(s, leg.strike, t, iv, leg.kind),
                         _ => None,
@@ -368,9 +370,7 @@ impl FlowWindow {
         let p95 = if sorted.is_empty() {
             0.0
         } else {
-            let idx = ((0.95 * sorted.len() as f64).ceil() as usize)
-                .clamp(1, sorted.len())
-                - 1;
+            let idx = ((0.95 * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len()) - 1;
             sorted[idx]
         };
         let whale_threshold = self.params.whale_floor_usd.max(self.params.k_whale * p95);
@@ -479,12 +479,7 @@ pub struct FlowFeature {
 }
 
 impl FlowFeature {
-    pub fn new(
-        metric: FlowMetric,
-        underlying: &str,
-        window_ns: i64,
-        params: FlowParams,
-    ) -> Self {
+    pub fn new(metric: FlowMetric, underlying: &str, window_ns: i64, params: FlowParams) -> Self {
         Self {
             metric,
             win: FlowWindow::new(underlying, window_ns, params),
@@ -533,9 +528,3 @@ impl crate::engine::TickFeature for FlowFeature {
         self.closed_metric(&closed)
     }
 }
-
-
-
-
-
-

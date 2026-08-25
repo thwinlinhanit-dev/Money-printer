@@ -28,16 +28,38 @@ import os
 import statistics
 import sys
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+)
 SCORECARDS = os.path.join(ROOT, "data", "scorecards")
 
 # Two-tailed critical |r| for p < 0.05, Pearson with df = n - 2.
 # Table: df -> critical |r| (df 1..30; beyond 30 use the 0.349 asymptote).
 CRITICAL_R = {
-    1: 0.997, 2: 0.950, 3: 0.878, 4: 0.811, 5: 0.754, 6: 0.707,
-    7: 0.666, 8: 0.632, 9: 0.602, 10: 0.576, 11: 0.553, 12: 0.532,
-    13: 0.514, 14: 0.497, 15: 0.482, 16: 0.468, 17: 0.456, 18: 0.444,
-    19: 0.433, 20: 0.423, 22: 0.404, 24: 0.388, 26: 0.374, 28: 0.361,
+    1: 0.997,
+    2: 0.950,
+    3: 0.878,
+    4: 0.811,
+    5: 0.754,
+    6: 0.707,
+    7: 0.666,
+    8: 0.632,
+    9: 0.602,
+    10: 0.576,
+    11: 0.553,
+    12: 0.532,
+    13: 0.514,
+    14: 0.497,
+    15: 0.482,
+    16: 0.468,
+    17: 0.456,
+    18: 0.444,
+    19: 0.433,
+    20: 0.423,
+    22: 0.404,
+    24: 0.388,
+    26: 0.374,
+    28: 0.361,
     30: 0.349,
 }
 
@@ -51,14 +73,16 @@ def load_rows():
         for rec in data.get("recordings", []):
             if rec.get("venue") != "hyperliquid":
                 continue
-            rows.append({
-                "day": data["date"],
-                "sym": rec["symbol"],
-                "cov": rec["coverage"],
-                "gap_s": rec.get("worst_gap_ns", 0) / 1e9,
-                "bursts": rec.get("stale_bursts", 0),
-                "clean": rec.get("clean", False),
-            })
+            rows.append(
+                {
+                    "day": data["date"],
+                    "sym": rec["symbol"],
+                    "cov": rec["coverage"],
+                    "gap_s": rec.get("worst_gap_ns", 0) / 1e9,
+                    "bursts": rec.get("stale_bursts", 0),
+                    "clean": rec.get("clean", False),
+                }
+            )
     return rows
 
 
@@ -103,8 +127,12 @@ def critical_r(n):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("-Pairs", action="store_true", help="also print the sorted per-recording table")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "-Pairs", action="store_true", help="also print the sorted per-recording table"
+    )
     args = ap.parse_args()
 
     rows = load_rows()
@@ -113,7 +141,9 @@ def main():
         return 1
 
     n = len(rows)
-    print(f"n = {n} hyperliquid recordings across {len(set(r['day'] for r in rows))} days")
+    print(
+        f"n = {n} hyperliquid recordings across {len(set(r['day'] for r in rows))} days"
+    )
     crit = critical_r(n)
     print(f"critical |r| for p<0.05 at df={n - 2}: {crit:.3f}\n")
 
@@ -134,7 +164,9 @@ def main():
         print("\nPer-recording table (sorted by worst_gap):")
         for r in sorted(rows, key=lambda r: r["gap_s"]):
             state = "CLEAN" if r["clean"] else "dirty"
-            print(f"  {r['day']} {r['sym']:<3} gap={r['gap_s']:5.0f}s bursts={r['bursts']:2d} cov={r['cov']:.4f} {state}")
+            print(
+                f"  {r['day']} {r['sym']:<3} gap={r['gap_s']:5.0f}s bursts={r['bursts']:2d} cov={r['cov']:.4f} {state}"
+            )
     return 0
 
 

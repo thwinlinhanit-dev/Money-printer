@@ -18,6 +18,7 @@ pub mod dataset;
 pub mod determinism;
 pub mod feature_store;
 pub mod historical;
+pub mod ibit_leadlag;
 pub mod layout;
 pub mod manifest;
 pub mod materialize;

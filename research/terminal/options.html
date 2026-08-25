@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Options Analytics Terminal — Freebuff</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2129;
+    --border: #30363d; --text: #e6edf3; --dim: #8b949e;
+    --up: #3fb950; --down: #f85149; --gold: #e3b341;
+    --purple: #a371f7; --cyan: #58a6ff; --orange: #d29922;
+    --red-bg: rgba(248,81,73,0.12); --green-bg: rgba(63,185,80,0.12);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 -apple-system, "Segoe UI", Roboto, monospace; }
+  /* --- NAV --- */
+  nav { display: flex; gap: 0; background: var(--panel); border-bottom: 1px solid var(--border); height: 40px; align-items: stretch; }
+  nav .brand { padding: 0 14px; display: flex; align-items: center; font-weight: 700; font-size: 14px; color: var(--gold); border-right: 1px solid var(--border); white-space: nowrap; }
+  nav .assets { display: flex; gap: 0; }
+  nav .assets a { padding: 0 12px; display: flex; align-items: center; color: var(--dim); text-decoration: none; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; border-right: 1px solid var(--border); transition: color .15s, background .15s; }
+  nav .assets a:hover { color: var(--text); background: var(--panel2); }
+  nav .assets a.active { color: var(--gold); background: var(--panel2); }
+  nav .status { margin-left: auto; padding: 0 14px; display: flex; align-items: center; font-size: 11px; color: var(--dim); gap: 12px; }
+  nav .status .spot { font-size: 13px; font-weight: 700; color: var(--text); }
+  nav .status .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  nav .status .dot.ok { background: var(--up); }
+  nav .status .dot.err { background: var(--down); }
+  /* --- METRIC CARDS --- */
+  .metrics { display: flex; gap: 8px; padding: 8px 12px; flex-wrap: wrap; }
+  .metric { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 14px; min-width: 120px; flex: 1; }
+  .metric .label { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+  .metric .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+  .metric .sub { font-size: 10px; color: var(--dim); margin-top: 1px; }
+  /* --- GRID --- */
+  .grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 8px; padding: 8px 12px; height: calc(100% - 40px - 52px - 40px); min-height: 400px; }
+  .pane { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+  .pane .label { padding: 6px 10px; color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border); flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; }
+  .pane canvas { flex: 1; width: 100%; min-height: 0; }
+  .pane .body { flex: 1; overflow-y: auto; padding: 8px; font-size: 12px; }
+  /* --- TAPE TABLE --- */
+  .tape { width: 100%; border-collapse: collapse; }
+  .tape td { padding: 2px 6px; font-size: 11px; font-family: monospace; }
+  .tape .time { color: var(--dim); }
+  .tape .buy { color: var(--up); }
+  .tape .sell { color: var(--down); }
+  .tape .block { background: var(--gold); color: var(--bg); border-radius: 2px; padding: 0 3px; font-size: 9px; }
+  /* --- STALE BANNER --- */
+  .stale-banner { background: var(--red-bg); border: 1px solid var(--down); border-radius: 6px; padding: 6px 12px; margin: 4px 12px; font-size: 11px; color: var(--down); display: none; }
+  .stale-banner.show { display: flex; align-items: center; gap: 8px; }
+  /* --- TAB BAR --- */
+  .tabs { display: flex; gap: 0; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--border); height: 32px; align-items: stretch; overflow-x: auto; }
+  .tabs a { padding: 0 14px; display: flex; align-items: center; color: var(--dim); text-decoration: none; font-size: 11px; font-weight: 500; border-bottom: 2px solid transparent; transition: all .15s; white-space: nowrap; }
+  .tabs a:hover { color: var(--text); }
+  .tabs a.active { color: var(--cyan); border-bottom-color: var(--cyan); }
+  /* --- RESPONSIVE --- */
+  @media (max-width: 768px) { .grid { grid-template-columns: 1fr; grid-template-rows: auto; height: auto; } .metric { min-width: 80px; } }
+</style>
+</head>
+<body>
+  <nav>
+    <div class="brand">🐒 Options Terminal</div>
+    <div class="assets" id="assetNav">
+      <a href="#btc" data-asset="btc" class="active">BTC</a>
+      <a href="#eth" data-asset="eth">ETH</a>
+      <a href="#sol" data-asset="sol">SOL</a>
+      <a href="#avax" data-asset="avax">AVAX</a>
+      <a href="#xrp" data-asset="xrp">XRP</a>
+      <a href="#zec" data-asset="zec">ZEC</a>
+    </div>
+    <div class="status">
+      <span class="spot" id="navSpot">—</span>
+      <span id="navIV" style="color:var(--purple)">IV —</span>
+      <span id="navGEX" style="color:var(--cyan)">GEX —</span>
+      <span><span class="dot ok" id="wsDot"></span> <span id="wsLabel">connecting</span></span>
+    </div>
+  </nav>
+
+  <div class="stale-banner" id="staleBanner">
+    ⚠ Stale data — last update <span id="staleTime">—</span>. Reconnecting…
+  </div>
+
+  <div class="metrics" id="metricCards">
+    <div class="metric"><div class="label">Spot</div><div class="value" id="mSpot">—</div><div class="sub" id="mSpotSub"></div></div>
+    <div class="metric"><div class="label">ATM IV</div><div class="value" id="mIV" style="color:var(--purple)">—</div><div class="sub" id="mIVSub"></div></div>
+    <div class="metric"><div class="label">Net GEX</div><div class="value" id="mGEX">—</div><div class="sub" id="mGEXSub"></div></div>
+    <div class="metric"><div class="label">Max Pain</div><div class="value" id="mPain" style="color:var(--orange)">—</div><div class="sub" id="mPainSub"></div></div>
+    <div class="metric"><div class="label">VRP</div><div class="value" id="mVRP">—</div><div class="sub" id="mVRPSub"></div></div>
+    <div class="metric"><div class="label">Vol Regime</div><div class="value" id="mRegime">—</div><div class="sub" id="mRegimeSub"></div></div>
+    <div class="metric"><div class="label">Skew (25Δ RR)</div><div class="value" id="mSkew">—</div><div class="sub" id="mSkewSub"></div></div>
+    <div class="metric"><div class="label">Net Δ</div><div class="value" id="mDelta">—</div><div class="sub" id="mDeltaSub"></div></div>
+  </div>
+
+  <div class="tabs">
+    <a href="#" class="active" data-page="dashboard">Dashboard</a>
+    <a href="#" data-page="greeks">Greeks</a>
+    <a href="#" data-page="flow">Options Flow</a>
+    <a href="#" data-page="term">Term Structure</a>
+    <a href="#" data-page="heatmap">GEX Heatmap</a>
+  </div>
+
+  <div class="grid" id="mainGrid">
+    <!-- GEX Profile (top-left) -->
+    <div class="pane" id="gexPane">
+      <div class="label"><span>GEX Profile</span><span id="gexLabel" style="font-size:10px"></span></div>
+      <canvas id="gexCanvas"></canvas>
+    </div>
+    <!-- Term Structure (top-right) -->
+    <div class="pane" id="termPane">
+      <div class="label"><span>IV Term Structure</span><span id="termLabel" style="font-size:10px"></span></div>
+      <canvas id="termCanvas"></canvas>
+    </div>
+    <!-- Flow / Greeks (bottom-left) -->
+    <div class="pane" id="flowPane">
+      <div class="label"><span>Options Flow (24h)</span><span id="flowLabel" style="font-size:10px"></span></div>
+      <canvas id="flowCanvas"></canvas>
+    </div>
+    <!-- Trade Tape (bottom-right) -->
+    <div class="pane" id="tapePane">
+      <div class="label"><span>Recent Trades</span><span id="tapeCount" style="font-size:10px">0 trades</span></div>
+      <div class="body" id="tapeBody">
+        <div style="color:var(--dim);text-align:center;padding:40px 0;">Waiting for data…</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+"use strict";
+
+// ─── State ───
+const S = {
+  asset: "btc",
+  ws: null, wsReconnectTimer: null, wsConnected: false,
+  lastUpdate: 0,
+  // Feature values (keyed by feature_id)
+  features: {},
+  // GEX profile: [{strike, gex}]
+  gexProfile: [],
+  // Term structure: [{tenor, iv}]
+  termStructure: [],
+  // Recent trades: [{ts, price, qty, side, strike, kind, block}]
+  trades: [],
+  // Flow aggregates
+  flow: { npf: 0, block: 0, netDelta: 0, callPutRatio: 0, whaleNet: 0 },
+};
+
+const UNDERLYINGS = { btc: "BTC", eth: "ETH", sol: "SOL", avax: "AVAX", xrp: "XRP", zec: "ZEC" };
+
+// ─── WebSocket ───
+function wsUrl() {
+  const loc = window.location;
+  const proto = loc.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${loc.hostname}:8787/ws`;
+}
+
+function connectWs() {
+  if (S.ws) { try { S.ws.close(); } catch(_){} }
+  const dot = document.getElementById("wsDot");
+  const label = document.getElementById("wsLabel");
+  dot.className = "dot"; label.textContent = "connecting";
+  try {
+    S.ws = new WebSocket(wsUrl());
+    S.ws.onopen = () => {
+      S.wsConnected = true;
+      dot.className = "dot ok"; label.textContent = "live";
+      document.getElementById("staleBanner").classList.remove("show");
+      // Subscribe to this asset's features
+      S.ws.send(JSON.stringify({ type: "subscribe", asset: S.asset }));
+    };
+    S.ws.onmessage = (e) => { try { handleMessage(JSON.parse(e.data)); } catch(_){} };
+    S.ws.onclose = () => {
+      S.wsConnected = false;
+      dot.className = "dot err"; label.textContent = "disconnected";
+      showStale();
+      S.wsReconnectTimer = setTimeout(connectWs, 3000 + Math.random() * 2000);
+    };
+    S.ws.onerror = () => {};
+  } catch(_) {
+    dot.className = "dot err"; label.textContent = "error";
+    showStale();
+    S.wsReconnectTimer = setTimeout(connectWs, 5000);
+  }
+}
+
+function showStale() {
+  const b = document.getElementById("staleBanner");
+  b.classList.add("show");
+  if (S.lastUpdate > 0) {
+    document.getElementById("staleTime").textContent = new Date(S.lastUpdate).toLocaleTimeString();
+  }
+}
+
+function handleMessage(msg) {
+  if (msg.type === "batch" && msg.updates) {
+    for (const u of msg.updates) applyUpdate(u);
+  } else if (msg.type === "feature") {
+    applyUpdate(msg);
+  } else if (msg.type === "gex_profile") {
+    S.gexProfile = msg.strikes || [];
+    renderGex();
+  } else if (msg.type === "term_structure") {
+    S.termStructure = msg.tenors || [];
+    renderTerm();
+  } else if (msg.type === "trade") {
+    addTrade(msg);
+  }
+  S.lastUpdate = Date.now();
+  renderMetrics();
+}
+
+function applyUpdate(u) {
+  S.features[u.feature_id] = { value: u.value, ts: u.ts_ns || Date.now() * 1e6 };
+  // Update GEX profile entries
+  if (u.feature_id && u.feature_id.startsWith("gex.strike.")) {
+    const strike = parseFloat(u.feature_id.split(".")[2]);
+    if (!isNaN(strike)) {
+      let existing = S.gexProfile.find(g => g.strike === strike);
+      if (existing) existing.gex = u.value;
+      else S.gexProfile.push({ strike, gex: u.value });
+      S.gexProfile.sort((a, b) => a.strike - b.strike);
+      renderGex();
+    }
+  }
+}
+
+function addTrade(t) {
+  S.trades.unshift({
+    ts: t.ts_ns || Date.now() * 1e6,
+    price: t.price, qty: t.qty, side: t.side,
+    strike: t.strike, kind: t.kind, block: t.block || false
+  });
+  if (S.trades.length > 200) S.trades.length = 200;
+  renderTape();
+}
+
+// ─── Metrics ───
+function renderMetrics() {
+  const f = S.features;
+  const fmt = (v, d=2) => v != null ? Number(v).toFixed(d) : "—";
+  const fmtK = (v) => {
+    if (v == null) return "—";
+    const n = Number(v);
+    if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(2) + "M";
+    if (Math.abs(n) >= 1e3) return (n/1e3).toFixed(1) + "K";
+    return n.toFixed(2);
+  };
+
+  // Spot
+  const spot = f["gex.net." + S.asset]?.value;
+  const ivAtm = f["iv.atm." + S.asset]?.value;
+  const gexNet = f["gex.net." + S.asset]?.value;
+  const maxPain = f["gex.max_pain." + S.asset]?.value;
+  const regime = f["iv.regime." + S.asset]?.value;
+  const skew = f["iv.skew." + S.asset + ".rr25"]?.value;
+  const netDelta = f["net.delta." + S.asset]?.value;
+
+  // Get spot from ticker data
+  const spotVal = findSpot();
+  document.getElementById("mSpot").textContent = spotVal != null ? "$" + fmt(spotVal, spotVal > 100 ? 1 : 4) : "—";
+  document.getElementById("mIV").textContent = ivAtm != null ? fmt(ivAtm * 100, 1) + "%" : "—";
+  document.getElementById("mGEX").textContent = gexNet != null ? fmtK(gexNet) : "—";
+  document.getElementById("mGEX").style.color = gexNet > 0 ? "var(--up)" : gexNet < 0 ? "var(--down)" : "var(--text)";
+  document.getElementById("mPain").textContent = maxPain != null ? "$" + fmt(maxPain, maxPain > 100 ? 1 : 4) : "—";
+  document.getElementById("mRegime").textContent = regime != null ? ["Rich", "Fair", "Cheap"][regime] : "—";
+  document.getElementById("mRegime").style.color = regime === 0 ? "var(--down)" : regime === 2 ? "var(--up)" : "var(--text)";
+  document.getElementById("mSkew").textContent = skew != null ? fmt(skew * 100, 1) + "pts" : "—";
+  document.getElementById("mSkew").style.color = skew < 0 ? "var(--down)" : skew > 0 ? "var(--up)" : "var(--text)";
+  document.getElementById("mDelta").textContent = netDelta != null ? fmtK(netDelta) : "—";
+  document.getElementById("mDelta").style.color = netDelta > 0 ? "var(--up)" : netDelta < 0 ? "var(--down)" : "var(--text)";
+
+  // Nav bar
+  document.getElementById("navSpot").textContent = spotVal != null ? "$" + fmt(spotVal, spotVal > 100 ? 1 : 4) : "";
+  document.getElementById("navIV").textContent = ivAtm != null ? "IV " + fmt(ivAtm * 100, 1) + "%" : "";
+  document.getElementById("navGEX").textContent = gexNet != null ? "GEX " + fmtK(gexNet) : "";
+}
+
+function findSpot() {
+  // The spot price is embedded in the latest OptionTicker events
+  // We look for it in the gex profile context or use a known feature
+  for (const [k, v] of Object.entries(S.features)) {
+    if (k.startsWith("gex.max_pain.")) return null; // not spot
+  }
+  // If we have max_pain, use it as a rough reference; otherwise return null
+  // In production the server pushes spot directly
+  return S.features["spot." + S.asset]?.value ?? S.features["gex.max_pain." + S.asset]?.value ?? null;
+}
+
+// ─── Canvas Rendering ───
+const PAD = { l: 70, r: 14, t: 8, b: 24 };
+
+function setupCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const labelH = canvas.parentElement.querySelector(".label")?.offsetHeight || 0;
+  const w = rect.width;
+  const h = rect.height - labelH;
+  canvas.width = Math.max(1, Math.floor(w * dpr));
+  canvas.height = Math.max(1, Math.floor(h * dpr));
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
+function clearCanvas(canvas) {
+  const { ctx, w, h } = setupCanvas(canvas);
+  ctx.fillStyle = "#161b22";
+  ctx.fillRect(0, 0, w, h);
+  return { ctx, w, h };
+}
+
+// ─── GEX Profile ───
+function renderGex() {
+  const canvas = document.getElementById("gexCanvas");
+  const profile = S.gexProfile;
+  if (!profile.length) {
+    const { ctx, w, h } = clearCanvas(canvas);
+    ctx.fillStyle = "#8b949e"; ctx.font = "12px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("Waiting for GEX data…", w / 2, h / 2);
+    return;
+  }
+  const { ctx, w, h } = clearCanvas(canvas);
+  const innerW = w - PAD.l - PAD.r, innerH = h - PAD.t - PAD.b;
+  const strikes = profile.map(p => p.strike);
+  const gexVals = profile.map(p => p.gex);
+  const maxAbs = Math.max(...gexVals.map(Math.abs), 1e-9);
+  const minStrike = Math.min(...strikes), maxStrike = Math.max(...strikes);
+  const strikeRange = maxStrike - minStrike || 1;
+  const barH = Math.max(2, Math.min(14, innerH / profile.length * 0.7));
+
+  // Zero line
+  const zeroX = PAD.l + innerW / 2;
+  ctx.strokeStyle = "#30363d"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(zeroX, PAD.t); ctx.lineTo(zeroX, h - PAD.b); ctx.stroke();
+
+  // Grid lines
+  ctx.strokeStyle = "#21262d"; ctx.fillStyle = "#8b949e"; ctx.font = "9px monospace";
+  for (let i = 0; i <= 4; i++) {
+    const x = PAD.l + innerW * i / 4;
+    ctx.beginPath(); ctx.moveTo(x, PAD.t); ctx.lineTo(x, h - PAD.b); ctx.stroke();
+    const val = (-maxAbs + 2 * maxAbs * i / 4);
+    ctx.textAlign = "center"; ctx.fillText(fmtShort(val), x, h - 6);
+  }
+
+  // Bars
+  for (let i = 0; i < profile.length; i++) {
+    const p = profile[i];
+    const y = PAD.t + ((p.strike - minStrike) / strikeRange) * innerH;
+    const barW = (p.gex / maxAbs) * (innerW / 2);
+    ctx.fillStyle = p.gex >= 0 ? "rgba(63,185,80,0.7)" : "rgba(248,81,73,0.7)";
+    if (p.gex >= 0) {
+      ctx.fillRect(zeroX, y - barH / 2, barW, barH);
+    } else {
+      ctx.fillRect(zeroX + barW, y - barH / 2, -barW, barH);
+    }
+    // Strike label
+    if (i % Math.max(1, Math.floor(profile.length / 12)) === 0) {
+      ctx.fillStyle = "#8b949e"; ctx.font = "9px monospace"; ctx.textAlign = "right";
+      ctx.fillText(fmtStrike(p.strike), PAD.l - 4, y + 3);
+    }
+  }
+
+  // Max pain line
+  const maxPain = S.features["gex.max_pain." + S.asset]?.value;
+  if (maxPain && maxPain >= minStrike && maxPain <= maxStrike) {
+    const mpY = PAD.t + ((maxPain - minStrike) / strikeRange) * innerH;
+    ctx.strokeStyle = "#d29922"; ctx.setLineDash([4, 3]); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(PAD.l, mpY); ctx.lineTo(w - PAD.r, mpY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#d29922"; ctx.font = "9px sans-serif"; ctx.textAlign = "left";
+    ctx.fillText("Max Pain " + fmtStrike(maxPain), w - PAD.r - 80, mpY - 4);
+  }
+
+  document.getElementById("gexLabel").textContent = profile.length + " strikes";
+}
+
+// ─── Term Structure ───
+function renderTerm() {
+  const canvas = document.getElementById("termCanvas");
+  const data = S.termStructure;
+  if (!data.length) {
+    // Build from features
+    const tenors = ["1w", "1m", "3m", "6m"];
+    const built = tenors.map(t => {
+      const v = S.features["iv.term." + S.asset + "." + t]?.value;
+      return v != null ? { tenor: t, iv: v } : null;
+    }).filter(Boolean);
+    if (built.length) { renderTermData(canvas, built); return; }
+    const { ctx, w, h } = clearCanvas(canvas);
+    ctx.fillStyle = "#8b949e"; ctx.font = "12px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("Waiting for IV term data…", w / 2, h / 2);
+    return;
+  }
+  renderTermData(canvas, data);
+}
+
+function renderTermData(canvas, data) {
+  const { ctx, w, h } = clearCanvas(canvas);
+  const innerW = w - PAD.l - PAD.r, innerH = h - PAD.t - PAD.b;
+  const ivs = data.map(d => d.iv);
+  const minIV = Math.min(...ivs) * 0.95;
+  const maxIV = Math.max(...ivs) * 1.05;
+  const ivRange = maxIV - minIV || 0.01;
+
+  // Grid
+  ctx.strokeStyle = "#21262d"; ctx.fillStyle = "#8b949e"; ctx.font = "10px monospace";
+  for (let i = 0; i <= 4; i++) {
+    const y = PAD.t + innerH * i / 4;
+    ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(w - PAD.r, y); ctx.stroke();
+    const val = maxIV - ivRange * i / 4;
+    ctx.textAlign = "right"; ctx.fillText((val * 100).toFixed(1) + "%", PAD.l - 4, y + 3);
+  }
+
+  // Line
+  ctx.strokeStyle = "#a371f7"; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    const x = PAD.l + (data.length <= 1 ? innerW / 2 : i * innerW / (data.length - 1));
+    const y = PAD.t + ((maxIV - data[i].iv) / ivRange) * innerH;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Dots + labels
+  for (let i = 0; i < data.length; i++) {
+    const x = PAD.l + (data.length <= 1 ? innerW / 2 : i * innerW / (data.length - 1));
+    const y = PAD.t + ((maxIV - data[i].iv) / ivRange) * innerH;
+    ctx.fillStyle = "#a371f7";
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#e6edf3"; ctx.font = "10px monospace"; ctx.textAlign = "center";
+    ctx.fillText((data[i].iv * 100).toFixed(1) + "%", x, y - 8);
+    ctx.fillStyle = "#8b949e"; ctx.font = "9px sans-serif";
+    ctx.fillText(data[i].tenor, x, h - 6);
+  }
+
+  document.getElementById("termLabel").textContent = data.length + " tenors";
+}
+
+// ─── Flow Canvas ───
+function renderFlow() {
+  const canvas = document.getElementById("flowCanvas");
+  const { ctx, w, h } = clearCanvas(canvas);
+  const innerW = w - PAD.l - PAD.r, innerH = h - PAD.t - PAD.b;
+
+  const flow = S.flow;
+  const metrics = [
+    { label: "Net Premium", value: flow.npf, fmt: fmtShort },
+    { label: "Block Flow", value: flow.block, fmt: fmtShort },
+    { label: "Net Delta", value: flow.netDelta, fmt: fmtShort },
+    { label: "Call/Put", value: flow.callPutRatio, fmt: v => v ? v.toFixed(2) : "—" },
+    { label: "Whale Net", value: flow.whaleNet, fmt: fmtShort },
+  ];
+
+  const barW = Math.min(80, innerW / metrics.length - 12);
+  const maxVal = Math.max(...metrics.map(m => Math.abs(m.value || 0)), 1e-9);
+
+  for (let i = 0; i < metrics.length; i++) {
+    const m = metrics[i];
+    const cx = PAD.l + (i + 0.5) * innerW / metrics.length;
+    const val = m.value || 0;
+    const barH = (Math.abs(val) / maxVal) * (innerH * 0.5);
+    const mid = PAD.t + innerH * 0.6;
+    const color = val >= 0 ? "rgba(63,185,80,0.7)" : "rgba(248,81,73,0.7)";
+
+    ctx.fillStyle = color;
+    if (val >= 0) {
+      ctx.fillRect(cx - barW / 2, mid - barH, barW, barH);
+    } else {
+      ctx.fillRect(cx - barW / 2, mid, barW, barH);
+    }
+
+    // Label
+    ctx.fillStyle = "#8b949e"; ctx.font = "9px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(m.label, cx, h - 6);
+
+    // Value
+    ctx.fillStyle = "#e6edf3"; ctx.font = "10px monospace";
+    ctx.fillText(m.fmt(val), cx, PAD.t + 12);
+  }
+
+  // Zero line
+  ctx.strokeStyle = "#30363d"; ctx.lineWidth = 1;
+  const mid = PAD.t + innerH * 0.6;
+  ctx.beginPath(); ctx.moveTo(PAD.l, mid); ctx.lineTo(w - PAD.r, mid); ctx.stroke();
+}
+
+// ─── Trade Tape ───
+function renderTape() {
+  const body = document.getElementById("tapeBody");
+  const trades = S.trades.slice(0, 50);
+  if (!trades.length) {
+    body.innerHTML = '<div style="color:var(--dim);text-align:center;padding:40px 0;">Waiting for trade data…</div>';
+    document.getElementById("tapeCount").textContent = "0 trades";
+    return;
+  }
+  let html = '<table class="tape">';
+  for (const t of trades) {
+    const time = new Date(t.ts / 1e6).toLocaleTimeString();
+    const cls = t.side === "buy" ? "buy" : "sell";
+    const blockTag = t.block ? ' <span class="block">BLK</span>' : '';
+    html += `<tr>
+      <td class="time">${time}</td>
+      <td class="${cls}">${fmtStrike(t.strike || 0)}</td>
+      <td>${t.kind || "—"}</td>
+      <td class="${cls}">$${(t.price || 0).toFixed(2)}</td>
+      <td>${(t.qty || 0).toFixed(2)}</td>
+      <td class="${cls}">${fmtShort((t.price || 0) * (t.qty || 0))}</td>
+      <td>${blockTag}</td>
+    </tr>`;
+  }
+  html += "</table>";
+  body.innerHTML = html;
+  document.getElementById("tapeCount").textContent = trades.length + " trades";
+}
+
+// ─── Helpers ───
+function fmtStrike(v) {
+  return v >= 1000 ? v.toFixed(0) : v >= 100 ? v.toFixed(1) : v.toFixed(2);
+}
+function fmtShort(v) {
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return n.toFixed(2);
+}
+
+// ─── Asset Navigation ───
+function setAsset(asset) {
+  S.asset = asset;
+  S.features = {}; S.gexProfile = []; S.termStructure = []; S.trades = [];
+  S.flow = { npf: 0, block: 0, netDelta: 0, callPutRatio: 0, whaleNet: 0 };
+  document.querySelectorAll(".assets a").forEach(a => {
+    a.classList.toggle("active", a.dataset.asset === asset);
+  });
+  renderAll();
+  if (S.ws && S.ws.readyState === 1) {
+    S.ws.send(JSON.stringify({ type: "subscribe", asset }));
+  }
+}
+
+// ─── REST Fallback (load from termd API) ───
+async function loadFromServer() {
+  // Try to load feature data from the termd REST API
+  const base = `http://${window.location.hostname}:8787`;
+  try {
+    const r = await fetch(`${base}/v1/options?asset=${S.asset}`);
+    if (r.ok) {
+      const data = await r.json();
+      if (data.gex_profile) S.gexProfile = data.gex_profile;
+      if (data.term_structure) S.termStructure = data.term_structure;
+      if (data.trades) S.trades = data.trades;
+      if (data.features) Object.assign(S.features, data.features);
+      if (data.flow) S.flow = data.flow;
+      renderAll();
+    }
+  } catch(_) {}
+}
+
+// ─── Render All ───
+function renderAll() {
+  renderMetrics(); renderGex(); renderTerm(); renderFlow(); renderTape();
+}
+
+// ─── Init ───
+window.addEventListener("resize", renderAll);
+document.addEventListener("DOMContentLoaded", () => {
+  // Asset nav
+  document.querySelectorAll(".assets a").forEach(a => {
+    a.addEventListener("click", (e) => { e.preventDefault(); setAsset(a.dataset.asset); });
+  });
+  // Hash routing
+  const hash = window.location.hash.replace("#", "");
+  if (UNDERLYINGS[hash]) setAsset(hash);
+  window.addEventListener("hashchange", () => {
+    const h = window.location.hash.replace("#", "");
+    if (UNDERLYINGS[h] && h !== S.asset) setAsset(h);
+  });
+
+  // Connect
+  connectWs();
+  // Also try REST fallback
+  loadFromServer();
+  // Periodic REST poll (for when WS is down)
+  setInterval(() => { if (!S.wsConnected) loadFromServer(); }, 5000);
+});
+</script>
+</body>
+</html>

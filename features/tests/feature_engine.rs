@@ -1125,7 +1125,7 @@ fn slq_engine_from_config_registers_sweep_and_profile_family() {
         "#,
     )
     .unwrap();
-    let mut e = mp_features::engine_from_config(&cfg).unwrap();
+    let e = mp_features::engine_from_config(&cfg).unwrap();
     // The whole SLQ family must register: ATR, close passthrough, both range
     // boundaries, the four sweep event streams, and the four nearest-level
     // streams (FEA-4 one-code-path: live and materialized share these ids).

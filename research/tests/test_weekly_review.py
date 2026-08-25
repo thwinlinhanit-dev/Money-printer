@@ -95,13 +95,49 @@ def test_week_runs_windows_by_as_of(tmp_path):
     assert dict(by_kind) == {"feasibility": 1}
 
 
+def _policy(tmp_path, *, complete=True) -> str:
+    """Minimal OWNER_POLICY.md §3 stand-in for hermetic tests."""
+    rows = [
+        "| Primary benchmark | **Buy-and-hold BTC** over identical windows |",
+        "| Comparison window | trailing 90 days |",
+        "| Acceptance rule | rolling 6-month expectancy > 0 after all costs AND >= benchmark |",
+    ]
+    if not complete:
+        rows = rows[:2]  # drop Acceptance rule -> must fail closed
+    p = tmp_path / "OWNER_POLICY.md"
+    p.write_text("\n".join(["## 3. Benchmark", "", "| Item | Decision |", "|---|---|"] + rows) + "\n", encoding="utf-8")
+    return str(p)
+
+
+def test_load_benchmark_parses_fields(tmp_path):
+    bench = wr.load_benchmark(_policy(tmp_path))
+    assert bench is not None
+    assert "Buy-and-hold BTC" in bench["primary"]
+    assert "90 days" in bench["window"]
+    assert ">= benchmark" in bench["acceptance"]
+
+
+def test_load_benchmark_fails_closed(tmp_path):
+    assert wr.load_benchmark(tmp_path / "missing.md") is None
+    assert wr.load_benchmark(_policy(tmp_path, complete=False)) is None
+
+
 def test_render_includes_benchmark_registry_and_runs(tmp_path):
     runs, reg = _setup(tmp_path)
-    report = wr.render("2026-W34", reg, runs, tmp_path / "autopsies")
-    assert "unset (1.1 pending)" in report
+    report = wr.render("2026-W34", reg, runs, tmp_path / "autopsies", _policy(tmp_path))
+    assert "- primary: **Buy-and-hold BTC**" in report
+    assert "source: docs/OWNER_POLICY.md §3" in report
+    assert "unset (1.1 pending)" not in report
     assert "| a-v1 |" in report
     assert "| feasibility-2026-08-19-funding-arb-v1 |" in report
     assert "Human notes" in report
+
+
+def test_render_benchmark_unset_without_policy(tmp_path):
+    runs, reg = _setup(tmp_path)
+    missing = tmp_path / "no" / "policy.md"
+    report = wr.render("2026-W34", reg, runs, tmp_path / "autopsies", missing)
+    assert "unset (1.1 pending)" in report
 
 
 def test_render_lists_autopsies(tmp_path):
@@ -121,46 +157,28 @@ def test_cli_append_only_and_bad_week_exit_2(tmp_path):
     runs, reg = _setup(tmp_path)
     script = Path(__file__).resolve().parents[1] / "run_weekly_review.py"
     out = tmp_path / "reviews"
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(script),
-            "--week",
-            "2026-W34",
-            "--registry",
-            reg,
-            "--runs",
-            runs,
-            "--out-dir",
-            str(out),
-            "--autopsies",
-            str(tmp_path / "autopsies"),
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    policy = _policy(tmp_path)
+    base_cmd = [
+        sys.executable,
+        str(script),
+        "--week",
+        "2026-W34",
+        "--registry",
+        reg,
+        "--runs",
+        runs,
+        "--out-dir",
+        str(out),
+        "--autopsies",
+        str(tmp_path / "autopsies"),
+        "--policy",
+        policy,
+    ]
+    result = subprocess.run(base_cmd, text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
-    assert (out / "2026-W34.md").exists()
-    again = subprocess.run(
-        [
-            sys.executable,
-            str(script),
-            "--week",
-            "2026-W34",
-            "--registry",
-            reg,
-            "--runs",
-            runs,
-            "--out-dir",
-            str(out),
-            "--autopsies",
-            str(tmp_path / "autopsies"),
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    written = (out / "2026-W34.md").read_text(encoding="utf-8")
+    assert "- primary:" in written
+    again = subprocess.run(base_cmd, text=True, capture_output=True, check=False)
     assert again.returncode == 2
     assert "already exists" in again.stderr
     bad = subprocess.run(

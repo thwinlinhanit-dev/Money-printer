@@ -29,6 +29,11 @@ pub enum Venue {
     /// events. Appended (schema 3→4) so old bincode frames keep their
     /// variant indices (CONV-20).
     Ethereum,
+    /// CBOE (spec 040 IBIT ETF options). Envelope venue for the IBIT
+    /// options chain recorder (`mp-ibit`); delayed public tape, no auth.
+    /// Appended (schema 4→5) so old bincode frames keep their variant
+    /// indices (CONV-20).
+    Cboe,
 }
 
 impl Venue {
@@ -44,6 +49,7 @@ impl Venue {
             Venue::Deribit => "deribit",
             Venue::Fred => "fred",
             Venue::Ethereum => "ethereum",
+            Venue::Cboe => "cboe",
         }
     }
 
@@ -61,6 +67,7 @@ impl Venue {
             "deribit" => Venue::Deribit,
             "fred" => Venue::Fred,
             "ethereum" => Venue::Ethereum,
+            "cboe" => Venue::Cboe,
             _ => return None,
         })
     }

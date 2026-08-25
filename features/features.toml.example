@@ -104,9 +104,20 @@ sweep_atr_mult = 0.1      # wick must clear boundary by >= mult × baseline ATR
 sweep_reclaim_z = 2       # closes back inside allowed within z bars
 sweep_vol_mult = 1.5      # sweep-bar volume >= mult × window mean
 sweep_stop_buffer_atr = 0.5 # invalidation = extreme ∓ buffer × ATR (carried on the event)
-profile_window = 90       # HVN/LVN lookback (bars)
-profile_hvn_frac = 0.7    # local maxima above this fraction of POC volume
-profile_lvn_frac = 0.3    # local minima below this fraction of POC volume
+profile_window = 90        # HVN/LVN lookback (bars)
+profile_hvn_frac = 0.7     # local maxima above this fraction of POC volume
+profile_lvn_frac = 0.3     # local minima below this fraction of POC volume
+# Spec 036 §7 confluence: POC-flip acceptance + A/D classifier windows.
+poc_flip_n = 3             # closes on the far side (<=1 back across) to confirm a flip
+ad_k_windows = 3           # near-VAL/VAH volume ratio compares last K vs prior K bars
+# IBIT <-> Deribit cross-market family (spec 040). Disabled by default;
+# set deriv_underlying to enable (divergence + flow lead-lag lags 0..2).
+[ibit_cross]
+deriv_underlying = "BTC"
+ibit_underlying = "IBIT"
+min_overlap_days = 5
+ibit_multiplier = 100.0
+hist_days = 90
 
 [options_greeks]
 # Options chain Greeks aggregation (spec 037 GRE) — global features
@@ -157,3 +168,51 @@ otm_cap = 0.50
 weekly_max_days = 7.0
 monthly_max_days = 45.0
 quarterly_max_days = 180.0
+
+[cohort]
+# Wallet cohort grading (spec 042 WCG). All four live aggregates register
+# when enabled: cohort.whale_ratio, cohort.net_delta.{cohort},
+# cohort.smart_flow.{w}, cohort.concentration. Fail-closed (WCG-8): with no
+# snapshot loaded every cohort.* feature emits None.
+enabled = false
+# snapshot_path = "data/cohorts/2026-08-23.json"  # weekly scorer output
+[cohort.inner]
+smart_flow_window_ns = 86400000000000  # 24h -> feature id cohort.smart_flow.24h
+snapshot_max_age_ns = 604800000000000  # 7d staleness cap for live features
+
+[netflow_flow]
+# CEX flow velocity (spec 043 CFV): netflow.velocity.w{i},
+# netflow.acceleration.w{i}, netflow.cumulative, netflow.regime,
+# netflow.zscore. DISABLED when enabled is false.
+enabled = false
+[netflow_flow.inner]
+windows_ns = [3600000000000, 14400000000000, 86400000000000]  # 1h/4h/24h
+cumulative_window_ns = 604800000000000  # 7d trapezoidal integration
+regime_lookback_days = 90               # percentile history cap (CFV-4)
+zscore_window_ns = 86400000000000       # 24h trailing stats
+min_regime_obs = 20                     # velocities before regime classifies
+stale_after_ns = 600000000000           # 2x spec 034 poll cadence (CFV-8)
+
+[accumulation]
+# Accumulation detector (spec 045 ACC): compound AND of OI rising + smart
+# money buying + exchange outflow; emits ScreenerHits under
+# rule_id "accumulation_detector". Feature-name defaults reference the
+# cohort.*/netflow.* families above - both must be fed for the detector to fire.
+enabled = false
+[accumulation.inner]
+cooldown_ns = 14400000000000            # 4h between hits per asset (ACC-4)
+percentile_window_ns = 604800000000000  # 7d dynamic thresholds (ACC-3)
+oi_delta_percentile = 0.80              # top-quintile OI increase
+smart_flow_percentile = 0.70            # top-30% smart flow
+whale_ratio_floor = 0.10                # min whale share of OI
+outflow_regime = 2.0                    # netflow.regime encoding for Outflow
+
+[oi_regime]
+# OI/price regime inputs for the accumulation detector (spec 045):
+# oi.delta.{w}, oi.quadrant.{w} (tick) + regime.trend (bar, swing efficiency
+# ratio; 0=Trend / 1=Chop). DISABLED when enabled is false.
+enabled = false
+[oi_regime.inner]
+windows_ns = [14400000000000]  # 4h -> oi.delta.4h / oi.quadrant.4h
+trend_lookback_bars = 20
+trend_threshold = 0.25         # |efficiency ratio| >= threshold => Trend

@@ -86,6 +86,14 @@ EtherscanNormalizer (wrapped payload {address, asset, result})
 
 ## Decisions
 
+- 2026-08-24: Etherscan API **V1 → V2 migration** (venue-side deprecation).
+  The V1 route (`https://api.etherscan.io/api`) now answers `status=0`
+  "deprecated V1 endpoint" for every request, which surfaced as silent
+  per-wallet fetch failures (tracing warns without a subscriber are dropped).
+  The poller now targets `https://api.etherscan.io/v2/api` with `chainid=1`
+  (Ethereum mainnet); query params unchanged. Pinned by
+  `nfl_url_uses_v2_route_with_mainnet_chainid`. First live data: 2026-08-24,
+  5 exchange USDT wallets @ 300s cadence.
 - 2026-08-18 (owner sign-off via "implement all"): schema 3→4 amendment for
   specs 033/034 — append-only additions (CONV-20); schema-3 frames stay
   readable via the log reader's schema-3 arm.

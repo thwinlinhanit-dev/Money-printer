@@ -25,7 +25,7 @@ run_instrument_master.py  instrument-master CLI: resolve / check / render (check
 autopsy.py       strategy autopsy (roadmap 4.5): P&L by day, cost share, classification (economic failure / data limitation / execution-model failure); zero-trade runs are absence of evidence, never data
 run_autopsy.py   autopsy CLI: writes `autopsies/<id>-<date>.md` append-only + links it in the registry evidence (exit 2 on duplicate day or missing run_id)
 autopsies/       generated autopsy reports (append-only)
-run_weekly_review.py  weekly research review (roadmap 1.2): ISO-week windowing of journaled runs, registry table, autopsies, benchmark row `unset (1.1 pending)`; append-only per week
+run_weekly_review.py  weekly research review (roadmap 1.2): ISO-week windowing of journaled runs, registry table, autopsies, benchmark grounded on docs/OWNER_POLICY.md §3 (fail-closed `unset` when absent); append-only per week
 reviews/         weekly review reports
 grading.py       screener grading (RES-2) + edge-decay detection (RES-3); spec 017 recommendations
 grading_job.py   weekly grading job — emits machine `{week}.json` + human `{week}.md` with "Next stage recommendations" (spec 017 GRD-3/5)

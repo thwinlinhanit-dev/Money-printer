@@ -144,7 +144,9 @@ def grade(files, stress2x, day_trades):
         c2_detail = "no trades on any recorded day"
     elif corpus_days < 3:
         c2 = "NOT-GRADED"
-        c2_detail = f"corpus {corpus_days} day(s) < 3 - cannot distinguish harvest from fluke"
+        c2_detail = (
+            f"corpus {corpus_days} day(s) < 3 - cannot distinguish harvest from fluke"
+        )
     elif traded_days < 3:
         c2 = "FIRED"
         c2_detail = f"trades on {traded_days} distinct day(s) < 3"
@@ -156,7 +158,9 @@ def grade(files, stress2x, day_trades):
     overall = "KILL" if killed else "NOT-YET-FALSIFIED"
 
     # Report.
-    print(f"windows graded: {len(windows)} across days {', '.join(d for d, _ in files)}")
+    print(
+        f"windows graded: {len(windows)} across days {', '.join(d for d, _ in files)}"
+    )
     for w, cls, flipped in rows:
         sel = (
             f"in_exp={w['in_exp']:+.6f} best_params={w['best_params']}"
@@ -175,8 +179,10 @@ def grade(files, stress2x, day_trades):
     )
     print(f"criterion #1 (G1 2x-cost <= 0): {c1} [{c1_detail}]")
     print(f"criterion #2 (<3 distinct calendar windows): {c2} [{c2_detail}]")
-    print(f"criterion #3 (flips >= ceil(2*gradeable/3), gradeable>=3): {c3} "
-          f"[gradeable={gradeable}, flips={flips}]")
+    print(
+        f"criterion #3 (flips >= ceil(2*gradeable/3), gradeable>=3): {c3} "
+        f"[gradeable={gradeable}, flips={flips}]"
+    )
     print(f"OVERALL: {overall}")
     return overall
 
@@ -202,8 +208,11 @@ def main(argv):
         i += 1
 
     if not files:
-        print("usage: grade_wf.py DAY=PATH ... [--stress2x DAY=VALUE ...] "
-              "[--day-trades DAY=N ...]", file=sys.stderr)
+        print(
+            "usage: grade_wf.py DAY=PATH ... [--stress2x DAY=VALUE ...] "
+            "[--day-trades DAY=N ...]",
+            file=sys.stderr,
+        )
         return 2
 
     result = grade(files, stress2x, day_trades)

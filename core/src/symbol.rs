@@ -17,6 +17,9 @@ pub enum InstrumentKind {
     /// Crude Oil, SP500, …). Appended so old bincode symbol frames keep their
     /// variant indices. Correlation-grade, never execution-grade (MAC-5).
     TradFiSynthetic,
+    /// US equity-listed option contract (spec 040 IBIT). Appended so old
+    /// bincode symbol frames keep their variant indices (CONV-20).
+    Option,
 }
 
 /// Per-symbol metadata (CONV-6). Rounding to these precisions happens only at

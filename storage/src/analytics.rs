@@ -170,7 +170,7 @@ pub fn dom_series(
     max_samples: usize,
 ) -> Vec<DomSnapshot> {
     let every = every_ns.max(1_000_000); // 1 ms floor
-    let levels = levels.max(1).min(50);
+    let levels = levels.clamp(1, 50);
     let max_samples = max_samples.max(1);
     if from_ts_ns > to_ts_ns {
         return Vec::new();
@@ -1005,7 +1005,7 @@ mod tests {
             SymbolId(sym),
             recv_ns,
             recv_ns,
-            seq as u64,
+            seq,
             MarketEvent::BookSnapshot {
                 bids: bids.to_vec().into(),
                 asks: asks.to_vec().into(),
@@ -1030,7 +1030,7 @@ mod tests {
             SymbolId(sym),
             recv_ns,
             recv_ns,
-            last_seq as u64,
+            last_seq,
             MarketEvent::BookDelta {
                 bids: bids.to_vec().into(),
                 asks: asks.to_vec().into(),

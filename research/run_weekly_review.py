@@ -1,8 +1,11 @@
 """Weekly research review generator (serious-research-lab roadmap Phase 1.2).
 
 A machine-derived weekly review: registry table, journaled runs whose as-of
-date falls in the ISO week, autopsies, and the benchmark row (unset while the
-owner trading policy 1.1 is pending). Follows the grading_job split: machine
+date falls in the ISO week, autopsies, and the benchmark row. The benchmark is
+grounded on `docs/OWNER_POLICY.md` §3 (roadmap item 1.1, BINDING since
+2026-08-25) and FAILS CLOSED to the explicit `unset` row when the policy file
+or any of its three benchmark fields is missing or unparseable — a corrupt
+policy never silently produces a wrong benchmark. Follows the grading_job split: machine
 derivation first, human notes in a clearly marked section. Append-only - a
 review for a week that already exists is refused (never silently overwritten).
 
@@ -26,8 +29,34 @@ DEFAULT_REGISTRY = REPO_ROOT / "research" / "registry.jsonl"
 DEFAULT_RUNS = REPO_ROOT / "runs" / "index.jsonl"
 DEFAULT_OUT = REPO_ROOT / "research" / "reviews"
 DEFAULT_AUTOPSIES = REPO_ROOT / "research" / "autopsies"
+DEFAULT_POLICY = REPO_ROOT / "docs" / "OWNER_POLICY.md"
 
 _RUN_ID_DATE = re.compile(r"(20\d{2})-(\d{2})-(\d{2})")
+
+_BENCHMARK_FIELDS = (
+    ("primary", "Primary benchmark"),
+    ("window", "Comparison window"),
+    ("acceptance", "Acceptance rule"),
+)
+
+
+def load_benchmark(policy_path) -> dict | None:
+    """Parse the benchmark definition from OWNER_POLICY.md §3.
+
+    Returns {primary, window, acceptance} or None when the policy file is
+    missing or any required field row cannot be parsed (fail closed).
+    """
+    path = Path(policy_path)
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8")
+    out: dict[str, str] = {}
+    for key, label in _BENCHMARK_FIELDS:
+        m = re.search(rf"\|\s*{re.escape(label)}\s*\|\s*(.+?)\s*\|", text)
+        if not m or not m.group(1).strip():
+            return None
+        out[key] = m.group(1).strip()
+    return out
 
 
 def _as_of(rec: dict) -> str:
@@ -68,7 +97,7 @@ def week_runs(runs_path, week: str) -> tuple[list[dict], list[dict]]:
     return in_week, sorted(by_kind.items())
 
 
-def render(week: str, registry_path, runs_path, autopsies_dir) -> str:
+def render(week: str, registry_path, runs_path, autopsies_dir, policy_path=DEFAULT_POLICY) -> str:
     recs = registry.load_registry(registry_path)
     table = registry.render(recs)
     table = table.replace("# Research idea registry (roadmap Phase 1.3)\n\n", "")
@@ -83,8 +112,21 @@ def render(week: str, registry_path, runs_path, autopsies_dir) -> str:
         "",
         "## Benchmark",
         "",
-        "- `unset (1.1 pending)` - the owner trading policy decides the "
-        "benchmark definition; until then no strategy is benchmarked against it.",
+    ]
+    bench = load_benchmark(policy_path)
+    if bench is not None:
+        lines += [
+            f"- primary: {bench['primary']}",
+            f"- window: {bench['window']}",
+            f"- acceptance: {bench['acceptance']}",
+            "- source: docs/OWNER_POLICY.md §3",
+        ]
+    else:
+        lines += [
+            "- `unset (1.1 pending)` - the owner trading policy decides the "
+            "benchmark definition; until then no strategy is benchmarked against it.",
+        ]
+    lines += [
         "",
         "## Idea registry",
         "",
@@ -133,6 +175,7 @@ def main(argv=None) -> int:
     p.add_argument("--runs", default=str(DEFAULT_RUNS))
     p.add_argument("--out-dir", default=str(DEFAULT_OUT))
     p.add_argument("--autopsies", default=str(DEFAULT_AUTOPSIES))
+    p.add_argument("--policy", default=str(DEFAULT_POLICY))
     args = p.parse_args(argv)
 
     out_dir = Path(args.out_dir)
@@ -151,7 +194,7 @@ def main(argv=None) -> int:
         print(f"exit 2: {exc}", file=sys.stderr)
         raise SystemExit(2)
 
-    report = render(args.week, args.registry, args.runs, args.autopsies)
+    report = render(args.week, args.registry, args.runs, args.autopsies, args.policy)
     path.write_text(report, encoding="utf-8")
     print(f"wrote {path}")
     return 0

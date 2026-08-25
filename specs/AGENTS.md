@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Design specification documents (000–041) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
+Design specification documents (000–045) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
 
 ## Ownership
 
@@ -49,6 +49,10 @@ Design specification documents (000–041) defining the system architecture, dat
 - `039-options-flow-aggregator.md` — cross-exchange options flow aggregator: block trades, net premium, delta-adjusted flow, whale detection (OFI requirements)
 - `040-ibit-etf-integration.md` — IBIT ETF options integration: CBOE data collection, cross-market analysis with Deribit (IBI requirements)
 - `041-analytics-terminal.md` — real-time analytics terminal: web dashboard, WebSocket streaming, charts, per-asset routing (TER requirements)
+- `042-wallet-cohort-grading.md` — wallet cohort grading: classify addresses into Smart Money / Whale / Retail / Dormant tiers from recorded PnL (WCG requirements)
+- `043-cex-flow-velocity.md` — CEX flow velocity features: netflow velocity, acceleration, regime, z-score from spec 034 snapshots (CFV requirements)
+- `044-per-token-ai-insight.md` — per-token AI insight agent: LLM-generated token summaries grounded in feature exports (TOK requirements)
+- `045-accumulation-detector.md` — accumulation detector screener rule: compound OI + smart money + exchange outflow signal (ACC requirements)
 
 ## Local Contracts
 

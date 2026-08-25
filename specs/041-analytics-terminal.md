@@ -339,6 +339,17 @@ Dynamic Open Graph images via `/api/og?asset=btc` for social sharing:
   They share the feature store (Parquet) but have separate UI stacks
   and deployment targets.
 
+- 2026-08-24 (audit closeout): Status corrected from "implemented" to
+  **implementing**. Only Slice 1 — the read-only REST viewer (`termd.py`,
+  `research/terminal/`) — exists; it is NOT the terminal this spec describes.
+  Unimplemented at this writing: feature-engine subscription (TER-1), Vite
+  React SPA (TER-2), per-asset routing (TER-3), WebSocket protocol (TER-4),
+  chart performance budgets (TER-5), responsive layout (TER-6), staleness
+  indicator (TER-7), panel configuration (TER-9), CSP (TER-10), analytics
+  gating (TER-11), mobile touch (TER-12), accessibility (TER-13), perf
+  monitoring (TER-14). Marking a spec implemented with zero `TER-*` tests
+  tripped the CONV-21 guardrail and violated PD-5/W-7 honesty.
+
 ## Open questions
 
 - Should the terminal server run as part of the ops binary (spec 009)

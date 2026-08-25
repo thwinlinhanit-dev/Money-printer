@@ -116,10 +116,10 @@ pub struct ChainMap {
 impl ChainMap {
     pub fn insert(&mut self, leg: &OptionLeg, snap: TickerSnap, ts_ns: i64) {
         let u = leg.underlying.clone();
-        self.chains
-            .entry(u.clone())
-            .or_default()
-            .insert(ContractKey::new(leg.expiry_ts_ns, leg.strike, leg.kind), snap);
+        self.chains.entry(u.clone()).or_default().insert(
+            ContractKey::new(leg.expiry_ts_ns, leg.strike, leg.kind),
+            snap,
+        );
         // Keep the freshest spot (>= so equal-timestamp batches within one
         // event loop still overwrite deterministically).
         match self.spots.get(&u) {
@@ -191,7 +191,11 @@ pub struct GreeksAggregator {
 
 impl GreeksAggregator {
     pub fn new(multiplier: f64) -> Self {
-        Self { chains: ChainMap::default(), multiplier, prev: None }
+        Self {
+            chains: ChainMap::default(),
+            multiplier,
+            prev: None,
+        }
     }
 
     pub fn chains(&self) -> &ChainMap {
@@ -262,7 +266,9 @@ impl GreeksAggregator {
         let mut by_strike: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
         for (key, snap) in chain {
             if let Some(v) = gex_at(snap, key.is_put, self.multiplier) {
-                let e = by_strike.entry(key.strike_bits).or_insert((key.strike(), 0.0));
+                let e = by_strike
+                    .entry(key.strike_bits)
+                    .or_insert((key.strike(), 0.0));
                 e.1 += v;
             }
         }
@@ -303,9 +309,7 @@ impl GreeksAggregator {
         best.1
     }
 
-    pub(crate) fn nearest_expiry(
-        chain: &BTreeMap<ContractKey, TickerSnap>,
-    ) -> Option<i64> {
+    pub(crate) fn nearest_expiry(chain: &BTreeMap<ContractKey, TickerSnap>) -> Option<i64> {
         chain
             .iter()
             .filter(|(_, s)| s.usable_oi())
@@ -413,7 +417,7 @@ impl GreeksAggregator {
         let chain = self.chains.chain(underlying)?;
         let mut any = false;
         let mut total = 0.0;
-        for (_k, snap) in chain {
+        for snap in chain.values() {
             if !snap.usable_oi() {
                 continue;
             }
@@ -553,10 +557,3 @@ impl crate::engine::TickFeature for HigherOrderGreek {
         }
     }
 }
-
-
-
-
-
-
-

@@ -172,9 +172,11 @@ fn liq_5_no_new_event_variant() {
     // MacroPoint / Option* variants, CONV-20), never by 029: the only 2→3
     // additions are those append-only variants. Schema 4 (2026-08-18) came
     // from owner-approved specs 033/034 (TradeWithAddr / NetflowSnapshot /
-    // Venue::Ethereum), never from 029. Guard the exact version so a future
-    // amendment updates this test deliberately.
-    assert_eq!(mp_core::SCHEMA_VER, 4);
+    // Venue::Ethereum), never from 029. Schema 5 (2026-08-22) came from
+    // owner-approved spec 040 (Venue::Cboe for the IBIT options chain).
+    // Guard the exact version so a future amendment updates this test
+    // deliberately.
+    assert_eq!(mp_core::SCHEMA_VER, 5);
 }
 
 #[test]

@@ -136,3 +136,32 @@ trend_lookback = 20
 value_area_window = 48
 value_area_bucket = 50.0
 rolling_vwap_bars = 48
+
+[cohort]
+# Wallet cohort grading (spec 042) - LIVE: snapshot produced by
+#   target\debug\cohort_score.exe --log data\raw\*_hyperliquid_positions.log
+# from the recorded 08-08..08-18 census (95 addresses). Re-run weekly.
+enabled = true
+[cohort.inner]
+snapshot_path = "data/cohorts/2026-08-18.json"
+
+[oi_regime]
+# Accumulation sub-signal inputs (spec 045): oi.delta.{w}, oi.quadrant.{w},
+# regime.trend - verified live on the 08-08..08-17 hyperliquid corpus
+# (16,380 / 4,199 / 10,670 updates respectively).
+enabled = true
+[oi_regime.inner]
+windows_ns = [14400000000000]  # 4h - matches the detector's defaults
+trend_lookback_bars = 20
+trend_threshold = 0.25
+
+[accumulation]
+# Detector stays DISABLED until netflow data exists (needs MP_ETHERSCAN_KEY +
+# spec 034 collector runs); with a starved leg ACC-6 AND semantics yield zero
+# hits by construction. Flip enabled=true after ~7d of NetflowSnapshots.
+enabled = false
+
+[netflow_flow]
+# CEX flow velocity (spec 043) - LIVE: fed by the mp-netflow daemon
+# (5 exchange USDT wallets @ 300s cadence, recording since 2026-08-24).
+enabled = true

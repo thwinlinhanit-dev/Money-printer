@@ -109,6 +109,27 @@ fn run() -> Result<ExitCode, String> {
             .join(format!("{}.json", stats.symbols_hash));
         println!("symbols snapshot: {}", snap.display());
     }
+
+    // Spec 040 IBI-10: optional cross-market lead-lag table over the SAME
+    // merged log set. Requires `[ibit_cross].deriv_underlying` in the config
+    // (fail-closed — an empty table would look like "no signal" when it is
+    // really "not enabled").
+    if let Some(cross_out) = flag(&args, "--cross-out") {
+        if cfg.ibit_cross.deriv_underlying.is_empty() {
+            return Err(
+                "--cross-out requires [ibit_cross].deriv_underlying in the config \
+                 (the family is disabled otherwise; an empty table would be silence)"
+                    .into(),
+            );
+        }
+        let stream =
+            mp_storage::stream_logs_merged(&logs).map_err(|e| format!("cross-out stream: {e}"))?;
+        let rows = mp_storage::ibit_leadlag::build_rows(stream, &cfg.ibit_cross)
+            .map_err(|e| format!("cross-out rows: {e}"))?;
+        let n = mp_storage::ibit_leadlag::write_leadlag(std::path::Path::new(&cross_out), &rows)
+            .map_err(|e| format!("cross-out write: {e}"))?;
+        println!("cross-market rows={n} path={cross_out}");
+    }
     Ok(ExitCode::SUCCESS)
 }
 

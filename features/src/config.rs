@@ -9,6 +9,11 @@
 use mp_core::{fnv1a_absorb, FNV1A_OFFSET};
 use serde::{Deserialize, Serialize};
 
+use crate::accumulation::AccumulationConfig;
+use crate::cohort::CohortConfig;
+use crate::ibit_cross::IbitCrossParams;
+use crate::netflow_flow::NetflowFlowConfig as NetflowFlowConfigInner;
+
 /// Error parsing `features.toml`.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -444,6 +449,17 @@ pub struct SwingParams {
     /// LVN threshold: local minima below this fraction of POC volume.
     #[serde(default = "default_swq_lvn_frac")]
     pub profile_lvn_frac: f64,
+    /// POC-flip acceptance window (closes): a flip confirms when the trailing
+    /// N closes contain ≥ N−1 on the far side of the current POC and the
+    /// latest close is on the far side (≤1 close back across within the
+    /// window). Spec 036 §2.3/§7.
+    #[serde(default = "default_swq_poc_flip_n")]
+    pub poc_flip_n: usize,
+    /// A/D classifier windows: near-VAL/near-VAH volume ratio compares the
+    /// last K bars vs the previous K; compression compares ATR(atr_n) now vs
+    /// K bars ago. Spec 036 §2.4/§7.
+    #[serde(default = "default_swq_ad_k")]
+    pub ad_k_windows: usize,
 }
 
 fn default_swing_rv_window() -> usize {
@@ -491,6 +507,12 @@ fn default_swq_hvn_frac() -> f64 {
 fn default_swq_lvn_frac() -> f64 {
     0.3
 }
+fn default_swq_poc_flip_n() -> usize {
+    3
+}
+fn default_swq_ad_k() -> usize {
+    3
+}
 
 impl Default for SwingParams {
     fn default() -> Self {
@@ -511,6 +533,8 @@ impl Default for SwingParams {
             profile_window: default_swq_profile_window(),
             profile_hvn_frac: default_swq_hvn_frac(),
             profile_lvn_frac: default_swq_lvn_frac(),
+            poc_flip_n: default_swq_poc_flip_n(),
+            ad_k_windows: default_swq_ad_k(),
         }
     }
 }
@@ -529,10 +553,22 @@ pub struct TenorDef {
 
 fn default_iv_tenors() -> Vec<TenorDef> {
     vec![
-        TenorDef { name: "1w".into(), days: 7.0 },
-        TenorDef { name: "1m".into(), days: 30.0 },
-        TenorDef { name: "3m".into(), days: 90.0 },
-        TenorDef { name: "6m".into(), days: 180.0 },
+        TenorDef {
+            name: "1w".into(),
+            days: 7.0,
+        },
+        TenorDef {
+            name: "1m".into(),
+            days: 30.0,
+        },
+        TenorDef {
+            name: "3m".into(),
+            days: 90.0,
+        },
+        TenorDef {
+            name: "6m".into(),
+            days: 180.0,
+        },
     ]
 }
 
@@ -555,7 +591,10 @@ pub struct OptionsGreeksParams {
 
 impl Default for OptionsGreeksParams {
     fn default() -> Self {
-        OptionsGreeksParams { underlyings: Vec::new(), contract_multiplier: default_opt_multiplier() }
+        OptionsGreeksParams {
+            underlyings: Vec::new(),
+            contract_multiplier: default_opt_multiplier(),
+        }
     }
 }
 
@@ -685,6 +724,47 @@ impl Default for OptionsFlowParams {
     }
 }
 
+/// Wrapper for spec 042 cohort grading params.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CohortParams {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub inner: CohortConfig,
+}
+
+/// Wrapper for spec 043 netflow flow-velocity params.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetflowFlowParams {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub inner: NetflowFlowConfigInner,
+}
+
+/// Wrapper for the accumulation-detector OI/price regime inputs (spec 045
+/// sub-signal features: `oi.delta.{w}`, `oi.quadrant.{w}`, `regime.trend`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OiRegimeParams {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub inner: crate::oi_regime::OiRegimeConfig,
+}
+
+/// Wrapper for spec 045 accumulation detector params.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccumulationParams {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub inner: AccumulationConfig,
+}
+
 /// The whole catalog config (FEA-7). One file, all params, no unknown keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -727,6 +807,23 @@ pub struct FeaturesConfig {
     /// Options flow family (spec 039) — disabled when `underlyings` empty.
     #[serde(default)]
     pub options_flow: OptionsFlowParams,
+    /// IBIT ↔ Deribit cross-market family (spec 040) — disabled when
+    /// `deriv_underlying` empty.
+    #[serde(default)]
+    pub ibit_cross: IbitCrossParams,
+    /// Wallet cohort grading (spec 042) — disabled when `enabled` is false.
+    #[serde(default)]
+    pub cohort: CohortParams,
+    /// CEX flow velocity (spec 043) — disabled when `enabled` is false.
+    #[serde(default)]
+    pub netflow_flow: NetflowFlowParams,
+    /// OI/price regime inputs for the accumulation detector (spec 045) —
+    /// disabled when `enabled` is false.
+    #[serde(default)]
+    pub oi_regime: OiRegimeParams,
+    /// Accumulation detector (spec 045) — disabled when `enabled` is false.
+    #[serde(default)]
+    pub accumulation: AccumulationParams,
 }
 
 fn default_bar_tf() -> i64 {
@@ -753,6 +850,11 @@ impl Default for FeaturesConfig {
             options_greeks: OptionsGreeksParams::default(),
             options_iv: OptionsIvParams::default(),
             options_flow: OptionsFlowParams::default(),
+            ibit_cross: IbitCrossParams::default(),
+            cohort: CohortParams::default(),
+            netflow_flow: NetflowFlowParams::default(),
+            oi_regime: OiRegimeParams::default(),
+            accumulation: AccumulationParams::default(),
         }
     }
 }

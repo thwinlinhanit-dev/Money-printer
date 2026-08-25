@@ -27,17 +27,30 @@ import subprocess
 import sys
 
 BIN = os.environ.get("MP_OPS_BIN", "target/release/mp-ops.exe")
-ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+)
 SCORECARDS = os.path.join(ROOT, "data", "scorecards")
 BURST_GAP_S = 90  # must match storage::audit::STALE_BURST_GAP_NS (fallback only)
 
 
 def iso(ns):
-    return datetime.datetime.fromtimestamp(ns / 1e9, datetime.timezone.utc).strftime("%H:%M:%S")
+    return datetime.datetime.fromtimestamp(ns / 1e9, datetime.timezone.utc).strftime(
+        "%H:%M:%S"
+    )
 
 
 def run_audit(date, symbol):
-    cmd = [os.path.join(ROOT, BIN), "audit", "--date", date, "--venue", "hyperliquid", "--symbol", symbol]
+    cmd = [
+        os.path.join(ROOT, BIN),
+        "audit",
+        "--date",
+        date,
+        "--venue",
+        "hyperliquid",
+        "--symbol",
+        symbol,
+    ]
     out = subprocess.run(cmd, capture_output=True, text=True)
     if out.returncode != 0:
         return None
@@ -78,7 +91,9 @@ def bursts_from_audit(d):
 def snapshot_date(date):
     result = {
         "date": date,
-        "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(
+            timespec="seconds"
+        ),
         "symbols": {},
     }
     for sym in ("BTC", "ETH"):
@@ -92,7 +107,10 @@ def snapshot_date(date):
             "stale_count": len(d.get("stale_periods", [])),
             "bursts": bursts_from_audit(d),
             "worst_gap_s": round((d.get("worst_gap_ns") or 0) / 1e9),
-            "gaps": [{"start": iso(g["start_ns"]), "end": iso(g["end_ns"])} for g in d.get("gaps", [])],
+            "gaps": [
+                {"start": iso(g["start_ns"]), "end": iso(g["end_ns"])}
+                for g in d.get("gaps", [])
+            ],
         }
     return result
 
@@ -140,8 +158,10 @@ def timeline(snaps):
     peak = max(range(24), key=lambda h: burst_h[h])
     total = sum(burst_h)
     print()
-    print(f"peak hour: {peak:02d}:00-{peak:02d}:59 ({burst_h[peak]}/{total} starts, "
-          f"{100 * burst_h[peak] / total:.0f}%)")
+    print(
+        f"peak hour: {peak:02d}:00-{peak:02d}:59 ({burst_h[peak]}/{total} starts, "
+        f"{100 * burst_h[peak] / total:.0f}%)"
+    )
     return 0
 
 
@@ -151,25 +171,46 @@ def print_day(snap):
         if "error" in s:
             print(f"  {sym}: {s['error']}")
             continue
-        print(f"  {sym}: events={s['event_count']} coverage={s['coverage']} stale={s['stale_count']} worst_gap={s.get('worst_gap_s', '?')}s")
+        print(
+            f"  {sym}: events={s['event_count']} coverage={s['coverage']} stale={s['stale_count']} worst_gap={s.get('worst_gap_s', '?')}s"
+        )
         if s["bursts"]:
             # Per-burst counts only exist for fallback-grouped snapshots;
             # Rust-side bursts render as start-end windows.
-            print("    bursts: " + "  ".join(
-                f"{b['start']}-{b['end']}" + (f"({b['count']})" if b.get("count") else "")
-                for b in s["bursts"]
-            ))
+            print(
+                "    bursts: "
+                + "  ".join(
+                    f"{b['start']}-{b['end']}"
+                    + (f"({b['count']})" if b.get("count") else "")
+                    for b in s["bursts"]
+                )
+            )
         else:
             print("    bursts: none")
-        print("    gaps: " + ("none" if not s["gaps"] else "  ".join(f"{g['start']}-{g['end']}" for g in s["gaps"])))
+        print(
+            "    gaps: "
+            + (
+                "none"
+                if not s["gaps"]
+                else "  ".join(f"{g['start']}-{g['end']}" for g in s["gaps"])
+            )
+        )
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("-Date", help="YYYYMMDD to snapshot and print")
-    ap.add_argument("-Compare", nargs="+", help="YYYYMMDD dates to compare side-by-side")
+    ap.add_argument(
+        "-Compare", nargs="+", help="YYYYMMDD dates to compare side-by-side"
+    )
     ap.add_argument("-All", action="store_true", help="print every snapshot on disk")
-    ap.add_argument("-Timeline", action="store_true", help="per-hour burst/gap clustering across all snapshots")
+    ap.add_argument(
+        "-Timeline",
+        action="store_true",
+        help="per-hour burst/gap clustering across all snapshots",
+    )
     args = ap.parse_args()
 
     if args.Date:

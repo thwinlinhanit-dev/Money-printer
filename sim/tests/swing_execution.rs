@@ -126,7 +126,7 @@ impl Strategy for SwingProbe {
     }
     fn on_feature(&mut self, _u: &FeatureUpdate, ctx: &mut dyn Ctx) -> Vec<OrderIntent> {
         if self.arm_timer {
-            ctx.set_timer(1 * HR);
+            ctx.set_timer(HR);
         }
         vec![self.order()]
     }

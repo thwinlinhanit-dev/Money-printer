@@ -45,11 +45,15 @@ should be updated).
 | 034 | [Exchange Netflow Indexer](034-exchange-netflow.md) | data plane | ✅ implemented |
 | 035 | [Swing Trading Focus](035-swing-focus.md) | architecture/pipeline | ✅ implemented |
 | 036 | [Volume-Profile Liquidity + Range-Reclaim](036-volume-profile-liquidity.md) | intelligence | ✅ implemented (MVP; §7 deferred) |
-| 037 | [Options Greeks Computation Engine](037-options-greeks-computation.md) | options analytics | 📝 draft |
-| 038 | [IV Surface Builder & Volatility Analytics](038-iv-surface-builder.md) | options analytics | 📝 draft |
-| 039 | [Cross-Exchange Options Flow Aggregator](039-options-flow-aggregator.md) | options analytics | 📝 draft |
-| 040 | [IBIT ETF Options Integration](040-ibit-etf-integration.md) | options analytics | 📝 draft |
-| 041 | [Real-Time Analytics Terminal](041-analytics-terminal.md) | frontend/UI | 📝 draft |
+| 037 | [Options Greeks Computation Engine](037-options-greeks-computation.md) | options analytics | ✅ implemented |
+| 038 | [IV Surface Builder & Volatility Analytics](038-iv-surface-builder.md) | options analytics | ✅ implemented |
+| 039 | [Cross-Exchange Options Flow Aggregator](039-options-flow-aggregator.md) | options analytics | ✅ implemented |
+| 040 | [IBIT ETF Options Integration](040-ibit-etf-integration.md) | options analytics | implemented (v1: IBI-1..10 incl. --cross-out CLI; OPRA real-time = v2) |
+| 041 | [Real-Time Analytics Terminal](041-analytics-terminal.md) | frontend/UI | 🔨 implementing (v1 server surface LIVE in `termd.py`: REST + pagination (ter_8), versioned RFC6455 WS push w/ origin check + ≤500ms batching (ter_1/4), CSP nosniff headers (ter_10); tests `tests/test_ws.py`; TER-2/3/5–7/9/11–14 = Vite React SPA / charts / Auth0 frontend still to build — CONV-21 requires ID-bearing tests for every requirement before final status) |
+| 042 | [Wallet Cohort Grading](042-wallet-cohort-grading.md) | on-chain analytics | ✅ implemented (cohort.rs: all four WCG-7 families — whale_ratio, net_delta.{cohort}, smart_flow.{w}, concentration — snapshot_path wiring; wcg_1..11 incl. proptest) |
+| 043 | [CEX Flow Velocity Features](043-cex-flow-velocity.md) | on-chain analytics | ✅ implemented (netflow_flow.rs: cfv_1..10 incl. golden determinism, stale-address eviction `[netflow_flow.stale_after_ns]`, velocity proptest) |
+| 044 | [Per-Token AI Insight Agent](044-per-token-ai-insight.md) | intelligence | ✅ implemented (insight_composer.py + `/v1/insight` + Telegram bot `telegram_bot.py`; tok_1..10 in `tests/test_insight.py`; verify_grounded handles signed + %-scaled claims) |
+| 045 | [Accumulation Detector Screener Rule](045-accumulation-detector.md) | intelligence | ✅ implemented (accumulation.rs: acc_1..10 incl. offline/online golden + cooldown bar-boundary; acc_5 forward-return study in `research/tests/test_accumulation.py`; sub-signal inputs `oi_regime.rs` verified LIVE on the 08-08..08-17 corpus — 6/8 legs streaming; honest n=0 RES-4 record in `research/out/acc_study_2026-08-24.md`, blocked only on spec 034 netflow data = free Etherscan key) |
 
 Status values: `draft` → `ready` (implementable) → `implementing` →
 `implemented` → `superseded`. Update this table in the same commit as the work
@@ -62,6 +66,11 @@ Newer specs (012–023) are Phase 2+ and do not block Phase 0.
 **Options analytics pipeline:** 031 (recording, implemented) → 037 (Greeks) →
 038 (IV surface) → 039 (flow) → 040 (IBIT) → 041 (terminal). Each layer
 depends on the one before it; 037–039 can be built in parallel after 031.
+
+**On-chain analytics pipeline:** 028 (whale positions) + 033 (wallet identity)
+→ 042 (cohort grading) → 045 (accumulation detector). 034 (netflow) →
+043 (flow velocity) → 045 (accumulation detector). 044 (AI insight) depends
+on all of 037–040 + 042 + 043.
 
 ## Spec format
 
@@ -81,7 +90,7 @@ Requirement prefixes: CONV, EVT, COL, STO, FEA, SIM, STR, EXE, RSK, OPS,
 RES, UI, ZCP (012), BKP (013), FSP (014), MAT (016), GRD (017), MOD (018),
 INT (024), WHL (028), MAC (030), OPT (031), BDC (001 codec amendment), MSC (032),
 WAL (033), NFL (034), SWG (035), SLQ (036), GRE (037), IVS (038), OFI (039),
-IBI (040), TER (041).
+IBI (040), TER (041), WCG (042), CFV (043), TOK (044), ACC (045).
 
 ## How to implement a spec
 

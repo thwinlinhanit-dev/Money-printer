@@ -939,6 +939,331 @@ impl BarFeature for SwingClose {
     }
 }
 
+// ---- Spec 036 §7: POC-flip state machine (SLQ-P) ---------------------------
+//
+// States BelowPoc/AbovePoc/Flipping from the owner draft, operationalized:
+// the POC is recomputed each closed bar over the rolling profile window; each
+// close is classified against the CURRENT POC. A flip to side S is confirmed
+// when the trailing `accept_n` closes contain at least `accept_n - 1` closes
+// on side S (≤ 1 close back across POC within that window) AND the latest
+// close is on side S. On confirmation the state flips and the acceptance
+// buffer resets.
+
+/// Side of the POC a close (or the state) sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PocSide {
+    Below,
+    Above,
+}
+
+impl PocSide {
+    fn of(close: f64, poc: f64) -> Option<PocSide> {
+        if !close.is_finite() || !poc.is_finite() {
+            return None;
+        }
+        Some(if close > poc {
+            PocSide::Above
+        } else {
+            PocSide::Below
+        })
+    }
+}
+
+/// Shared engine behind the `swing.poc_flip.*` adapters (spec 036 §2.3).
+#[derive(Debug)]
+pub(crate) struct PocFlipDetector {
+    window: usize,
+    bucket_size: f64,
+    accept_n: usize,
+    bars: VecDeque<Bar>,
+    state: Option<PocSide>,
+    buf: VecDeque<PocSide>,
+}
+
+impl PocFlipDetector {
+    pub(crate) fn new(window: usize, bucket_size: f64, accept_n: usize) -> Self {
+        Self {
+            window: window.max(1),
+            bucket_size,
+            accept_n: accept_n.max(1),
+            bars: VecDeque::new(),
+            state: None,
+            buf: VecDeque::new(),
+        }
+    }
+
+    /// Feed one closed bar; returns `(flip_direction, poc_price_at_flip)`
+    /// exactly on a confirmed flip.
+    pub(crate) fn push(&mut self, bar: &Bar) -> Option<(PocSide, f64)> {
+        self.bars.push_back(*bar);
+        while self.bars.len() > self.window {
+            self.bars.pop_front();
+        }
+        let win: Vec<Bar> = self.bars.iter().copied().collect();
+        let poc = value_area(&win, self.bucket_size)?.poc_price;
+        let side = PocSide::of(bar.close, poc)?;
+
+        // Seed the initial state from the first computable close — no event.
+        let Some(state) = self.state else {
+            self.state = Some(side);
+            self.buf.clear();
+            return None;
+        };
+
+        self.buf.push_back(side);
+        while self.buf.len() > self.accept_n {
+            self.buf.pop_front();
+        }
+        if side == state || self.buf.len() < self.accept_n {
+            return None;
+        }
+        // Candidate flip to `side`: ≤1 close back across POC in the window
+        // and the latest close on the far side.
+        let far = self.buf.iter().filter(|s| **s == side).count();
+        if far >= self.accept_n - 1 {
+            self.state = Some(side);
+            self.buf.clear();
+            return Some((side, poc));
+        }
+        None
+    }
+}
+
+/// Which flip direction a [`SwingPocFlip`] adapter emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PocFlipField {
+    Up,
+    Down,
+}
+
+/// `swing.poc_flip.{up|down}.{window}` — confirmed HTF POC-flip event
+/// (spec 036 §7): value = the POC price at confirmation; emitted ONLY on the
+/// confirming bar. The optional entry-confluence input for
+/// swing-range-reclaim-v1 ("PocFlipEvent(direction=up) within W bars").
+pub struct SwingPocFlip {
+    detector: PocFlipDetector,
+    field: PocFlipField,
+}
+
+impl SwingPocFlip {
+    pub fn new(window: usize, bucket_size: f64, accept_n: usize, field: PocFlipField) -> Self {
+        Self {
+            detector: PocFlipDetector::new(window, bucket_size, accept_n),
+            field,
+        }
+    }
+}
+
+impl BarFeature for SwingPocFlip {
+    fn id(&self) -> String {
+        let d = match self.field {
+            PocFlipField::Up => "up",
+            PocFlipField::Down => "down",
+        };
+        format!("swing.poc_flip.{}.{}", d, self.detector.window)
+    }
+    fn warm(&self) -> bool {
+        self.detector.bars.len() >= self.detector.window
+    }
+    fn on_bar(&mut self, bar: &Bar) -> Option<f64> {
+        let (side, poc) = self.detector.push(bar)?;
+        let want = match self.field {
+            PocFlipField::Up => PocSide::Above,
+            PocFlipField::Down => PocSide::Below,
+        };
+        (side == want).then_some(poc)
+    }
+}
+
+// ---- Spec 036 §7: accumulation/distribution classifier (SLQ-D2) -------------
+//
+// Operationalization of "volume near VAL trending up + range compressing":
+// for each closed bar, position within the CURRENT value-area band is
+// pos = (close − va_low)/(va_high − va_low). Bars closing in the bottom
+// tercile contribute their volume to the "near-VAL" series (top tercile →
+// "near-VAH"). With K = `k_windows`:
+//   vol_ratio  vr = mean(near-LEVEL vol, last K) / max(mean(prev K), ε)
+//   comp_ratio cr = ATR(atr_n) now / ATR(atr_n) K bars ago
+// Accumulating iff vr > 1 && cr < 1 (mirror at VAH for Distributing);
+// confidence = mean of the clamped strengths ((vr−1) and (1−cr)), ∈ [0,1].
+// Historical positions are judged against the CURRENT band — an explicit
+// approximation (the band moves slowly relative to K daily bars).
+
+/// Classification output of the A/D classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdState {
+    Accumulating,
+    Distributing,
+}
+
+/// Which series a [`SwingAd`] adapter tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdKind {
+    Accumulating,
+    Distributing,
+}
+
+/// Shared engine behind the `swing.ad.*` adapters (spec 036 §2.4).
+#[derive(Debug)]
+pub(crate) struct AdClassifier {
+    window: usize,
+    bucket_size: f64,
+    hvn_frac: f64,
+    lvn_frac: f64,
+    k: usize,
+    atr_n: usize,
+    bars: VecDeque<Bar>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AdReading {
+    state: Option<AdState>,
+    confidence: f64,
+}
+
+impl AdClassifier {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        window: usize,
+        bucket_size: f64,
+        hvn_frac: f64,
+        lvn_frac: f64,
+        k: usize,
+        atr_n: usize,
+    ) -> Self {
+        Self {
+            window: window.max(1),
+            bucket_size,
+            hvn_frac,
+            lvn_frac,
+            k: k.max(1),
+            atr_n: atr_n.max(1),
+            bars: VecDeque::new(),
+        }
+    }
+
+    fn warm_len(&self) -> usize {
+        self.window.max(self.atr_n + self.k) + self.k
+    }
+
+    fn push(&mut self, bar: &Bar) -> Option<AdReading> {
+        if !bar.close.is_finite() {
+            return None;
+        }
+        self.bars.push_back(*bar);
+        while self.bars.len() > self.warm_len() {
+            self.bars.pop_front();
+        }
+        if self.bars.len() < self.warm_len() {
+            return None;
+        }
+        let all: Vec<Bar> = self.bars.iter().copied().collect();
+        let va_win: Vec<Bar> = all[all.len() - self.window..].to_vec();
+        let va = volume_levels(&va_win, self.bucket_size, self.hvn_frac, self.lvn_frac)?;
+        let band = va.va_high - va.va_low;
+        if !(band.is_finite() && band > 0.0) {
+            return None;
+        }
+        let pos = |b: &Bar| ((b.close - va.va_low) / band).clamp(0.0, 1.0);
+
+        let k = self.k;
+        let recent = &all[all.len() - k..];
+        let prior = &all[all.len() - 2 * k..all.len() - k];
+        let level_vol = |bars: &[Bar], low: bool| -> f64 {
+            bars.iter()
+                .filter(|b| {
+                    let p = pos(b);
+                    if low {
+                        p <= 0.33
+                    } else {
+                        p >= 0.67
+                    }
+                })
+                .map(|b| b.vol)
+                .sum::<f64>()
+                / k as f64
+        };
+        let (low_now, low_prev) = (level_vol(recent, true), level_vol(prior, true));
+        let (high_now, high_prev) = (level_vol(recent, false), level_vol(prior, false));
+
+        let atr_now = atr(&all, self.atr_n)?;
+        let atr_past = atr(&all[..all.len() - k], self.atr_n)?;
+        let cr = atr_now / atr_past;
+
+        let strength = |vr: f64| (vr - 1.0).clamp(0.0, 1.0);
+        let compress = (1.0 - cr).clamp(0.0, 1.0);
+
+        let eps = f64::EPSILON;
+        let acc_vr = low_now / low_prev.max(eps);
+        let dist_vr = high_now / high_prev.max(eps);
+
+        let mut reading = AdReading {
+            state: None,
+            confidence: 0.0,
+        };
+        if low_now > 0.0 && acc_vr > 1.0 && cr < 1.0 {
+            reading.state = Some(AdState::Accumulating);
+            reading.confidence = (strength(acc_vr) + compress) / 2.0;
+        } else if high_now > 0.0 && dist_vr > 1.0 && cr < 1.0 {
+            reading.state = Some(AdState::Distributing);
+            reading.confidence = (strength(dist_vr) + compress) / 2.0;
+        }
+        if !reading.confidence.is_finite() {
+            reading.confidence = 0.0;
+        }
+        Some(reading)
+    }
+}
+
+/// `swing.ad.{accumulating|distributing}` — rule-based A/D classification
+/// (spec 036 §2.4); value = ratio-based confidence in [0,1]; ABSENT when the
+/// classifier reads Neutral (absence-is-neutral semantics, like the sweep
+/// family).
+pub struct SwingAd {
+    classifier: AdClassifier,
+    kind: AdKind,
+}
+
+impl SwingAd {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        window: usize,
+        bucket_size: f64,
+        hvn_frac: f64,
+        lvn_frac: f64,
+        k: usize,
+        atr_n: usize,
+        kind: AdKind,
+    ) -> Self {
+        Self {
+            classifier: AdClassifier::new(window, bucket_size, hvn_frac, lvn_frac, k, atr_n),
+            kind,
+        }
+    }
+}
+
+impl BarFeature for SwingAd {
+    fn id(&self) -> String {
+        match self.kind {
+            AdKind::Accumulating => "swing.ad.accumulating".into(),
+            AdKind::Distributing => "swing.ad.distributing".into(),
+        }
+    }
+    fn warm(&self) -> bool {
+        self.classifier.bars.len() >= self.classifier.warm_len()
+    }
+    fn on_bar(&mut self, bar: &Bar) -> Option<f64> {
+        let reading = self.classifier.push(bar)?;
+        let want = match self.kind {
+            AdKind::Accumulating => AdState::Accumulating,
+            AdKind::Distributing => AdState::Distributing,
+        };
+        (reading.state == Some(want))
+            .then(|| reading.confidence.clamp(0.0, 1.0))
+            .filter(|c| c.is_finite())
+    }
+}
+
 /// Nearest profile level vs the latest close (SLQ-V target selection).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LevelKind {
@@ -1350,7 +1675,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn slq_detector_offset_zero_confirm_and_expiry_after_z() {
         let mut d = detector();
         feed_baseline(&mut d);
@@ -1533,5 +1857,249 @@ mod tests {
         let v = f.on_bar(&hbar(99., 104., 99., 100., 1.)).unwrap();
         assert!((v - 3.0).abs() < 1e-9, "(2+2+5)/3 = 3, got {v}");
         assert!(f.warm());
+    }
+
+    // ---- spec 036 §7: POC flip + A/D ---------------------------------------
+
+    /// Profile whose POC sits at ~95: heavy volume at 95, light elsewhere
+    /// (bucket width 10 → buckets {9: vol 8, 10: vol 2, 11: vol 1}).
+    fn poc_profile_bars() -> Vec<Bar> {
+        vec![
+            hbar(95., 96., 94., 95., 6.),
+            hbar(95., 96., 94., 95., 6.),
+            hbar(105., 106., 104., 105., 1.),
+            hbar(115., 116., 114., 115., 1.),
+            hbar(90., 91., 89., 90., 1.),
+            hbar(100., 101., 99., 100., 1.),
+        ]
+    }
+
+    const PF_WINDOW: usize = 10;
+    const PF_N: usize = 3;
+
+    fn feed_profile(f: &mut dyn BarFeature) {
+        for b in poc_profile_bars() {
+            f.on_bar(&b);
+        }
+    }
+
+    #[test]
+    fn slq_poc_flip_confirms_after_acceptable_closes_and_ids() {
+        let mut up = SwingPocFlip::new(PF_WINDOW, 10.0, PF_N, PocFlipField::Up);
+        assert_eq!(up.id(), format!("swing.poc_flip.up.{PF_WINDOW}"));
+        assert!(!up.warm());
+        feed_profile(&mut up);
+        assert!(!up.warm(), "window 10 needs more than the 6 profile bars");
+        // Top up the window with neutral bars near the POC so it stays
+        // anchored at ~95 while the far-side closes arrive.
+        for c in [95.0_f64; 4] {
+            up.on_bar(&hbar(c - 1., c + 1., c - 2., c, 6.));
+        }
+        assert!(up.warm());
+
+        // Below-side neutral bars SEED the state (Below) and preload the
+        // acceptance buffer; the buffered rule then confirms a flip on the
+        // SECOND far-side close (window then holds ≥ n−1 far closes with the
+        // latest on the far side). Value = POC price at confirmation.
+        let mut confirmed_at = None;
+        for (i, c) in [102.0_f64, 103.0, 104.0, 105.0].iter().enumerate() {
+            let b = hbar(c - 1., c + 1., c - 2., *c, 1.);
+            if let Some(poc) = up.on_bar(&b) {
+                confirmed_at = Some((i, poc));
+            }
+        }
+        let (i, poc) = confirmed_at.expect("up flip confirms");
+        assert_eq!(
+            i, 1,
+            "buffered acceptance: 2nd consecutive far close confirms"
+        );
+        assert!(
+            (poc - 95.0).abs() < 6.0,
+            "event carries the POC price, got {poc}"
+        );
+    }
+
+    #[test]
+    fn slq_poc_flip_tolerates_one_crossing_back_blocks_two() {
+        let mk = || {
+            let mut f = SwingPocFlip::new(PF_WINDOW, 10.0, PF_N, PocFlipField::Up);
+            feed_profile(&mut f);
+            // Below-side neutrals seed the state Below and preload [B,B,B].
+            for c in [95.0_f64; 4] {
+                f.on_bar(&hbar(c - 1., c + 1., c - 2., c, 6.));
+            }
+            f
+        };
+        // Buffered acceptance: far #1 leaves the window one short of n−1 new
+        // far closes; far #2 completes it (window then holds ≥ n−1 far
+        // closes with the latest on the far side) → confirms.
+        let mut ok = mk();
+        assert!(
+            ok.on_bar(&hbar(101., 102., 100., 101., 1.)).is_none(),
+            "far #1"
+        );
+        assert!(
+            ok.on_bar(&hbar(101., 102., 100., 102., 1.)).is_some(),
+            "far #2 completes buffered acceptance"
+        );
+
+        // ONE crossing back mid-acceptance still confirms (≤1 tolerated):
+        // [B,B] → A → B → A ends [A,B,A] with 2 far closes, latest far.
+        let mut t = mk();
+        assert!(t.on_bar(&hbar(101., 102., 100., 101., 1.)).is_none());
+        assert!(
+            t.on_bar(&hbar(93., 94., 92., 94., 1.)).is_none(),
+            "crossing"
+        );
+        assert!(
+            t.on_bar(&hbar(101., 102., 100., 102., 1.)).is_some(),
+            "[B,A,B,A]: exactly one crossing back is tolerated"
+        );
+
+        // TWO consecutive crossings while seeded BELOW cannot block (they are
+        // the same side as the state — no down-flip exists to steal), but a
+        // state ABOVE hit with two crossings flips DOWN internally first, so
+        // its UP candidate stays silent through the whole sequence.
+        let mut up2 = SwingPocFlip::new(PF_WINDOW, 10.0, PF_N, PocFlipField::Up);
+        feed_profile(&mut up2);
+        for c in [95.0_f64; 4] {
+            up2.on_bar(&hbar(c - 1., c + 1., c - 2., c, 6.));
+        }
+        assert!(up2.on_bar(&hbar(101., 102., 100., 101., 1.)).is_none()); // seed Above? no: far#1
+        assert!(up2.on_bar(&hbar(101., 102., 100., 102., 1.)).is_some()); // confirm Above
+        for b in [
+            hbar(93., 94., 92., 94., 1.),     // crossing 1
+            hbar(92., 93., 91., 93., 1.),     // crossing 2 → down flips internally
+            hbar(101., 102., 100., 102., 1.), // re-up needs fresh acceptance
+        ] {
+            assert!(up2.on_bar(&b).is_none(), "no immediate re-confirm");
+        }
+    }
+
+    #[test]
+    fn slq_poc_flip_down_mirror() {
+        let mut dn = SwingPocFlip::new(PF_WINDOW, 10.0, PF_N, PocFlipField::Down);
+        assert_eq!(dn.id(), format!("swing.poc_flip.down.{PF_WINDOW}"));
+        feed_profile(&mut dn);
+        // ABOVE-side neutrals (97 > POC 95) seed Above and preload [A,A,A];
+        // buffered acceptance then confirms DOWN on the 2nd below-close.
+        for c in [97.0_f64; 4] {
+            dn.on_bar(&hbar(c - 1., c + 1., c - 2., c, 6.));
+        }
+        assert!(
+            dn.on_bar(&hbar(93., 94., 92., 93., 1.)).is_none(),
+            "below #1"
+        );
+        let v = dn.on_bar(&hbar(92., 93., 91., 92., 1.));
+        assert!(v.is_some(), "down flip confirms on the 2nd below close");
+
+        // An up adapter fed the SAME above-side neutrals seeds Above, so the
+        // below-closes are crossings — with two of them the down side steals
+        // internally and up stays silent throughout.
+        let mut up = SwingPocFlip::new(PF_WINDOW, 10.0, PF_N, PocFlipField::Up);
+        feed_profile(&mut up);
+        for c in [95.0_f64; 4] {
+            up.on_bar(&hbar(c - 1., c + 1., c - 2., c, 6.));
+        }
+        for b in [
+            hbar(93., 94., 92., 93., 1.),
+            hbar(92., 93., 91., 92., 1.),
+            hbar(91., 92., 90., 91., 1.),
+        ] {
+            assert!(up.on_bar(&b).is_none());
+        }
+    }
+
+    /// Drive the classifier with SELF-CALIBRATING closes: each push reads the
+    /// live VA band from the current window and places the next close at the
+    /// requested relative position (`target_pos`), so the test never fights
+    /// the rolling profile's own drift. `baseline_tr` sets the warmup true
+    /// range; the measurement bars use `half = if expanding { 8 + 8i } else {
+    /// 2 }` — expanding grows far past any baseline so cr ≥ 1 throughout.
+    fn drive_ad(target_pos: f64, expanding: bool, baseline_tr: f64) -> Option<(usize, AdReading)> {
+        let mut c = AdClassifier::new(6, 10.0, 0.7, 0.3, 3, 4);
+        for _ in 0..7 {
+            c.push(&hbar(
+                110. - baseline_tr,
+                110. + baseline_tr,
+                109. - baseline_tr,
+                110.,
+                5.,
+            ));
+        }
+        let mut fired = None;
+        for i in 0..8 {
+            let snap: Vec<Bar> = c.bars.iter().copied().collect();
+            let win: Vec<Bar> = snap[snap.len().saturating_sub(6)..].to_vec();
+            let close = match volume_levels(&win, 10.0, 0.7, 0.3) {
+                Some(va) if va.va_high > va.va_low => {
+                    va.va_low + target_pos * (va.va_high - va.va_low)
+                }
+                _ => 110.0,
+            };
+            // Geometric growth keeps every measured cr > 1 (atr_now is always
+            // the larger leg), so decompression blocks classification at
+            // EVERY step, not just eventually.
+            let half = if expanding {
+                40.0 * 3f64.powi(i as i32)
+            } else {
+                2.0
+            };
+            let vol = 10.0 + i as f64 * 15.0;
+            if let Some(r) = c.push(&hbar(
+                close - half * 0.1,
+                close + half,
+                close - half,
+                close,
+                vol,
+            )) {
+                // Neutral readings (state None) are NOT fires — only a
+                // classified Accumulating/Distributing counts.
+                if r.state.is_some() {
+                    fired = Some((i, r));
+                    break;
+                }
+            }
+        }
+        fired
+    }
+
+    #[test]
+    fn slq_ad_accumulates_on_low_volume_rise_with_compression() {
+        // Lows (pos 0.25) with rising volume while ranges stay tight against
+        // a wide baseline (cr << 1) → fires Accumulating.
+        let (i, r) = drive_ad(0.25, false, 25.0).expect("accumulation fires");
+        assert_eq!(r.state, Some(AdState::Accumulating));
+        assert!(i >= 2, "needs k bars before the ratio exists, fired at {i}");
+        assert!(r.confidence > 0.0 && r.confidence <= 1.0);
+
+        // Mirror: highs (pos 0.75), rising volume, compression → Distributing.
+        let (_, dr) = drive_ad(0.75, false, 25.0).expect("distribution fires");
+        assert_eq!(dr.state, Some(AdState::Distributing));
+        assert!(dr.confidence > 0.0 && dr.confidence <= 1.0);
+
+        // Adapter ids + absence semantics.
+        let mut a = SwingAd::new(6, 10.0, 0.7, 0.3, 3, 4, AdKind::Accumulating);
+        let mut d = SwingAd::new(6, 10.0, 0.7, 0.3, 3, 4, AdKind::Distributing);
+        assert_eq!(a.id(), "swing.ad.accumulating");
+        assert_eq!(d.id(), "swing.ad.distributing");
+        assert!(!a.warm());
+        let cold = hbar(110., 111., 109., 110., 5.);
+        assert!(a.on_bar(&cold).is_none());
+        assert!(d.on_bar(&cold).is_none());
+    }
+
+    #[test]
+    fn slq_ad_neutral_when_decompressing() {
+        // Rising level-volume but EXPANDING true ranges off a compressed
+        // baseline (cr ≥ 1 from the first bar): Neutral throughout.
+        assert!(
+            drive_ad(0.25, true, 1.0).is_none(),
+            "decompression blocks Accumulating"
+        );
+        assert!(
+            drive_ad(0.75, true, 1.0).is_none(),
+            "decompression blocks Distributing"
+        );
     }
 }

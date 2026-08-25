@@ -1,0 +1,33 @@
+# IBIT options-chain poller config (spec 040, IBI-7).
+# Copy to a real config and adjust. deny_unknown_fields: a typo'd key is a
+# startup error, never a silent default.
+#
+# Run (15-min delayed CBOE tape, free / no auth):
+#   cargo run -p mp-collectors --features live-http --bin mp-ibit -- \
+#     --config collectors/ibit.toml.example
+# Requires nothing beyond the public endpoint. v2 drop-in: point `url` at an
+# OPRA real-time vendor; no architecture change.
+
+data_dir = "data"
+url = "https://cdn.cboe.com/api/global/delayed_quotes/options/IBIT.json"
+
+# Poll cadence (seconds). Default 900s = the tape's own 15-min lag.
+poll_interval_s = 900
+
+# OCC root recorded on every leg; must match the CBOE option symbols.
+underlying = "IBIT"
+
+# US equity standard contract size (IBI-2).
+contract_multiplier = 100.0
+
+# Block-trade threshold in USD notional (spec 040 flow table).
+block_threshold_usd = 500000.0
+
+# US market hours in ET — documented for cross-market alignment (IBI-6);
+# cross-market features use DAILY closes, so these are informational.
+[market_hours]
+open_et = "09:30"
+close_et = "16:00"
+
+# Verbatim raw-frame capture to data/raw/cboe/{date}/ (COL-9).
+raw_capture = true

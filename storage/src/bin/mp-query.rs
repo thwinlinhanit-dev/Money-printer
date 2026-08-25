@@ -55,7 +55,7 @@
 
 use mp_core::Venue;
 use mp_storage::analytics::{self, FootprintBar, FootprintBucketRow, OiwaSeries};
-use mp_storage::{load_logs_merged, stream_logs_merged, Dataset};
+use mp_storage::{load_logs_merged, Dataset};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 

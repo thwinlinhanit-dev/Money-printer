@@ -1432,7 +1432,7 @@ mod tests {
     /// strategy needs (trades, funding/mark via tickers, liq), and must
     /// remove `orderbook.50` from the bybit frame.
     #[test]
-    fn swing_only_bybit_subscribe_drops_order_book_keeps_swing_streams() {
+    fn swg_1_bybit_subscribe_drops_order_book_keeps_swing_streams() {
         let frames = subscribe_for("bybit", "BTCUSDT", &[], true);
         assert_eq!(frames.len(), 1);
         let f = &frames[0];
@@ -1455,7 +1455,7 @@ mod tests {
     /// Swing-only hyperliquid: the `l2Book` channel must be dropped while
     /// `trades` and `activeAssetCtx` (mark/funding/OI) are kept.
     #[test]
-    fn swing_only_hyperliquid_drops_l2_book_keeps_swing_channels() {
+    fn swg_1_hyperliquid_drops_l2_book_keeps_swing_channels() {
         let full = subscribe_for("hyperliquid", "BTC", &[], false);
         let full_str = full.join("\n");
         assert!(
@@ -1481,7 +1481,7 @@ mod tests {
     /// Swing-only Binance: the combined-stream URL must drop the depth@100ms
     /// stream while keeping aggTrade, markPrice@1s, and forceOrder.
     #[test]
-    fn swing_only_binance_endpoint_drops_depth_keeps_swing_streams() {
+    fn swg_1_binance_endpoint_drops_depth_keeps_swing_streams() {
         let full = endpoint_for("binance", "BTCUSDT", false).unwrap();
         assert!(
             full.contains("depth@100ms"),

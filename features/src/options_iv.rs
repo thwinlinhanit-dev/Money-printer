@@ -12,14 +12,14 @@
 //! envelope timestamps; iteration is sorted (CONV-10); non-finite inputs are
 //! skipped fail-closed (CONV-8).
 
-use crate::options_greeks::{ChainMap, ContractKey, NS_PER_DAY, TickerSnap};
+use crate::options_greeks::{ChainMap, ContractKey, TickerSnap, NS_PER_DAY};
 use mp_core::event::{EventEnvelope, OptionKind};
 use std::collections::BTreeMap;
 
 /// Volatility risk premium: `IV_ATM − RV`. Fail-closed: `None` unless both
 /// sides are finite (IVS-5).
 pub fn vrp(iv_atm: f64, rv: f64) -> Option<f64> {
-    (iv_atm.is_finite() && rv.is_finite()).then(|| iv_atm - rv)
+    (iv_atm.is_finite() && rv.is_finite()).then_some(iv_atm - rv)
 }
 
 /// One expiry slice: ascending `(strike, mark_iv, open_interest)` plus call /
@@ -171,12 +171,7 @@ impl IvSurfaceAggregator {
 
     /// Expiry minimizing |T − target_years| among usable rows (IVS-3: nearest
     /// available expiry; never synthesized).
-    fn expiry_nearest_tenor(
-        &self,
-        u: &str,
-        target_years: f64,
-        now_ns: i64,
-    ) -> Option<i64> {
+    fn expiry_nearest_tenor(&self, u: &str, target_years: f64, now_ns: i64) -> Option<i64> {
         let chain = self.chain(u)?;
         let mut best = (f64::INFINITY, None);
         for key in chain.keys() {
@@ -254,11 +249,7 @@ impl IvSurfaceAggregator {
 // Catalog feature adapters
 // ---------------------------------------------------------------------------
 
-fn ticker_for(
-    agg: &mut IvSurfaceAggregator,
-    ev: &EventEnvelope,
-    underlying: &str,
-) -> bool {
+fn ticker_for(agg: &mut IvSurfaceAggregator, ev: &EventEnvelope, underlying: &str) -> bool {
     agg.on_ticker(ev, underlying)
 }
 
@@ -271,7 +262,10 @@ pub struct IvAtm {
 
 impl IvAtm {
     pub fn new(underlying: &str) -> Self {
-        Self { underlying: underlying.to_ascii_lowercase(), agg: IvSurfaceAggregator::new() }
+        Self {
+            underlying: underlying.to_ascii_lowercase(),
+            agg: IvSurfaceAggregator::new(),
+        }
     }
     pub fn aggregator(&self) -> &IvSurfaceAggregator {
         &self.agg
@@ -322,7 +316,8 @@ impl crate::engine::TickFeature for IvTerm {
         if !ticker_for(&mut self.agg, ev, &self.underlying) {
             return None;
         }
-        self.agg.term_iv(&self.underlying, self.tenor_years, ev.recv_ts_ns)
+        self.agg
+            .term_iv(&self.underlying, self.tenor_years, ev.recv_ts_ns)
     }
 }
 
@@ -343,7 +338,11 @@ impl IvSkew {
         Self::new(true, underlying)
     }
     fn new(want_wing: bool, underlying: &str) -> Self {
-        Self { want_wing, underlying: underlying.to_ascii_lowercase(), agg: IvSurfaceAggregator::new() }
+        Self {
+            want_wing,
+            underlying: underlying.to_ascii_lowercase(),
+            agg: IvSurfaceAggregator::new(),
+        }
     }
     pub fn aggregator(&self) -> &IvSurfaceAggregator {
         &self.agg
@@ -377,7 +376,10 @@ pub struct IvIndex {
 
 impl IvIndex {
     pub fn new(underlying: &str) -> Self {
-        Self { underlying: underlying.to_ascii_lowercase(), agg: IvSurfaceAggregator::new() }
+        Self {
+            underlying: underlying.to_ascii_lowercase(),
+            agg: IvSurfaceAggregator::new(),
+        }
     }
     pub fn aggregator(&self) -> &IvSurfaceAggregator {
         &self.agg
@@ -515,6 +517,3 @@ impl crate::engine::TickFeature for IvPercentileFeature {
         }
     }
 }
-
-
-

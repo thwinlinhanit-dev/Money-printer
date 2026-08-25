@@ -75,11 +75,16 @@ Python research package for offline analysis: daily brief generation via LLM, st
 - `autopsies/` — generated autopsy reports
 - `run_weekly_review.py` — weekly research review (roadmap Phase 1.2):
   ISO-week windowing of journaled runs (run_id date, else data_to_ns),
-  registry table, autopsies list, benchmark row `unset (1.1 pending)` until
-  the owner policy (1.1) defines it; append-only per week (exit 2 on
-  duplicate); generated date is the only wall-clock input
+  registry table, autopsies list, benchmark grounded on
+  `docs/OWNER_POLICY.md` §3 (BINDING 2026-08-25; fails closed to the explicit
+  `unset` row when the policy or any benchmark field is missing/unparseable);
+  append-only per week (exit 2 on duplicate); generated date is the only
+  wall-clock input
 - `reviews/` — weekly review reports
 - `brief.py` — daily brief generation pipeline
+- `insight_composer.py` — per-token AI insight agent (spec 044 TOK): deterministic pre-LLM flags, versioned prompt, InputBundle hash, `verify_grounded` numeric-subset check (signed numbers ground against signed metrics; a `%`-suffixed claim grounds against value×100), TTL cache + daily archive (latest wins per day, TOK-9); LLM injected as `llm_fn`, failure returns last cached insight marked stale (TOK-7)
+- `telegram_bot.py` — Telegram `/insight [asset]` bot (spec 044 scope): command parsing incl. `@botname` suffix, cache-hit answers vs synchronous regeneration when stale, default-assets broadcast; `get_updates`/`send_message` transport is INJECTED so the whole command path runs hermetically; only `send_message(token, ...)` touches the network
+- `run_telegram.py` — Telegram production entrypoint: reads `TELEGRAM_BOT_TOKEN` from the environment (never committed/logged), wires `run_polling` to real urllib long-poll transport; `--once` performs a single poll cycle then exits (cron/systemd-timer mode); `--assets` overrides watched underlyings; verified live against api.telegram.org 2026-08-24
 - `grading.py` — strategy grading logic
 - `grading_job.py` — automated grading job (emits machine `{week}.json` + human `{week}.md` report with next-stage recommendations, spec 017 GRD-3/5)
 - `event_study.py` — event study framework (CAR + seeded bootstrap CI; every `StudyRecord` discloses `n_days` and `ci_reliable` — CI from <3 distinct UTC days is flagged unreliable, never presented bare)
@@ -93,17 +98,22 @@ Python research package for offline analysis: daily brief generation via LLM, st
 - `coverage.py` (in `mp_data/`) — market coverage analysis
 - `reader.py` (in `mp_data/`) — event log reader
 - `run_brief.py`, `run_grading.py`, `run_band_accuracy.py`, `run_calibrate_leverage.py` — CLI entry points
-- `conftest.py`, `tests/` — pytest test suite
+- `conftest.py`, `tests/` — pytest test suite (`tests/test_insight.py` = tok_1..10; `tests/test_telegram.py` = injected-transport bot tests; `tests/test_ws.py` = ter_1/8/10 live-server WS/CSP/pagination tests; `tests/test_accumulation.py` = acc_5 forward-return study)
 - `prompts/daily-brief.md` — LLM prompt template
-- `termd.py` — terminal Slice 1 read-only HTTP API (spec 011, proto-History
-  Protocol v1, design doc `docs/superpowers/specs/2026-08-20-terminal-slice1-design.md`):
-  stdlib `http.server`, binds 127.0.0.1, serves the recorded feature store
-  (long-format Parquet) + raw-log derivations via `mp-query bars`/`mp-query dom`
-  to the local viewer; `/v1/*` JSON endpoints + static `terminal/`; read-only,
+- `termd.py` — terminal server (spec 011 Slice 1 read-only HTTP API + spec 041
+  analytics-terminal server surface): stdlib `http.server`, binds 127.0.0.1,
+  serves the recorded feature store (long-format Parquet) + raw-log derivations
+  via `mp-query bars`/`mp-query dom` to the local viewer; `/v1/*` JSON endpoints
+  with `offset`/`limit` pagination + honest `total` (TER-8); strict security
+  headers on every response — CSP without unsafe-eval, frame-ancestors 'none',
+  nosniff (TER-10); `/v1/ws` versioned RFC6455 WebSocket (`X-Ws-Protocol-Version`,
+  RFC-vector accept key, origin validation, subscribe/history/ping, coalesced
+  batch pushes ≥100ms apart — inside TER-1's 500ms budget); `/v1/insight`
+  (spec 044 TOK-5) cached-insight-with-staleness; static `terminal/`; read-only,
   no venue keys (UI-2), research-only (CONV-2 — never on live paths); missing
   symbol-days return `[]` + a `note`, never a silent blank chart (UI-5);
   `TERMD_DATA_ROOT`/`TERMD_MP_QUERY`/`TERMD_TERMINAL_DIR` env overrides;
-  verify with `py -3.13 -m pytest research/tests/test_terminal.py`
+  verify with `py -3.13 -m pytest research/tests/test_terminal.py research/tests/test_ws.py`
 - `terminal/` — static canvas viewer (`index.html` + `app.js`, no framework,
   no build): venue/symbol/date/tf/footprint-bucket/kind pickers, price candles
   + footprint-delta coloring + whale markers, CVD pane, DOM ladder (scrubbed

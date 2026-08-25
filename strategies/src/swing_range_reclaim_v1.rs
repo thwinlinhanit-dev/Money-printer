@@ -58,6 +58,13 @@ pub struct RangeReclaimConfig {
     pub bar_ns: i64,
     /// Clamp on the risk_pct → risk-units mapping.
     pub max_risk_units: f64,
+    /// Optional HTF confluence (spec 036 §2.3/§7): when true, a long also
+    /// needs a confirmed UP POC-flip within `poc_flip_max_age_ns` (short:
+    /// DOWN flip). Default OFF — the base v1 stays falsifiable on the sweep
+    /// signal alone; the confluence is a config decision, never silent.
+    pub require_poc_flip: bool,
+    /// Freshness window for the POC-flip confluence.
+    pub poc_flip_max_age_ns: i64,
 }
 
 impl Default for RangeReclaimConfig {
@@ -71,6 +78,8 @@ impl Default for RangeReclaimConfig {
             signal_timeout_ns: 2 * 86_400_000_000_000,
             bar_ns: 86_400_000_000_000,
             max_risk_units: 16.0,
+            require_poc_flip: false,
+            poc_flip_max_age_ns: 7 * 86_400_000_000_000,
         }
     }
 }
@@ -126,6 +135,9 @@ struct SymCtx {
     hvn_above: Option<(i64, f64)>,
     hvn_below: Option<(i64, f64)>,
     close: Option<(i64, f64)>,
+    /// Last confirmed POC-flip timestamps (spec 036 §7 confluence).
+    poc_flip_up: Option<i64>,
+    poc_flip_down: Option<i64>,
     /// Last seen sweep wick extremes (diagnostics only).
     last_sweep_extreme_low: Option<f64>,
     last_sweep_extreme_high: Option<f64>,
@@ -212,6 +224,18 @@ impl SwingRangeReclaimV1 {
             (Some(rh), Some(rl)) if rh > rl => (rh, rl),
             _ => return Vec::new(),
         };
+        // Optional HTF confluence (spec 036 §3): a fresh same-direction
+        // POC-flip must exist when the gate is armed.
+        if self.config.require_poc_flip {
+            let flip_ts = match side {
+                Side::Buy => ss.poc_flip_up,
+                Side::Sell => ss.poc_flip_down,
+            };
+            match flip_ts {
+                Some(ts) if now_ns - ts <= self.config.poc_flip_max_age_ns => {}
+                _ => return Vec::new(),
+            }
+        }
         if !stop.is_finite() {
             return Vec::new();
         }
@@ -406,6 +430,7 @@ impl Strategy for SwingRangeReclaimV1 {
             "swing.atr.".into(),
             "swing.profile.".into(),
             "swing.close".into(),
+            "swing.poc_flip.".into(),
         ]
     }
     fn warmup_ns(&self) -> i64 {
@@ -433,7 +458,8 @@ impl Strategy for SwingRangeReclaimV1 {
         let is_atr = !is_sweep && !is_range && u.name.starts_with("swing.atr.");
         let is_profile = u.name.starts_with("swing.profile.");
         let is_close = u.name == "swing.close";
-        if !(is_sweep || is_range || is_atr || is_profile || is_close) {
+        let is_flip = u.name.starts_with("swing.poc_flip.");
+        if !(is_sweep || is_range || is_atr || is_profile || is_close || is_flip) {
             return Vec::new();
         }
         if !self.universe.symbols.contains(&u.symbol) {
@@ -469,6 +495,14 @@ impl Strategy for SwingRangeReclaimV1 {
             let ss = self.per_sym.entry((u.venue, u.symbol)).or_default();
             if is_close {
                 ss.close = Some((u.ts_ns, u.value));
+            } else if is_flip {
+                // Confirmed POC-flip events: remember WHEN each direction
+                // last confirmed (the value is the POC price, diagnostics).
+                if u.name.starts_with("swing.poc_flip.up.") {
+                    ss.poc_flip_up = Some(u.ts_ns);
+                } else if u.name.starts_with("swing.poc_flip.down.") {
+                    ss.poc_flip_down = Some(u.ts_ns);
+                }
             } else if is_sweep {
                 // Plain extreme emission — diagnostics only.
                 if u.name.starts_with("swing.sweep.low.") {
@@ -556,6 +590,8 @@ impl Strategy for SwingRangeReclaimV1 {
     fn params(&self) -> ParamSpace {
         let mut p = ParamSpace::default();
         p.grid.insert("trail_atr".into(), vec![1.5, 2.0, 3.0]);
+        // Confluence on/off priced by the grid (0/1 boolean encoding).
+        p.grid.insert("require_poc_flip".into(), vec![0.0, 1.0]);
         p
     }
 
@@ -563,6 +599,11 @@ impl Strategy for SwingRangeReclaimV1 {
         let mut cfg = self.config;
         if let Some(&v) = params.get("trail_atr") {
             cfg.trail_atr = v;
+        }
+        if let Some(&v) = params.get("require_poc_flip") {
+            // Grid-encoded boolean (0/1) so walk-forward can price the
+            // confluence's contribution directly.
+            cfg.require_poc_flip = v != 0.0;
         }
         Box::new(SwingRangeReclaimV1::new(
             self.id.clone(),
@@ -894,13 +935,107 @@ mod tests {
         let s = strat();
         let mut params = BTreeMap::new();
         params.insert("trail_atr".to_string(), 3.0);
+        params.insert("require_poc_flip".to_string(), 1.0);
         let s2 = s.with_params(&params);
         let grid = s.params();
         assert_eq!(
             grid.grid.get("trail_atr").map(|v| v.as_slice()),
             Some(&[1.5, 2.0, 3.0][..])
         );
-        // The rebuilt instance must actually carry the override.
+        assert!(
+            grid.grid.contains_key("require_poc_flip"),
+            "confluence on/off priced by the grid"
+        );
         let _ = s2;
+    }
+
+    #[test]
+    fn swl_s11_poc_flip_confluence_gates_entry_when_armed() {
+        // require_poc_flip = true: without a fresh same-direction flip the
+        // sweep alone must NOT enter.
+        let cfg = RangeReclaimConfig { require_poc_flip: true, ..Default::default() };
+        let mut s = SwingRangeReclaimV1::new(
+            StrategyId::new("swing-range-reclaim-v1"),
+            Universe {
+                venues: vec![Venue::Hyperliquid],
+                symbols: vec![SymbolId(1)],
+            },
+            cfg,
+        );
+        let mut c = ctx(40);
+        feed_context(&mut s, &mut c, 40);
+        assert!(
+            s.on_feature(&up("swing.sweep.low.stop.20", 80.0, 41), &mut c)
+                .is_empty(),
+            "sweep without POC-flip confluence is refused"
+        );
+    }
+
+    #[test]
+    fn swl_s12_poc_flip_freshness_and_direction() {
+        let mk = |flip: bool| {
+            let cfg = RangeReclaimConfig { require_poc_flip: flip, ..Default::default() };
+            SwingRangeReclaimV1::new(
+                StrategyId::new("swing-range-reclaim-v1"),
+                Universe {
+                    venues: vec![Venue::Hyperliquid],
+                    symbols: vec![SymbolId(1)],
+                },
+                cfg,
+            )
+        };
+        let mut s = mk(true);
+        let mut c = ctx(40);
+        feed_context(&mut s, &mut c, 40);
+        // DOWN flip only: a LOW sweep needs UP — still refused.
+        assert!(s
+            .on_feature(&up("swing.poc_flip.down.90", 95.0, 41), &mut c)
+            .is_empty());
+        c.now = 42 * DAY;
+        feed_context(&mut s, &mut c, 42);
+        assert!(
+            s.on_feature(&up("swing.sweep.low.stop.20", 80.0, 43), &mut c)
+                .is_empty(),
+            "wrong-direction flip does not unlock"
+        );
+        // Fresh UP flip lands: entry unlocks on the next sweep event.
+        c.now = 43 * DAY;
+        feed_context(&mut s, &mut c, 43);
+        assert!(s
+            .on_feature(&up("swing.poc_flip.up.90", 95.0, 44), &mut c)
+            .is_empty());
+        c.now = 45 * DAY;
+        let intents = s.on_feature(&up("swing.sweep.low.stop.20", 80.0, 45), &mut c);
+        assert_eq!(intents.len(), 1, "fresh UP flip + low sweep → long");
+        assert_eq!(intents[0].side, Side::Buy);
+
+        // Stale flip (> 7 days) does NOT unlock.
+        let mut s2 = mk(true);
+        let mut c2 = TestCtx {
+            now: 10 * DAY,
+            count: 0,
+        };
+        feed_context(&mut s2, &mut c2, 10);
+        assert!(s2
+            .on_feature(&up("swing.poc_flip.up.90", 95.0, 11), &mut c2)
+            .is_empty());
+        c2.now = 40 * DAY;
+        feed_context(&mut s2, &mut c2, 40);
+        c2.now = 41 * DAY;
+        assert!(
+            s2.on_feature(&up("swing.sweep.low.stop.20", 80.0, 42), &mut c2)
+                .is_empty(),
+            "30-day-old flip is stale"
+        );
+
+        // Disarmed default: no flip needed at all.
+        let mut s3 = mk(false);
+        let mut c3 = ctx(40);
+        feed_context(&mut s3, &mut c3, 40);
+        assert_eq!(
+            s3.on_feature(&up("swing.sweep.low.stop.20", 80.0, 41), &mut c3)
+                .len(),
+            1
+        );
     }
 }

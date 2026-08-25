@@ -347,12 +347,13 @@ proptest! {
 
 #[test]
 fn opt_10_host_and_schema_signed_off() {
-    // OPT-10: the new schema (schema_ver 4, specs 033/034 — appended
-    // TradeWithAddr/NetflowSnapshot variants + Venue::Ethereum) + new host are
-    // documented in the checked-in example config, with no credentials (PD-2).
+    // OPT-10: the new schema (schema_ver 5, specs 033/034 + spec 040 —
+    // appended TradeWithAddr/NetflowSnapshot variants + Venue::Ethereum +
+    // Venue::Cboe) + new host are documented in the checked-in example
+    // config, with no credentials (PD-2).
     assert_eq!(
         mp_core::SCHEMA_VER,
-        4,
+        5,
         "schema amendment (spec 001) is live"
     );
     let example = include_str!("../deribit.example.toml");
