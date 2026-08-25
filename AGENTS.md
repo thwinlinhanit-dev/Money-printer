@@ -78,6 +78,8 @@ Default section order:
 
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md
 
+- Owner trading policy (capital, benchmark, max-loss) lives in `docs/OWNER_POLICY.md` — BINDING since 2026-08-25 (owner confirmed the agent-drafted values in writing). Agents still never change its limits (PD-1): any amendment goes through the owner via §6. Weekly reviews ground their benchmark on §3 and fail closed to `unset` if the file or fields go missing.
+
 ## Child DOX Index
 
 | Child AGENTS.md | Scope |
@@ -89,9 +91,9 @@ When the user requests a durable behavior change, record it here or in the relev
 | [oms/AGENTS.md](oms/AGENTS.md) | Order management crate — state machine, reconciliation, execution tracking |
 | [risk/AGENTS.md](risk/AGENTS.md) | Risk management crate — Kelly sizing, allocator, killswitch, governor, portfolio caps (SWG-6), risk gates |
 | [storage/AGENTS.md](storage/AGENTS.md) | Parquet storage crate — compaction, SCD2, feature store, manifest, audit |
-| [features/AGENTS.md](features/AGENTS.md) | Feature engineering crate — bars, engine, screener, catalog, hit journal |
+| [features/AGENTS.md](features/AGENTS.md) | Feature engineering crate — bars, engine, screener, catalog, hit journal, options Greeks/IV/flow analytics, IBIT cross-market, cohort grading, netflow velocity, accumulation detector |
 | [llm/AGENTS.md](llm/AGENTS.md) | LLM provider abstraction crate — Anthropic, Cohere, Gemini, OpenAI compat |
 | [ops/AGENTS.md](ops/AGENTS.md) | Operations crate — alerting, bot journal, daemon, runbooks, systemd, CI |
-| [specs/AGENTS.md](specs/AGENTS.md) | Design specification documents (000–036) |
+| [specs/AGENTS.md](specs/AGENTS.md) | Design specification documents (000–045) |
 | [research/AGENTS.md](research/AGENTS.md) | Python research package — brief, grading, event studies, coverage reader |
 | [data/AGENTS.md](data/AGENTS.md) | Market data storage — raw event logs, cold Parquet, manifests |

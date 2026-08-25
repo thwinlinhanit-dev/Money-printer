@@ -8,12 +8,12 @@ until evidence supports it.
 
 ## Next Step
 
-Verify the Phase-0 recorder, scorecard, backup, and canonical-host status
-against the roadmap before expanding the research universe.
+Let the nightly pipeline run on green guardrails (fixed 2026-08-25) and collect
+the remaining clean days: streak is 4/7 toward the promotion gate.
 
 ## Current Phase
 
-Phase 1 — Lab foundations
+Phase 2 — Make Phase 0 trustworthy
 
 ## Phases
 
@@ -21,15 +21,20 @@ Phase 1 — Lab foundations
 
 - [x] Define the lab objective as evidence production before trading returns.
 - [x] Preserve the repository's no-live-trading and human-promotion boundary.
-- [ ] Write owner-owned capital, benchmark, and maximum-loss policy.
-- **Status:** in_progress
+- [x] Write owner-owned capital, benchmark, and maximum-loss policy.
+  (`docs/OWNER_POLICY.md` — BINDING 2026-08-25: conservative defaults
+  ($200 live-small floor, 15%/1%/3% loss ladder, BTC benchmark) confirmed by
+  the owner in writing; changes go through §6 amendments.)
+- **Status:** complete
 
 ### Phase 2: Make Phase 0 trustworthy
 
-- [ ] Verify the daily scorecard, determinism, canonical recorder, and backup
-  all work continuously.
+- [x] Verify the daily scorecard, determinism, canonical recorder, and backup
+  all work continuously. (2026-08-25: determinism_ok=true over 31 scorecards;
+  guardrail blocker CONV-21 found and fixed — see Errors.)
 - [ ] Achieve and archive the required clean-recording streak.
-- **Status:** pending
+  (2026-08-25 verdict: 4/7 consecutive clean days, first break 2026-07-18.)
+- **Status:** in_progress
 
 ### Phase 3: Expand the research corpus safely
 
@@ -59,6 +64,7 @@ Phase 1 — Lab foundations
 |---|---|
 | Treat validated evidence as the deliverable | No strategy has passed the funnel on the present corpus. |
 | Keep capital at risk at zero through research and rehearsal | ROADMAP and PD-1 require written gates and human promotion. |
+| Owner policy drafted by agent, confirmed by owner | Agent proposed conservative defaults; owner reply "ok confirm" made `docs/OWNER_POLICY.md` binding (agents propose, never bind). |
 | Prioritize operations and data breadth over more strategy crates | The current bottleneck is corpus quality and scale, not strategy API capability. |
 | Add lab-control capabilities before alpha features | Registry, feasibility, quality impact, and execution calibration make results more trustworthy. |
 
@@ -68,3 +74,4 @@ Phase 1 — Lab foundations
 |---|---|---|
 | None in this planning pass | 1 | Not applicable |
 | Existing worktree whitespace issue | 1 | `git diff --check` reports a pre-existing blank line at EOF in `core/tests/golden_values.rs`; this plan did not modify it. |
+| Guardrails CONV-21 blocked the daily gate (no scorecards after 2026-08-21) | 1 | Root cause: IBIT/terminal/cohort work sat untracked in git and guardrails scan only tracked files; specs 040/041/042 then failed the ID-bearing-test rule. Fixed by staging all untracked sources/tests/specs, adding a real `wcg_12_*` catalog-entry test, relabeling spec 041 honestly to `implementing` (v2 frontend pending), and gitignoring `bin_local/` + runtime journal file. Guardrails green 2026-08-25. |
