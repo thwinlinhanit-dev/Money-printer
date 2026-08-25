@@ -163,6 +163,61 @@ fn bdc_3_existing_compat_paths_still_decode() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// INCIDENT-2026-08-22 lesson (reader/writer split): when `SCHEMA_VER` bumps,
+/// the dispatch in `core/src/log.rs` must keep decoding EVERY historical
+/// append-only predecessor — the 4→5 bump dropped the `4 =>` arm and blinded
+/// the gate to all schema-4 recordings (2026-08-18..08-22). This test frames
+/// one current-layout envelope under each historical `schema_ver`
+/// (2..=SCHEMA_VER-1) and requires the real `LogReader` to decode it.
+#[test]
+fn bdc_10_every_historical_schema_ver_decodes_through_log_reader() {
+    let dir = std::env::temp_dir().join(format!("mplog-bdc10-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Any current-layout envelope; the append-only amendment history means
+    // the bytes are identical across versions 2..current, only the stamp
+    // differs.
+    let env = mp_core::event::EventEnvelope::new(
+        mp_core::event::Venue::Hyperliquid,
+        SymbolId(7),
+        100,
+        100,
+        1,
+        MarketEvent::Trade {
+            price: 61_000.5,
+            qty: 0.25,
+            side: Side::Buy,
+            trade_id: 1,
+        },
+    );
+    let bin = encode_event(&env).unwrap();
+
+    for ver in 2..SCHEMA_VER {
+        let path = dir.join(format!("schema{ver}.log"));
+        let mut payload = (ver as u16).to_le_bytes().to_vec();
+        payload.extend_from_slice(&bin);
+        let mut frame = vec![1u8]; // FRAME_EVENT
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+        frame.extend_from_slice(&payload);
+
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"MPLOG\0\0\0").unwrap();
+        f.write_all(&1u16.to_le_bytes()).unwrap();
+        f.write_all(&frame).unwrap();
+        f.sync_all().unwrap();
+
+        let got: Vec<_> = LogReader::open(&path)
+            .unwrap_or_else(|e| panic!("schema-{ver} log must open: {e}"))
+            .map(|r| r.unwrap_or_else(|e| panic!("schema-{ver} frame must decode: {e}")))
+            .collect();
+        assert_eq!(got.len(), 1, "schema-{ver} frame must decode");
+        assert_eq!(&got[0].body, &env.body, "schema-{ver} body drift");
+        let _ = std::fs::remove_file(&path);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- BDC-4..9: repository-level acceptance (CONV-21 requires an ID-bearing
 // test fn per requirement; these are fast, hermetic file checks) ------------
 

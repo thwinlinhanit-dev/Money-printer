@@ -416,6 +416,16 @@ impl LogReader {
             // recordings (2026-08-05..08-18) stay readable and
             // promotable (W-6 / CONV-20).
             3 => codec::decode_event(&payload[2..])?,
+            // Schema-4: byte-identical envelope layout to the
+            // current one. The 4→5 bump (spec 040, 2026-08-22)
+            // appended `Venue::Cboe`/`InstrumentKind::Option` —
+            // no `MarketEvent` change — so old frames decode
+            // with the current types. Historical schema-4
+            // recordings (2026-08-18..08-22) stay readable and
+            // promotable (W-6 / CONV-20). (INCIDENT-2026-08-22
+            // lesson: this arm was missing after the 5 bump,
+            // blinding the gate to every VPS recording.)
+            4 => codec::decode_event(&payload[2..])?,
             // Schema-1 (pre-provenance): decode the historical
             // layout and normalize to the current envelope with
             // synthetic provenance. All market data is
