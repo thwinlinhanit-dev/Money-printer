@@ -53,6 +53,19 @@ pub struct WsEndpoint {
     /// an allowed region restores full data).
     /// Supported: `http://host:port` (HTTP CONNECT) and `socks5://host:port`.
     pub proxy: Option<String>,
+    /// Proactive connection-rotation age (spec 024 amendment 2026-08-25).
+    /// `None` (default) = live until the venue closes it. Some venues cap a
+    /// connection's *total lifetime* regardless of traffic — Hyperliquid's
+    /// edge kills every WS after ~2h48m–2h57m of wall time (measured across
+    /// Aug 22–25, BTC/ETH phase-offset, pings flowing), and the surprise
+    /// close can stall silently for tens of seconds before COL-2 notices,
+    /// which dirties the day's scorecard with a `stale_bursts` finding. When
+    /// set, the transport ends the connection *voluntarily* just after this
+    /// age (plus jitter so sibling collectors don't rotate in lockstep): the
+    /// collector sees an ordinary `Disconnected`, reconnects on its 250ms
+    /// full-jitter backoff, re-subscribes and re-seeds — sub-second, no
+    /// staleness mark. Keep comfortably under the observed venue TTL.
+    pub max_connection_age: Option<Duration>,
 }
 
 impl WsEndpoint {
@@ -66,6 +79,7 @@ impl WsEndpoint {
             ping_interval: Duration::from_secs(10),
             read_timeout: Duration::from_secs(20),
             proxy: None,
+            max_connection_age: None,
         }
     }
 
@@ -80,6 +94,15 @@ impl WsEndpoint {
     /// false reconnects (audit).
     pub fn with_read_timeout(mut self, timeout: Duration) -> Self {
         self.read_timeout = timeout;
+        self
+    }
+
+    /// Rotate the connection proactively after roughly `age` of wall time
+    /// instead of waiting for the venue's surprise lifetime kill (spec 024
+    /// amendment 2026-08-25). The actual deadline adds up to ~8% jitter so
+    /// sibling collectors never rotate simultaneously.
+    pub fn with_max_connection_age(mut self, age: Option<Duration>) -> Self {
+        self.max_connection_age = age;
         self
     }
 }
@@ -300,6 +323,16 @@ fn now_ns() -> i64 {
     }
 }
 
+/// Total time before a proactive rotation fires for a connection capped at
+/// `age`: the age itself plus up to ~8% jitter (spec 024 amendment
+/// 2026-08-25), so sibling collectors on the same venue never rotate in
+/// lockstep. Deterministic in `seed` (workspace SplitMix64, CONV-11).
+fn rotation_delay(age: Duration, seed: u64) -> Duration {
+    let mut rng = mp_core::SplitMix64::new(seed | 1);
+    let frac = rng.below(1000) as f64 / 1000.0; // [0, 1)
+    age + age.mul_f64(0.08 * frac)
+}
+
 /// Type-erased stream so the proxied path (TCP -> CONNECT/SOCKS5 -> TLS) and
 /// the direct path produce the same downstream type.
 /// `dyn A + B` is not allowed for non-auto traits, so we define a supertrait.
@@ -343,6 +376,18 @@ async fn run(
     // never sends a FIN.
     let mut ping_tick = tokio::time::interval(endpoint.ping_interval);
     ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // Proactive rotation (spec 024 amendment 2026-08-25): some venues cap a
+    // connection's TOTAL lifetime regardless of traffic (Hyperliquid: ~2h50m
+    // measured). Waiting for that kill risks a silent stall before COL-2
+    // fires; rotating voluntarily just after `max_connection_age` turns the
+    // surprise into a scheduled sub-second reconnect. Jitter (up to ~8% of
+    // the age) desynchronizes sibling collectors so they never rotate in
+    // lockstep. Seeded from the recv clock — jitter is not a decision path.
+    let rotate_at = endpoint.max_connection_age.map(|age| {
+        tokio::time::Instant::now() + rotation_delay(age, now_ns() as u64)
+    });
+
     loop {
         tokio::select! {
             biased;
@@ -397,6 +442,24 @@ async fn run(
                     interval_s = endpoint.ping_interval.as_secs(),
                     "ws keepalive ping sent"
                 );
+            }
+            _ = async {
+                match rotate_at {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                tracing::info!(
+                    age_s = endpoint
+                        .max_connection_age
+                        .map(|a| a.as_secs())
+                        .unwrap_or(0),
+                    "ws max connection age reached; rotating connection proactively"
+                );
+                // Best-effort polite close; the collector's Disconnected path
+                // handles re-subscribe and book re-seed either way.
+                let _ = write.send(Message::Close(None)).await;
+                break;
             }
         }
     }
@@ -723,6 +786,71 @@ mod tests {
             let _ = run(endpoint, producer).await;
         });
         handle.await.unwrap();
+    }
+
+    /// Proactive rotation (spec 024 amendment 2026-08-25): with
+    /// `max_connection_age` set, the transport must end the connection on its
+    /// own after ~the configured age even though the venue keeps the socket
+    /// open — the collector then reconnects via its normal Discovered path.
+    /// Mock server holds the connection and asserts it receives a Close.
+    #[tokio::test]
+    async fn ws_proactive_rotation_ends_connection_at_max_age() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut server = tokio_tungstenite::accept_async(sock)
+                .await
+                .expect("client handshake must complete");
+            // Hold the connection open (no data, no close) and wait for the
+            // client's voluntary Close. Fail if the client never rotates.
+            let deadline = tokio::time::sleep(Duration::from_secs(10));
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    _ = &mut deadline => panic!("client never rotated at max age"),
+                    msg = server.next() => match msg {
+                        Some(Ok(Message::Close(_))) => return, // observed: done
+                        Some(Ok(_)) => continue,
+                        Some(Err(e)) => panic!("server read error: {e}"),
+                        None => panic!("client closed without a Close frame"),
+                    },
+                }
+            }
+        });
+
+        let mut endpoint = WsEndpoint::new(format!("ws://127.0.0.1:{port}"), vec![]);
+        endpoint.max_connection_age = Some(Duration::from_millis(150));
+        let queue = FrameQueue::new(4, BackpressurePolicy::Unbounded);
+        let producer = queue.clone();
+        // run() must finish on its own (rotation), not hang until the server
+        // drops the socket.
+        tokio::time::timeout(Duration::from_secs(5), async move {
+            let _ = run(endpoint, producer).await;
+        })
+        .await
+        .expect("run must end by rotating at max connection age");
+        server.await.unwrap();
+    }
+
+    /// Rotation delay bounds: always at least the configured age (never early)
+    /// and never more than age + 8% jitter, and spread across seeds so sibling
+    /// collectors do not rotate in lockstep.
+    #[test]
+    fn rotation_delay_is_age_plus_bounded_jitter() {
+        let age = Duration::from_secs(8_100); // 2h15m — the hyperliquid setting
+        for seed in 0..500u64 {
+            let d = rotation_delay(age, seed);
+            assert!(d >= age, "rotation must never fire before max age");
+            assert!(
+                d <= age + age.mul_f64(0.08),
+                "jitter must stay under 8% (observed venue kill minimum is 2h48m)"
+            );
+        }
+        // Distinct seeds produce distinct delays (lockstep desync).
+        let a = rotation_delay(age, 1);
+        let b = rotation_delay(age, 2);
+        assert_ne!(a, b, "different seeds must give different rotation times");
     }
 
     /// SOCKS5 tunnel: greeting + CONNECT handshake against a mock server that

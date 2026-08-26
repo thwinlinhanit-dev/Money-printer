@@ -264,3 +264,25 @@ authenticated trading, strategy changes, and long-running hosting policy.
   watermark dedup, REST==WS body-equality, suppression, Bybit topic shapes,
   signature vector) + mp-ops venue-scoping test; gate wiring in
   `daily_pipeline.ps1` and `daily_maintenance.sh`.
+- 2026-08-25 (proactive WS connection rotation — Hyperliquid venue-TTL
+  mitigation): the Phase-0 promotion amendment requires **zero
+  `stale_bursts`** across the qualifying window, and every burst since
+  08-21 traces to one mechanism: Hyperliquid's edge caps each WebSocket's
+  *total lifetime* at ~2h48m–2h57m regardless of traffic (measured across
+  08-22..25 from VPS journals — BTC/ETH processes disconnect on independent
+  ~2h50m phase-offset schedules with client pings flowing every 10s, so it
+  is neither idle timeout nor host/network events). Most TTL kills recover
+  sub-second with no finding, but two aggravating modes dirtied days: a
+  silent stall before COL-2 fires (08-22 10:13 BTC: 29.6s) and a
+  server-side reconnect-refusal loop (08-23 08:17:43–47: ~15 resets in 4s).
+  Fix: `WsEndpoint::max_connection_age` (default `None`) makes the
+  transport close its own connection voluntarily at age + ≤8% jitter
+  (SplitMix64, CONV-11; jitter desynchronizes sibling collectors so they
+  never rotate in lockstep). The collector sees an ordinary
+  `Disconnected`, reconnects on its existing 250ms full-jitter backoff,
+  re-subscribes and re-seeds the book — a scheduled non-event instead of a
+  surprise kill. `mp-collector` sets this to **2h15m** for hyperliquid
+  only (≥33 min under the observed minimum kill); other venues keep
+  live-until-closed until their own TTL is measured. COL-2 remains the
+  backstop. Tests: `ws_proactive_rotation_ends_connection_at_max_age`,
+  `rotation_delay_is_age_plus_bounded_jitter` (mp-collectors, live-ws).

@@ -482,10 +482,25 @@ mod inner {
                 }
             }
 
+            // Proactive rotation (spec 024 amendment 2026-08-25): Hyperliquid's
+            // edge kills every WS after ~2h48m–2h57m of wall time regardless of
+            // traffic (measured Aug 22–25); the surprise close can stall silently
+            // for tens of seconds and dirties the day's scorecard with a
+            // stale_bursts finding — the sole remaining Phase-0 promotion
+            // blocker. Rotate at 2h15m + jitter, comfortably under the observed
+            // minimum kill (2h48m), so reconnects are scheduled non-events.
+            let max_connection_age = if venue_str == "hyperliquid" {
+                Some(Duration::from_secs(2 * 3600 + 15 * 60))
+            } else {
+                None
+            };
+
             Ok(Self {
                 name,
                 symbol: symbol.to_owned(),
-                endpoint: WsEndpoint::new(url, subscribe).with_proxy(proxy),
+                endpoint: WsEndpoint::new(url, subscribe)
+                    .with_proxy(proxy)
+                    .with_max_connection_age(max_connection_age),
                 venue,
                 binance_symbol: if venue_str == "binance" {
                     Some(symbol.to_string())
