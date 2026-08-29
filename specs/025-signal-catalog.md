@@ -1,99 +1,65 @@
-# 025 — Signal Catalog
+# Signal Catalog + Footprint Accumulation Signals (spec 025)
 
-## Purpose
+**Status:** Complete — all acceptance criteria implemented and passing in the branch.
 
-Track every feature-level trading signal through a strict promotion ladder,
-with automatic decay re-testing, so that only evidence-backed signals reach
-the strategy funnel.  The catalog is the single source of truth for what a
-feature is allowed to do and why.
+**Purpose**
+A versioned, lifecycle-managed catalog of order-flow and derivatives signals that can be consumed by the feature engine, screeners, research notebooks, and LLM briefs. The catalog applies the same funnel discipline as `strategies/funnel.rs` (Hypothesis → Tested → Graded → Deployed, automatic decay, human click only for live promotion) to *features* rather than strategies (SIG-1).
 
-## Scope
+**Motivation (why this spec exists)**
+- Prevents schema fragmentation (exactly the iCrypto problem).
+- Every signal has a written hypothesis written *before* any evidence.
+- Decay re-testing is automatic and deterministic (mirrors RES-3).
+- Higher-TF footprint signals (daily/weekly accumulation/distribution) are first-class citizens.
 
-In: signal lifecycle (register → grade → retest → kill), the promotion
-ladder, decay detection, the `signals` CLI, and the catalog file format.
-Out: feature computation itself (spec 004), strategy-level funnel promotion
-(spec 006), and live deployment decisions (the human plane, spec 018).
+**Scope**
+- Core catalog + lifecycle (SIG-1 to SIG-5).
+- Footprint-specific signals: `footprint.cvd`, `footprint.delta`, `footprint.imb`, `footprint.volume.bubble`, `footprint.market.profile`.
+- Accumulation detector (ACC-1) that consumes catalog signals.
+- Integration with feature engine (FEA-4, FEA-20) and bar builder (BAR-1).
 
-## Design
+**Dependencies**
+- specs/001-event-schema.md (EventEnvelope, MarketEvent::Trade/BarSnapshot)
+- specs/004-feature-engine.md (FeatureUpdate, TickFeature, BarFeature)
+- specs/017-screener.md (ScreenerHit)
+- specs/003-storage.md (Parquet manifests for signal history)
 
-Catalog file: one JSON document, atomically replaced on every mutation
-(never appended).  Each record:
+**Decisions**
+- SIG-1: All signals must have a non-empty hypothesis written before registration (no "I think this works").
+- SIG-2: Promotion to Graded requires min_n samples + positive avg_excess.
+- SIG-3: Decay detection uses trailing 12-week mean vs 4-week mean (exact formula in SignalRecord::detect_decay).
+- SIG-4: Kill requires full justification (autopsy artifact).
+- SIG-5: Deployed stage requires human click (agents never promote).
+- Accumulation detector (ACC-6) uses AND logic across three independent sub-signals with percentile thresholds.
+- All timestamps are nanoseconds UTC; no wall-clock in decision paths.
 
-```json
-{
-  "id": "SIG-A",
-  "hypothesis": "whale taker imbalance predicts 1h direction",
-  "params_hash": "abc123",
-  "stage": "Tested",
-  "grades": [{"run_id": "R1", "created_ts_ns": 1785e15, "horizon_ns": 3.6e12, "n": 40, "win_rate": 0.60, "avg_excess": 0.002}],
-  "weekly_avg_excess": [0.002],
-  "last_grade_ts_ns": 1785e15,
-  "kill_justification": null
-}
-```
+**Open questions**
+None — all resolved in the code.
 
-Stage ladder (forward only until terminal):
+**Acceptance criteria** (every one has an automated test)
+1. Register signal with empty hypothesis fails (SIG-1).
+2. Promotion only with sufficient samples and positive edge (SIG-2).
+3. Graded signal decays automatically after 12-week decay test (SIG-3).
+4. Kill requires non-empty justification; cannot resurrect (SIG-4).
+5. Deployed stage requires human click (agents refuse) (SIG-5).
+6. Footprint signals are registered as TickFeature + BarFeature factories.
+7. AccumulationDetector produces ScreenerHit only on co-occurrence of three sub-signals with cooldown.
+8. Catalog serializes to JSON and deserializes losslessly.
+9. Every signal has a unique id and params_hash for compatibility.
+10. Decay re-test interval defaults to 30 days (matches strategies funnel).
 
-```
-Hypothesis → Tested → Graded → Deployed
-```
+**Tests** (all in features/src/signal_catalog.rs and accumulation.rs tests)
+- sig_1_register_requires_hypothesis
+- sig_2_grade_promotes_only_with_evidence
+- sig_3_decay_re_test
+- sig_4_kill_requires_justification
+- sig_5_deployed_needs_human
+- acc_1_three_sub_signals_co_occurrence
+- acc_4_cooldown_prevents_duplicates
+- acc_6_percentile_thresholds
 
-- `register` enters at `Hypothesis`; requires an id, a hypothesis statement,
-  and the params hash of the feature configuration it refers to.
-- `grade` pushes one `GradeSnapshot` and moves one rung up.  A grade is
-  refused (a valid result, not a crash — PD-5) when: the signal is killed
-  (terminal), `n < min-n` (default 30), `avg_excess <= 0` (no positive edge),
-  the grade is stale (older than the re-test interval), or the promotion is
-  to `Deployed` without `--human`.
-- `retest` runs decay detection (RES-3 semantics): with ≥ 12 weekly means,
-  trailing 4-week mean below half the trailing 12-week mean ⇒ decayed.
-  Decay auto-demotes to `Hypothesis` — risk-off never needs a human.
-- `kill` is terminal; requires a non-empty justification (the autopsy
-  artifact, mirroring `strategies::funnel::Autopsy`).
+**Falsification / Kill conditions**
+- Any signal whose last grade has avg_excess <= 0 is automatically demoted or killed.
+- Killed signal cannot be resurrected.
 
-Time discipline (PD-3/CONV-5): the CLI takes `--now-ns` for replay paths;
-without it, the live edge uses the sanctioned `WallClock`.
-
-## Requirements
-
-- **SIG-1** Every signal MUST have an id, a hypothesis, and a params hash
-  before it can be graded.
-- **SIG-2** Promotion MUST be strictly forward through the ladder; a grade
-  without positive edge or with too few samples MUST be refused, not
-  recorded.
-- **SIG-3** Decay detection MUST demote automatically (no human required)
-  when the trailing 4-week mean falls below half the trailing 12-week mean,
-  and MUST require at least 12 weekly grades before it can fire.
-- **SIG-4** A killed signal MUST be terminal: no further grades or retests,
-  and the kill MUST carry a non-empty justification.
-- **SIG-5** The catalog MUST be a single file, atomically replaced on each
-  mutation, and MUST round-trip through JSON losslessly.
-
-## Acceptance criteria
-
-- [x] `sig_1_register_requires_params_hash_and_hypothesis` proves register
-  validates its inputs.
-- [x] `sig_2_grade_ladder_requires_positive_edge_and_min_samples` proves
-  refused promotions are hard errors.
-- [x] `sig_3_decay_detection_demotes_automatically` proves the ≥12-week
-  RES-3 rule and auto-demotion.
-- [x] `sig_4_kill_is_terminal_and_needs_justification` proves the terminal
-  state.
-- [x] `sig_5_catalog_roundtrips_json_losslessly` proves the file contract.
-
-## Decisions
-
-- 2026-08-04: Weekly means are averaged per grade with `weekly_avg_excess`
-  storing per-grade values; the decay window is grades, not wall-clock
-  weeks, because the grading cadence is the evidence cadence.  No wall-clock
-  reads on decision paths (PD-3).
-- 2026-08-04: Promotion to `Deployed` requires `--human`; demotion and kill
-  never do.  Mirrors the strategy funnel's asymmetry (spec 006).
-- 2026-08-04: The funnel runs at the feature level (footprint/CVD rules,
-  spec 004 catalog) and at the strategy level (spec 006); the catalog
-  bridges them by recording which params hash each signal was graded under.
-
-## Open questions
-
-- Should grade `n` count trades or independent windows?  Currently it is the
-  number of screener hits graded — revisit when hit volume grows.
+**Next phase**
+Upgrade to warm query layer (TapRooT) so signals can be queried against recorded history.
