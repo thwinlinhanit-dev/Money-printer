@@ -54,3 +54,7 @@ ops/keys/
 ops/offhost-drill/
 data/.offhost-staging/
 data/.offhost-drill/
+
+# TradingView MCP server (third-party, not committed)
+tradingview-mcp/
+.npm-cache/

@@ -1,0 +1,7 @@
+{
+  "series": [
+    {"series_id": "USDT_SUPPLY", "value": 120000000000.0, "date": "2026-08-26"},
+    {"series_id": "DEFI_TVL_AGG", "value": 87800000000.0, "date": "2026-08-26"},
+    {"series_id": "DEX_VOL_1D", "value": 15000000000.0, "date": "2026-08-26"}
+  ]
+}

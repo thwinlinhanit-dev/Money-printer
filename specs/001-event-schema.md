@@ -116,6 +116,39 @@ is unchanged: `CodecError::Encode(String)` / `CodecError::Decode(String)`
 because RUSTSEC-2025-0141 has no patched version — plain `bincode` 2.x
 stays flagged and would keep the audit debt alive (BDC-7).
 
+## Amendment 2026-08-26 — external MACRO-series venues (specs 046/047/048, schema 6)
+
+Three specs from the external-data survey
+(`research/external_data_sources_findings.md`) add externally-sourced or
+self-derived **macro/regime** series. Decision: **reuse the existing
+`MarketEvent::MacroPoint` body everywhere** and grow **only the `Venue` enum**
+(append-only, CONV-20) where the series comes from a distinct external source.
+Nothing else in the codec changes.
+
+- **`Venue::DeFiLlama`** (spec 046, owner sign-off 2026-08-26) — envelope venue for
+  `MacroPoint` series from `api.llama.fi` (keyless): `DEFI_TVL_AGG`,
+  `USDT_SUPPLY`, `USDC_SUPPLY`, `STABLECOIN_MCAP`, `DEX_VOL_1D`.
+- **`Venue::Coinalyze`** (spec 047, owner sign-off 2026-08-26) — envelope venue for
+  `MacroPoint` series from `api.coinalyze.net/v1` (`COINALYZE_API_KEY` env, PD-2):
+  `AGG_OI_{SYM}`, `AGG_FUNDING_{SYM}`, `AGG_LS_{SYM}`, `AGG_LIQ_{SYM}`, SYM ∈
+  {BTC, ETH}.
+- **No venue for the correlation feature** (spec 048): it is a **feature-engine
+  derivation (spec 004)**, emitting `corr.*` `FeatureUpdate`s over already-recorded
+  prices + FRED `MacroPoint`s. It adds no `Venue`, no `MarketEvent`, and therefore
+  no schema change.
+
+**Schema impact:** append `Venue::DeFiLlama` and `Venue::Coinalyze` to the enum in
+`core/src/event.rs` (after `Cboe`), add slugs `"defillama"` / `"coinalyze"`,
+add round-trips in `from_slug`, and bump `SCHEMA_VER` 5 → 6 in `core/src/lib.rs`
+(append-only; update the docstring). Storage: add `"defillama"` / `"coinalyze"` to
+`venue_slug` in `storage/src/layout.rs` and assign appended numeric `venue_code`
+(11 / 12, `venue_from_code` inverse). Old frames keep their variant indices
+(CONV-7); no migration, W-6 unaffected. Spec 048 requires no codec change.
+
+> Schema-6 note applies on implementation: append-only venue growth; the log reader
+> already dispatches on `schema_ver` (see `core::log::LogReader`), and new-venue
+> `MacroPoint` frames decode with the current types.
+
 ## Requirements
 - **EVT-1** `core` crate MUST define envelope, variants, `Venue`, `Side`,
   `SymbolMeta` exactly as above; field names are law (no synonyms).

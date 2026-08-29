@@ -10,6 +10,7 @@ use mp_core::{fnv1a_absorb, FNV1A_OFFSET};
 use serde::{Deserialize, Serialize};
 
 use crate::accumulation::AccumulationConfig;
+use crate::climax_variants::{V1Config, V2Config, V3Config, V4Config, V5Config, V6Config};
 use crate::cohort::CohortConfig;
 use crate::ibit_cross::IbitCrossParams;
 use crate::netflow_flow::NetflowFlowConfig as NetflowFlowConfigInner;
@@ -765,6 +766,48 @@ pub struct AccumulationParams {
     pub inner: AccumulationConfig,
 }
 
+/// Params for the climax variant pattern family (6 non-standard exhaustion/
+/// expansion signals from BTC daily analysis 2017-2026).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClimaxVariantsParams {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_v1")]
+    pub v1: V1Config,
+    #[serde(default = "default_v2")]
+    pub v2: V2Config,
+    #[serde(default = "default_v3")]
+    pub v3: V3Config,
+    #[serde(default = "default_v4")]
+    pub v4: V4Config,
+    #[serde(default = "default_v5")]
+    pub v5: V5Config,
+    #[serde(default = "default_v6")]
+    pub v6: V6Config,
+}
+
+fn default_v1() -> V1Config { V1Config::default() }
+fn default_v2() -> V2Config { V2Config::default() }
+fn default_v3() -> V3Config { V3Config::default() }
+fn default_v4() -> V4Config { V4Config::default() }
+fn default_v5() -> V5Config { V5Config::default() }
+fn default_v6() -> V6Config { V6Config::default() }
+
+impl Default for ClimaxVariantsParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            v1: V1Config::default(),
+            v2: V2Config::default(),
+            v3: V3Config::default(),
+            v4: V4Config::default(),
+            v5: V5Config::default(),
+            v6: V6Config::default(),
+        }
+    }
+}
+
 /// The whole catalog config (FEA-7). One file, all params, no unknown keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -824,6 +867,14 @@ pub struct FeaturesConfig {
     /// Accumulation detector (spec 045) — disabled when `enabled` is false.
     #[serde(default)]
     pub accumulation: AccumulationParams,
+    /// Cross-asset correlation family (spec 048) — disabled when `enabled`
+    /// is false.
+    #[serde(default)]
+    pub corr: crate::corr::CorrConfig,
+    /// Climax variant patterns (6 non-standard exhaustion/expansion signals
+    /// discovered from BTC daily analysis 2017–2026).
+    #[serde(default)]
+    pub climax_variants: ClimaxVariantsParams,
 }
 
 fn default_bar_tf() -> i64 {
@@ -855,6 +906,8 @@ impl Default for FeaturesConfig {
             netflow_flow: NetflowFlowParams::default(),
             oi_regime: OiRegimeParams::default(),
             accumulation: AccumulationParams::default(),
+            corr: crate::corr::CorrConfig::default(),
+            climax_variants: ClimaxVariantsParams::default(),
         }
     }
 }

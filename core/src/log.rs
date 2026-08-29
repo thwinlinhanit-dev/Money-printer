@@ -204,12 +204,13 @@ impl EventLogWriter {
         if exists {
             let valid = scan_valid_len(path)?;
             let actual = std::fs::metadata(path)?.len();
-            // A valid log begins with MAGIC + FORMAT_VER. scan_valid_len
-            // returns the offset of the first byte that does not parse as a
-            // complete frame, which for a well-formed file is the file length.
-            // A file that has MAGIC but nothing else, or no MAGIC at all, has
-            // no header.
-            let header_len = (MAGIC.len() + 4) as u64;
+            // A valid log begins with MAGIC(8) + FORMAT_VER:u16(2) = 10 bytes.
+            // scan_valid_len returns exactly MAGIC.len() + 2 for a header-only
+            // file (audit C-1: this used to compare against MAGIC.len() + 4, so
+            // a header-only file was judged headerless and a second header was
+            // appended; the next session's scan then misparsed that second
+            // header as a frame and truncated the whole log).
+            let header_len = (MAGIC.len() + 2) as u64;
             has_header = valid >= header_len;
             if valid < actual {
                 let f = OpenOptions::new().write(true).open(path)?;
@@ -426,6 +427,14 @@ impl LogReader {
             // lesson: this arm was missing after the 5 bump,
             // blinding the gate to every VPS recording.)
             4 => codec::decode_event(&payload[2..])?,
+            // Schema-5: byte-identical envelope layout to the
+            // current one. The 5→6 bump (spec 040) appended
+            // `Venue::DeFiLlama`/`Venue::Coinalyze` — no
+            // `MarketEvent` change — so old frames decode with
+            // the current types. Historical schema-5
+            // recordings stay readable and promotable (W-6 /
+            // CONV-20).
+            5 => codec::decode_event(&payload[2..])?,
             // Schema-1 (pre-provenance): decode the historical
             // layout and normalize to the current envelope with
             // synthetic provenance. All market data is
@@ -773,6 +782,113 @@ mod tests {
                 assert_eq!(*side, Side::Sell);
             }
             other => panic!("wrong variant: {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- audit C-1 regression: header_len off-by-two -------------------------
+
+    fn demo_event(seq: u64) -> EventEnvelope {
+        EventEnvelope::new(
+            Venue::Bybit,
+            SymbolId(1),
+            10,
+            20 + seq as i64,
+            seq,
+            MarketEvent::Trade {
+                price: 1.0,
+                qty: 2.0,
+                side: Side::Buy,
+                trade_id: seq,
+            },
+        )
+    }
+
+    /// C-1: a session that opened the log (header written) but crashed before
+    /// writing any frame must be recognized as *having* a header on reopen.
+    /// Regression: `header_len = MAGIC.len() + 4` judged a 10-byte header-only
+    /// file headerless, so the next open appended a second header; the scan in
+    /// the session after that misparsed it as a frame (len ≈ 1.19 GB > 
+    /// MAX_FRAME_LEN → Torn → valid = 10) and truncated the entire log.
+    #[test]
+    fn regression_audit28_c1_header_only_log_not_reheadered_or_truncated() {
+        let dir = std::env::temp_dir().join(format!("mplog-c1a-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c1a.log");
+        let _ = std::fs::remove_file(&path);
+
+        // Session 1: open (writes the 10-byte header), write nothing, drop.
+        let (w, truncated) = EventLogWriter::open(&path).unwrap();
+        assert!(!truncated);
+        drop(w);
+        let header_len = (MAGIC.len() + 2) as u64;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            header_len,
+            "session 1 must leave exactly the header"
+        );
+
+        // Session 2: reopen — no duplicate header may be appended.
+        let (mut w, truncated) = EventLogWriter::open(&path).unwrap();
+        assert!(!truncated, "header-only log must not be truncated on reopen");
+        w.append(&demo_event(0)).unwrap();
+        w.append(&demo_event(1)).unwrap();
+        w.sync().unwrap();
+        drop(w);
+
+        // Session 3: reopen again — all frames readable, nothing truncated,
+        // exactly one header (scan_valid_len == actual file length).
+        let (w, truncated) = EventLogWriter::open(&path).unwrap();
+        assert!(!truncated, "valid log must never be truncated on reopen");
+        drop(w);
+        let valid = scan_valid_len(&path).unwrap();
+        let actual = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(valid, actual, "scan must validate the whole file");
+        assert!(
+            actual > header_len,
+            "second header must not have been appended"
+        );
+        let got: Vec<_> = LogReader::open(&path)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(got.len(), 2, "both events must survive all three sessions");
+        assert_eq!(got[0].stream_seq, 0);
+        assert_eq!(got[1].stream_seq, 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// C-1 companion: a normal header + frames log reopened must not be
+    /// truncated and must keep every frame (valid == actual length).
+    #[test]
+    fn regression_audit28_c1_log_with_frames_reopen_not_truncated() {
+        let dir = std::env::temp_dir().join(format!("mplog-c1b-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c1b.log");
+        let _ = std::fs::remove_file(&path);
+
+        const N: u64 = 5;
+        let (mut w, truncated) = EventLogWriter::open(&path).unwrap();
+        assert!(!truncated);
+        for i in 0..N {
+            w.append(&demo_event(i)).unwrap();
+        }
+        w.sync().unwrap();
+        drop(w);
+
+        let (w, truncated) = EventLogWriter::open(&path).unwrap();
+        assert!(!truncated, "well-formed log must not be truncated on reopen");
+        drop(w);
+        let valid = scan_valid_len(&path).unwrap();
+        let actual = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(valid, actual, "valid must equal actual length");
+        let got: Vec<_> = LogReader::open(&path)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(got.len() as u64, N);
+        for (i, e) in got.iter().enumerate() {
+            assert_eq!(e.stream_seq, i as u64);
         }
         let _ = std::fs::remove_file(&path);
     }

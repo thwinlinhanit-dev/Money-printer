@@ -1,0 +1,179 @@
+// ═══════════════════════════════════════════════════════════════
+// V5 ABSORPTION BAR — KELLY CRITERION SIZING
+// Positions sized by Kelly formula: f* = (W/A) - ((1-W)/B)
+// Where: W = win rate, A = avg loss, B = avg win
+// ═══════════════════════════════════════════════════════════════
+//@version=6
+strategy("V5 Kelly Sizing", overlay=true, 
+     default_qty_type=strategy.fixed,
+     default_qty_value=0,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.06,
+     slippage=5,
+     calc_on_every_tick=false)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+// Detection
+wickRatio      = input.float(2.0, "Min Wick/Body Ratio", step=0.1)
+bodyPctMax     = input.float(0.15, "Max Body % of Range", step=0.05)
+volSpike       = input.float(1.2, "Volume Spike × MA", step=0.1)
+volMALen       = input.int(20, "Volume MA Length")
+
+// Trend Filter
+useTrendFilter = input.bool(true, "Use Trend Filter")
+smaLen         = input.int(50, "SMA Length")
+
+// Kelly Parameters
+kellyWinRate   = input.float(0.64, "Kelly: Win Rate (0-1)", step=0.01)
+kellyAvgWin    = input.float(0.207, "Kelly: Avg Win (decimal)", step=0.01)
+kellyAvgLoss   = input.float(0.085, "Kelly: Avg Loss (decimal)", step=0.01)
+kellyFrac      = input.float(0.25, "Kelly Fraction (quarter-Kelly)", step=0.05)
+maxPosPct      = input.float(5.0, "Max Position % of Equity", step=0.5)
+minPosPct      = input.float(0.5, "Min Position % of Equity", step=0.1)
+
+// Risk Management
+atrLen         = input.int(14, "ATR Length")
+trailATR       = input.float(2.0, "Trailing Stop (× ATR)", step=0.5)
+tpPct          = input.float(0.0, "Take Profit % (0 = no TP)", step=1.0)
+maxHoldBars    = input.int(56, "Max Hold Bars (56 = 8w weekly)")
+
+// ═══════════════════════════════════════════════════════════════
+// KELLY CRITERION CALCULATION
+// ═══════════════════════════════════════════════════════════════
+// Full Kelly: f* = W/A - (1-W)/B
+// Where: W = win rate, A = avg loss, B = avg win
+// Fractional Kelly: f = kellyFrac * f*
+// ═══════════════════════════════════════════════════════════════
+
+// Compute Kelly fraction
+avgWin = kellyAvgWin
+avgLoss = kellyAvgLoss
+winRate = kellyWinRate
+
+// Kelly formula (positive edge only)
+kellyFull = (winRate * avgWin - (1 - winRate) * avgLoss) / avgWin
+
+// Apply fractional Kelly
+kellySized = kellyFull * kellyFrac
+
+// Clamp to min/max
+posPct = math.max(minPosPct, math.min(maxPosPct, kellySized * 100))
+
+// ═══════════════════════════════════════════════════════════════
+// DETECTION: Absorption Bar
+// ═══════════════════════════════════════════════════════════════
+atr = ta.atr(atrLen)
+range = high - low
+body = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+
+// Absorption criteria
+isSmallBody = range > 0 and (body / range) <= bodyPctMax
+hasLongWick = range > 0 and (math.max(upperWick, lowerWick) / math.max(body, 0.0001)) >= wickRatio
+
+// Direction
+buyersAbsorbing = lowerWick > upperWick
+sellersAbsorbing = upperWick > lowerWick
+
+// Volume confirmation
+volMA = ta.sma(volume, volMALen)
+volConfirm = volume > volMA * volSpike
+
+// Combined signal
+absorptionBuy = isSmallBody and hasLongWick and buyersAbsorbing and volConfirm
+absorptionSell = isSmallBody and hasLongWick and sellersAbsorbing and volConfirm
+
+// ═══════════════════════════════════════════════════════════════
+// TREND FILTER
+// ═══════════════════════════════════════════════════════════════
+sma = ta.sma(close, smaLen)
+inUptrend = close > sma
+inDowntrend = close < sma
+
+buySignal = absorptionBuy and (useTrendFilter ? inUptrend : true)
+sellSignal = absorptionSell and (useTrendFilter ? inDowntrend : true)
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY WITH KELLY SIZING
+// ═══════════════════════════════════════════════════════════════
+if buySignal and strategy.position_size == 0
+    // Kelly-sized entry
+    qty = strategy.equity * posPct / 100 / close
+    strategy.entry("V5 Long", strategy.long, qty=qty)
+
+if sellSignal and strategy.position_size == 0
+    // Kelly-sized entry
+    qty = strategy.equity * posPct / 100 / close
+    strategy.entry("V5 Short", strategy.short, qty=qty)
+
+// ═══════════════════════════════════════════════════════════════
+// EXIT
+// ═══════════════════════════════════════════════════════════════
+var float trailPrice = na
+var int entryBar = 0
+var float entryPrice = 0
+
+if strategy.position_size != 0
+    if strategy.position_size > 0
+        newTrail = close - trailATR * atr
+        trailPrice := math.max(nz(trailPrice, newTrail), newTrail)
+        
+        tpLevel = entryPrice * (1 + tpPct / 100)
+        if tpPct > 0 and close >= tpLevel
+            strategy.exit("TP", "V5 Long", limit=tpLevel)
+        
+        strategy.exit("Trail", "V5 Long", stop=trailPrice)
+        
+        if bar_index - entryBar >= maxHoldBars
+            strategy.close("V5 Long", comment="Time Stop")
+    
+    else
+        newTrail = close + trailATR * atr
+        trailPrice := math.min(nz(trailPrice, newTrail), newTrail)
+        
+        tpLevel = entryPrice * (1 - tpPct / 100)
+        if tpPct > 0 and close <= tpLevel
+            strategy.exit("TP", "V5 Short", limit=tpLevel)
+        
+        strategy.exit("Trail", "V5 Short", stop=trailPrice)
+        
+        if bar_index - entryBar >= maxHoldBars
+            strategy.close("V5 Short", comment="Time Stop")
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryBar := bar_index
+    entryPrice := close
+    trailPrice := na
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS & INFO
+// ═══════════════════════════════════════════════════════════════
+plot(sma, "SMA", color=color.new(color.white, 50))
+plot(trailPrice, "Trail Stop", color=color.new(color.orange, 30), style=plot.style_linebr)
+
+plotshape(buySignal, "Buy Signal", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Kelly info table
+var table info = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 75), border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "Kelly Full", text_color=color.white)
+    table.cell(info, 1, 0, str.tostring(kellyFull * 100, "#.0") + "%", 
+         text_color=kellyFull > 0 ? color.lime : color.red)
+    table.cell(info, 0, 1, "Kelly Sized", text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(posPct, "#.0") + "%", text_color=color.yellow)
+    table.cell(info, 0, 2, "Edge", text_color=color.white)
+    table.cell(info, 1, 2, kellyFull > 0 ? "POSITIVE" : "NEGATIVE", 
+         text_color=kellyFull > 0 ? color.lime : color.red)
+    table.cell(info, 0, 3, "Win Rate", text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(kellyWinRate * 100, "#.0") + "%", text_color=color.white)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+alertcondition(buySignal, "V5 Kelly Buy", "V5 Kelly BUY signal")
+alertcondition(sellSignal, "V5 Kelly Sell", "V5 Kelly SELL signal")

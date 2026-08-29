@@ -34,6 +34,17 @@ pub enum Venue {
     /// Appended (schema 4→5) so old bincode frames keep their variant
     /// indices (CONV-20).
     Cboe,
+    /// DeFiLlama (spec 046). Envelope venue for `MacroPoint` regime series
+    /// from `api.llama.fi` (stablecoin supply, TVL, DEX volume) — keyless,
+    /// regime-grade only, never execution-grade. Appended (schema 5→6) so old
+    /// bincode frames keep their variant indices (CONV-20).
+    DeFiLlama,
+    /// Coinalyze (spec 047). Envelope venue for `MacroPoint` cross-exchange
+    /// derivative series (aggregated OI, funding, long/short, liquidations)
+    /// from `api.coinalyze.net/v1` — validation-grade, not alpha.
+    /// Appended (schema 5→6) so old bincode frames keep their variant
+    /// indices (CONV-20).
+    Coinalyze,
 }
 
 impl Venue {
@@ -50,6 +61,8 @@ impl Venue {
             Venue::Fred => "fred",
             Venue::Ethereum => "ethereum",
             Venue::Cboe => "cboe",
+            Venue::DeFiLlama => "defillama",
+            Venue::Coinalyze => "coinalyze",
         }
     }
 
@@ -68,6 +81,8 @@ impl Venue {
             "fred" => Venue::Fred,
             "ethereum" => Venue::Ethereum,
             "cboe" => Venue::Cboe,
+            "defillama" => Venue::DeFiLlama,
+            "coinalyze" => Venue::Coinalyze,
             _ => return None,
         })
     }

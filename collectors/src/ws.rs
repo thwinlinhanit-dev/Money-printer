@@ -384,9 +384,9 @@ async fn run(
     // surprise into a scheduled sub-second reconnect. Jitter (up to ~8% of
     // the age) desynchronizes sibling collectors so they never rotate in
     // lockstep. Seeded from the recv clock — jitter is not a decision path.
-    let rotate_at = endpoint.max_connection_age.map(|age| {
-        tokio::time::Instant::now() + rotation_delay(age, now_ns() as u64)
-    });
+    let rotate_at = endpoint
+        .max_connection_age
+        .map(|age| tokio::time::Instant::now() + rotation_delay(age, now_ns() as u64));
 
     loop {
         tokio::select! {

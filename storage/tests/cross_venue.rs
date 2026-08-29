@@ -406,6 +406,7 @@ fn cvg_7_promotion_gate_unchanged() {
         gaps: vec![],
         stale_periods: vec![],
         stale_bursts: vec![],
+        stale_silences_ms: vec![],
         worst_gap_ns: 0,
         findings: vec![mp_storage::audit::AuditFinding {
             code: "coverage_gap".into(),

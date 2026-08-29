@@ -1,0 +1,30 @@
+# Coinalyze cross-exchange validation collector unit (spec 047, COZ-1..10):
+# REST polls → {date}_coinalyze_macro.log (MacroPoint events, Venue::Coinalyze).
+# Validation/context grade — never alpha (COZ-9). Hourly OI/funding/liq,
+# daily long/short ratio. Per-pull watermarks for idempotency (COZ-6).
+#
+# Requires COINALYZE_API_KEY in venues.env (COZ-1, PD-2, fail-closed).
+# Enable after provisioning:
+#   systemctl enable --now mp-coinalyze
+[Unit]
+Description=Money Printer Coinalyze cross-exchange validation collector (spec 047, OI + funding + liq + LSR)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printer
+Group=printer
+EnvironmentFile=/etc/money-printer/venues.env
+WorkingDirectory=/opt/money-printer
+ExecStart=/opt/money-printer/bin/mp-coinalyze --config collectors/coinalyze.toml
+Restart=always
+RestartSec=2
+MemoryMax=256M
+CPUQuota=50%
+LimitNOFILE=65536
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/data
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

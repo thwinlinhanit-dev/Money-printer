@@ -16,8 +16,10 @@ pub mod binance;
 pub mod binutil;
 pub mod book_sync;
 pub mod bybit;
+pub mod coinalyze;
 pub mod coinbase;
 pub mod collector;
+pub mod defillama;
 pub mod deribit;
 pub mod etherscan;
 pub mod fred;
@@ -41,8 +43,10 @@ pub use backoff::Backoff;
 pub use backpressure::BackpressurePolicy;
 pub use binance::BinanceNormalizer;
 pub use bybit::BybitNormalizer;
+pub use coinalyze::CoinalyzeNormalizer;
 pub use coinbase::CoinbaseNormalizer;
 pub use collector::{Collector, CollectorConfig, DriveOutcome};
+pub use defillama::DefiLlamaNormalizer;
 pub use deribit::DeribitNormalizer;
 pub use etherscan::EtherscanNormalizer;
 pub use fred::FredNormalizer;
@@ -76,6 +80,12 @@ pub fn normalizer_for(venue: mp_core::Venue) -> Box<dyn Normalizer> {
         // not a WS normalizer; the entry exists so `normalizer_for` stays
         // total over `Venue`.
         Cboe => Box::new(crate::ibit::CboeChainNormalizer::new()),
+        // DeFiLlama regime series are a REST poller (mp-defillama, spec
+        // 046), not a WS normalizer; entry keeps `normalizer_for` total.
+        DeFiLlama => Box::new(crate::defillama::DefiLlamaNormalizer::new()),
+        // Coinalyze validation series are a REST poller (mp-coinalyze,
+        // spec 047); entry keeps `normalizer_for` total over `Venue`.
+        Coinalyze => Box::new(crate::coinalyze::CoinalyzeNormalizer::new()),
     }
 }
 

@@ -54,6 +54,9 @@ should be updated).
 | 043 | [CEX Flow Velocity Features](043-cex-flow-velocity.md) | on-chain analytics | ✅ implemented (netflow_flow.rs: cfv_1..10 incl. golden determinism, stale-address eviction `[netflow_flow.stale_after_ns]`, velocity proptest) |
 | 044 | [Per-Token AI Insight Agent](044-per-token-ai-insight.md) | intelligence | ✅ implemented (insight_composer.py + `/v1/insight` + Telegram bot `telegram_bot.py`; tok_1..10 in `tests/test_insight.py`; verify_grounded handles signed + %-scaled claims) |
 | 045 | [Accumulation Detector Screener Rule](045-accumulation-detector.md) | intelligence | ✅ implemented (accumulation.rs: acc_1..10 incl. offline/online golden + cooldown bar-boundary; acc_5 forward-return study in `research/tests/test_accumulation.py`; sub-signal inputs `oi_regime.rs` verified LIVE on the 08-08..08-17 corpus — 6/8 legs streaming; honest n=0 RES-4 record in `research/out/acc_study_2026-08-24.md`, blocked only on spec 034 netflow data = free Etherscan key) |
+| 046 | [DeFiLlama Regime Collector](046-defillama-regime-collector.md) | data plane | 🔨 implementing (DEF-1..8; normalizer + `mp-defillama` binary + fixtures; def_1..def_7 + def_malformed tests pass; cold-store write + watermark tests pending live integration) |
+| 047 | [Coinalyze Cross-Exchange Validation Collector](047-coinalyze-validation-collector.md) | data plane | 🔨 implementing (COZ-1..10; normalizer + `mp-coinalyze` binary + fixtures; coz_1..coz_9 + coz_rest + coz_5_pacer tests pass; cold-store write + watermark tests pending live integration) |
+| 048 | [Cross-Asset Correlation Feature](048-cross-asset-correlation.md) | intelligence | 🔨 implementing (COR-1..7; `corr.rs` + `CorrFeature` + engine registration; cor_1..cor_7 + proptest + cor_3 wiring test pass; regime wiring: `CorrRegimeFeature` + `regime_fit_from_features` extended with corr labels; 10 pairs incl. DeFiLlama/Coinalyze; cor_regime_* tests pass) |
 
 Status values: `draft` → `ready` (implementable) → `implementing` →
 `implemented` → `superseded`. Update this table in the same commit as the work
@@ -90,7 +93,8 @@ Requirement prefixes: CONV, EVT, COL, STO, FEA, SIM, STR, EXE, RSK, OPS,
 RES, UI, ZCP (012), BKP (013), FSP (014), MAT (016), GRD (017), MOD (018),
 INT (024), WHL (028), MAC (030), OPT (031), BDC (001 codec amendment), MSC (032),
 WAL (033), NFL (034), SWG (035), SLQ (036), GRE (037), IVS (038), OFI (039),
-IBI (040), TER (041), WCG (042), CFV (043), TOK (044), ACC (045).
+IBI (040), TER (041), WCG (042), CFV (043), TOK (044), ACC (045), DEF (046),
+COZ (047), COR (048).
 
 ## How to implement a spec
 

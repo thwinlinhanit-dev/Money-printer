@@ -382,10 +382,29 @@ if (-not (Test-Path $detBin)) {
     }
 }
 Log "Running mp-determinism --date $dateDashed ..."
+# Deferred-input guard (2026-08-25): a raw file still in flight from the
+# overnight drain made mp-determinism exit 2 on a missing file, which logged
+# as a scary "FAILED - promotion blocked" while the truth was "inputs not
+# here YET" (the drain was landing files as the gate ran). Check presence
+# first: a missing input DEFERS the artifact (the backfill pass below heals
+# it once landed); only an actual replay divergence is determinism-diff.
+# Deferral still exits non-zero AFTER verdict+telegram so Task Scheduler
+# flags the run without blinding the streak line.
+$detDeferred = $false
+foreach ($rec in $Recordings) {
+    $p = $rec -split ':'
+    $rawPath = Join-Path $root "data\raw\${dateFlat}_$($p[0])_$($p[1]).log"
+    if (-not (Test-Path -LiteralPath $rawPath)) {
+        Log "Determinism DEFERRED for ${dateDashed}: required input not landed: $($p[0])/$($p[1]) (backfill will retry once the drain lands it)" "WARN"
+        $detDeferred = $true
+        break
+    }
+}
 # Pin the replay config (sim/determinism.toml) so the artifact's strategy +
 # seed are the reviewed values, not an implicit default (MOD-10).
 $detCfg = Join-Path $root "sim\determinism.toml"
 $detArgs = @("--date", $dateDashed) + $required + @("--config", $detCfg, "--write")
+if (-not $detDeferred) {
 $env:RUST_LOG = "off"
 Push-Location $root
 try {
@@ -400,6 +419,97 @@ if ($detExit -ne 0) {
     Exit 1
 }
 Log "Determinism check: passed for $dateDashed"
+} else {
+    Log "Determinism run skipped for ${dateDashed} (deferred inputs)" "WARN"
+}
+
+# ---- 1.6 backfill pass (2026-08-25): heal late-landed days ------------------
+# The gate is only as continuous as its scorecards. A day whose raw files
+# landed AFTER that morning's run (slow-link drain backlog) used to stay
+# unscored or stuck dirty forever - a permanent streak break caused by
+# logistics, not data quality; likewise a promotable day whose determinism
+# artifact was never written silently blocks MOD-9 later (08-19/20/21).
+# Walk backwards over trailing closed days and:
+#   - re-score any day whose inputs are complete (missing card, OR an
+#     archived card that is no longer promotable but whose sources changed -
+#     the --reuse-unchanged cache makes unchanged days return instantly, so
+#     only genuinely re-auditable days cost a full pass);
+#   - write the determinism artifact for any PROMOTABLE scored day missing
+#     one.
+# Bounded (14 days), idempotent, never touches today's open files. A failure
+# logs WARN and moves on: backfill is opportunistic repair - the main path
+# above stays authoritative, and nothing here can mark a clean day dirty
+# that the auditor itself does not.
+$backfillScored = 0; $backfillDet = 0
+for ($i = 2; $i -le 15; $i++) {
+    try {
+        $bfDate = (Get-Date).ToUniversalTime().Date.AddDays(-$i)
+        $bfDash = $bfDate.ToString("yyyy-MM-dd"); $bfFlat = $bfDate.ToString("yyyyMMdd")
+        # Inputs complete? A still-unlanded day stays pending - skip quietly.
+        $inputsComplete = $true
+        foreach ($rec in $Recordings) {
+            $p = $rec -split ':'
+            if (-not (Test-Path -LiteralPath (Join-Path $root "data\raw\${bfFlat}_$($p[0])_$($p[1]).log"))) { $inputsComplete = $false; break }
+        }
+        if (-not $inputsComplete) { continue }
+        $cardFile = Join-Path $scoreDir "$bfDash.json"
+        $needScore = $true; $wasPromotable = $false
+        if (Test-Path -LiteralPath $cardFile) {
+            $old = Get-Content -LiteralPath $cardFile -Raw | ConvertFrom-Json
+            $wasPromotable = [bool]$old.promotable
+            # Re-score only when the archived day is not promotable (it may
+            # have been poisoned by a mid-gate landing); promotable days are
+            # final unless their sources changed, which --reuse-unchanged
+            # makes free to check anyway via the scorecard call below.
+            $needScore = -not $wasPromotable
+        }
+        if ($needScore) {
+            Log "Backfill: scoring late/changed day ${bfDash} ..."
+            $env:RUST_LOG = "off"
+            Push-Location $root
+            try {
+                $bfArgs = @("scorecard", "--date", $bfDash, "--reuse-unchanged") + $required + $requireArgs
+                $bfRes = Invoke-Native -FilePath $mpOps -Arguments $bfArgs
+                if ($bfRes[1] -eq 0) {
+                    $bfOut = $bfRes[0] | Out-String
+                    $bfCard = $bfOut | ConvertFrom-Json
+                    if ($null -ne $bfCard.promotable) {
+                        Set-Content -Path $cardFile -Value $bfOut -Encoding UTF8
+                        $wasPromotable = [bool]$bfCard.promotable
+                        $backfillScored++
+                        Log ("Backfill scorecard {0}: promotable={1}" -f $bfDash, $wasPromotable)
+                    } else {
+                        Log "Backfill scorecard ${bfDash}: unparseable output, skipped" "WARN"
+                    }
+                } else {
+                    Log "Backfill scorecard ${bfDash} failed (exit $($bfRes[1]))" "WARN"
+                }
+            } finally {
+                Pop-Location
+                Remove-Item Env:RUST_LOG -ErrorAction SilentlyContinue
+            }
+        }
+        if ($wasPromotable -and -not (Test-Path -LiteralPath (Join-Path $scoreDir "$bfDash.determinism.json"))) {
+            Log "Backfill: writing missing determinism artifact for ${bfDash} ..."
+            $env:RUST_LOG = "off"
+            Push-Location $root
+            try {
+                $bfDet = @("--date", $bfDash) + $required + @("--config", $detCfg, "--write")
+                $bfDetRes = Invoke-Native -FilePath $detBin -Arguments $bfDet
+                if ($bfDetRes[1] -eq 0) { $backfillDet++; Log "Backfill determinism ${bfDash}: passed" }
+                else { Log "Backfill determinism ${bfDash} failed (exit $($bfDetRes[1]) - inputs may predate the replay config)" "WARN" }
+            } finally {
+                Pop-Location
+                Remove-Item Env:RUST_LOG -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {
+        Log "Backfill iteration failed: $_" "WARN"
+    }
+}
+if ($backfillScored -gt 0 -or $backfillDet -gt 0) {
+    Log "Backfill complete: $($backfillScored) day(s) scored, $($backfillDet) artifact(s) written"
+}
 
 # ---- 2. promotion streak verdict (before any exit, so the daily N/7 line
 #         prints even on dirty days - which is when it matters most) ---------
@@ -477,6 +587,14 @@ if ($tgResult[1] -ne 0) {
     Log "Telegram verdict send failed (exit $($tgResult[1])): $tgOut" "WARN"
 } else {
     Log "Telegram verdict sent: $tgOut"
+}
+
+# Deferred day (2026-08-25): verdict + telegram are out, so the scheduler
+# flag is the only remaining duty - exit non-zero AFTER the streak line, not
+# before it. The backfill pass heals this day once the drain lands its files.
+if ($detDeferred) {
+    Log "Deferred day ${dateDashed}: exiting non-zero (inputs pending); backfill will score it when they land." "WARN"
+    Exit 1
 }
 
 # ---- 2.2 storage-budget watch (2026-08-14, spec 009 OPS-15) --------------

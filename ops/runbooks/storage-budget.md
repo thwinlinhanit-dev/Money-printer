@@ -34,7 +34,8 @@ files, and the same P2 fires regardless of the growth projection.
 ## Deployed budgets (2026-08-14)
 - Recording host (Windows): `MP_STORAGE_BUDGET_BYTES=40000000000` (40 GB) —
   the master corpus (22.4 GB, ~0.62 GB/day).
-- VPS relay (34.135.127.147): `MP_STORAGE_BUDGET_BYTES=15000000000` (15 GB)
+- VPS relay (`env MP_VPS_HOST` / `-VpsHost` at runtime, never committed — PD-2,
+  audit M-1): `MP_STORAGE_BUDGET_BYTES=15000000000` (15 GB)
   in `/etc/money-printer/ops.env`, daily 01:30 UTC via
   `storage-budget.timer` (28 GB disk; no automated pull yet, so the relay
   corpus accumulates). VPS verdicts land in journald (`telegram:none` — no

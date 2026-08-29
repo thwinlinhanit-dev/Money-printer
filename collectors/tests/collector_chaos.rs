@@ -158,6 +158,34 @@ fn col_2_staleness_emits_stale_status_verdict() {
 }
 
 #[test]
+fn col_2_stale_silence_reports_measured_gap_null_small_vs_large() {
+    // The operator-facing diagnostic: a stale verdict must report the ACTUAL
+    // observed silence (now - last_recv), because a few-seconds loop hiccup
+    // and a minutes-long outage both pass the threshold but only the latter
+    // loses recv-clock coverage. Contract: stale_silences returns (topic,
+    // now - last_recv) for every stale stream, and a fresh stream is absent.
+    let mut s = Staleness::new(15_000_000_000); // same 15s as the binary
+    s.observe("binance/depth", 1_000_000_000);
+    assert!(
+        s.stale_silences(2_000_000_000).is_empty(),
+        "fresh stream absent"
+    );
+
+    // 15s past the bar (2s margin): a short ~a-second-past-the-bar silence.
+    let small = s.stale_silences(17_000_000_000);
+    assert_eq!(small.len(), 1);
+    assert_eq!(small[0].0, "binance/depth");
+    assert_eq!(small[0].1, 16_000_000_000); // 17s - 1s
+
+    // Minutes later: a real outage — the same topic now reports a large silence.
+    let large = s.stale_silences(3_661_000_000_000); // 3661s - 1s = 3660s
+    assert_eq!(
+        large,
+        vec![("binance/depth".to_string(), 3_660_000_000_000)]
+    );
+}
+
+#[test]
 fn col_6_parse_error_warns_and_continues() {
     // COL-6 wording: WARN log + counter increment + keep going (no panic).
     // The WARN itself is observed in `tracing` output; here we pin the

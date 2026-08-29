@@ -33,7 +33,10 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Destination,           # backup root; the VPS mirror lands in <Dest>\vps-data
-    [string]$VpsHost = "34.135.127.147",
+    # The VPS host comes from -VpsHost or $env:MP_VPS_HOST, never a committed
+    # default (PD-2; audit M-1 - a hardcoded IP previously leaked the live
+    # money-printer host into a tracked file). Fail-closed to exit 3 below.
+    [string]$VpsHost = $env:MP_VPS_HOST,
     [string]$SshUser = "mp-egress",
     [string]$SshKey  = "",
     [switch]$Register,              # register the MoneyPrinterVpsBackup daily task
@@ -43,6 +46,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# ---- VPS host must be provided at runtime (PD-2; audit M-1) ------------------
+if ([string]::IsNullOrWhiteSpace($VpsHost)) {
+    Write-Host "[!!] No VPS host set. Pass -VpsHost or set MP_VPS_HOST (never commit the IP - PD-2)." -ForegroundColor Red
+    Exit 3
+}
 
 # ---- workspace root resolution (walk up to the [workspace] Cargo.toml) -------
 $root = $PSScriptRoot
@@ -90,7 +99,7 @@ if ($Register) {
     $localAt = $utcTarget.ToLocalTime()
     $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
     $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
-        -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Destination `"$Destination`""
+        -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Destination `"$Destination`" -VpsHost `"$VpsHost`""
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -MultipleInstances IgnoreNew `

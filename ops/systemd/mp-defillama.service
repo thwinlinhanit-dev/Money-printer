@@ -1,0 +1,27 @@
+# DeFiLlama regime collector unit (spec 046, DEF-1..8): keyless public REST
+# API → {date}_defillama_macro.log (MacroPoint events, Venue::DeFiLlama).
+# Regime-grade, never execution-grade (DEF-4). Daily cadence, idempotent
+# via snapshot-day watermark (DEF-8).
+# No API key (keyless) — nothing to read from venues.env (PD-2 trivial).
+# Enable: systemctl enable --now mp-defillama
+[Unit]
+Description=Money Printer DeFiLlama regime collector (spec 046, stablecoin + TVL + DEX)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printer
+Group=printer
+WorkingDirectory=/opt/money-printer
+ExecStart=/opt/money-printer/bin/mp-defillama --config collectors/defillama.toml
+Restart=always
+RestartSec=2
+MemoryMax=256M
+CPUQuota=50%
+LimitNOFILE=65536
+ProtectSystem=strict
+ReadWritePaths=/opt/money-printer/data
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

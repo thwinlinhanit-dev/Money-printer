@@ -47,7 +47,12 @@ pub fn allocate(
             * i.regime_fit.clamp(0.0, 1.0)
             * i.corr_penalty.clamp(0.0, 1.0)
             * i.dd_gov.clamp(0.0, 1.0);
-        let capped = raw.min(i.kelly_cap.max(0.0));
+        // Fail-closed on non-finite inputs (audit C-3). `f64::clamp` propagates
+        // NaN and `NaN.min(cap)` returns cap, so a NaN regime_fit/corr_penalty/
+        // dd_gov from a corrupt feature pipeline would have handed this
+        // strategy its FULL kelly cap (the old `is_finite` check ran too
+        // late). Any non-finite raw now sizes to ZERO — never to the cap.
+        let capped = if raw.is_finite() { raw.min(i.kelly_cap.max(0.0)) } else { 0.0 };
         let w = if capped.is_finite() { capped } else { 0.0 };
         weights.insert(id.clone(), w);
         sum += w;

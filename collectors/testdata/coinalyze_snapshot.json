@@ -1,0 +1,7 @@
+{
+  "series": [
+    {"series_id": "AGG_LIQ_BTC", "value": 1500000.0, "date": "2026-08-26"},
+    {"series_id": "AGG_FUNDING_ETH", "value": 0.000008, "date": "2026-08-26"},
+    {"series_id": "AGG_OI_BTC", "value": 24000000000.0, "date": "2026-08-26"}
+  ]
+}

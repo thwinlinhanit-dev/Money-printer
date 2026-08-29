@@ -35,7 +35,12 @@ pub mod wall_clock;
 /// chain recorder) and `InstrumentKind::Option`. No `MarketEvent` change —
 /// OptionTrade/OptionTicker are reused verbatim. Append-only, so schema-4
 /// frames decode with the current types (see `log.rs` schema-ver dispatch).
-pub const SCHEMA_VER: u16 = 5;
+/// 6 (2026-08-26, specs 046/047): appended `Venue::DeFiLlama` + `Venue::Coinalyze`
+/// (external macro-series venues; both reuse `MarketEvent::MacroPoint`). No
+/// `MarketEvent` change. See spec 001 Amendment 2026-08-26. Append-only, so
+/// schema-5 frames decode with the current types (see `log.rs` schema-ver
+/// dispatch).
+pub const SCHEMA_VER: u16 = 6;
 
 pub use arena::{Arena, EventRef};
 pub use book::BookMirror;

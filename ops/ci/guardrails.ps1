@@ -6,7 +6,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File ops/ci/guardrails.ps1
 #
 # Exit 0 = all checks passed; exit 1 = any violation ("GUARDRAIL FAIL:").
-# Every check is a mechanical mirror of the bash version in guardrails.sh —
+# Every check is a mechanical mirror of the bash version in guardrails.sh -
 # keep the two in sync; do not weaken either to pass (PD-5). Keep checks
 # fast, specific, low-false-positive; each names the rule it enforces.
 #
@@ -91,6 +91,48 @@ if ($credHits.Count -gt 0) {
     Err "PD-2: credential-looking value in tracked config (use *.example with placeholders)"
 }
 
+# Source-file credential scan (audit M-2): a key pasted into .rs/.ps1/.sh is
+# never caught by the config scan above. Stricter pattern: the value must be a
+# QUOTED string of length >= 16 after `key :=`, so env-var/identifier mentions
+# (`env::var("API_KEY")`, `$env:API_KEY`) never match.
+$srcCredRe = '(?i)(api[_-]?key|api[_-]?secret|secret[_-]?key|access[_-]?token|bot[_-]?token)\s*[:=]\s*"[^"]{16,}'
+$srcCredHits = @()
+foreach ($f in @(Get-TrackedPat @('*.rs', '*.ps1', '*.sh'))) {
+    $c = Read-FileOrNull $f
+    if ($null -eq $c) { continue }
+    foreach ($m in [regex]::Matches($c, $srcCredRe, 'Multiline')) {
+        if ($m.Value -match '(?i)example|placeholder|your[_-]|xxx|changeme|<[^>]+>') { continue }
+        $srcCredHits += "$f : $($m.Value)"
+    }
+}
+if ($srcCredHits.Count -gt 0) {
+    foreach ($h in $srcCredHits) { Write-Host $h -ForegroundColor Yellow }
+    Err "PD-2: credential-looking value in tracked source (use env vars + *.example)"
+}
+
+# ---- PD-2: no public IPv4 literals (audit M-1/M-2) --------------------------
+# Match only 4-octet dotted-quads (3-octet semver can't match). Scan code and
+# config only (skip *.md/*.log - documentation legitimately embeds well-known
+# public IPs like well-known DNS resolvers and cloud egress ranges, which are
+# not secrets). Allow loopback, RFC1918, link-local, RFC5737 TEST-NET, broadcast
+# (0/255). Any remaining dotted-quad in code/config is a public host = fail.
+$ipRe = '\b((25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)\b'
+$privateIpRe = '(^|[^0-9])(127|0|10|192\.168|172\.(1[6-9]|2[0-9]|3[01])|169\.254|192\.0\.2|198\.51\.100|203\.0\.113|255)\.'
+$ipHits = @()
+foreach ($f in @(Get-TrackedAll)) {
+    if ($f -match '\.(md|log)$') { continue }
+    $c = Read-FileOrNull $f
+    if ($null -eq $c) { continue }
+    foreach ($m in [regex]::Matches($c, $ipRe)) {
+        if ($m.Value -match $privateIpRe) { continue }
+        $ipHits += "$f : $($m.Value)"
+    }
+}
+if ($ipHits.Count -gt 0) {
+    foreach ($h in $ipHits) { Write-Host $h -ForegroundColor Yellow }
+    Err "PD-2: public IP literal in tracked code/config (use a placeholder / env var)"
+}
+
 # ---- PD-1: live mode must never be committed ---------------------------------
 $liveRe = '(?m)^\s*mode\s*=\s*"?live"?\s*(#.*)?$'
 $liveHits = @()
@@ -99,7 +141,7 @@ foreach ($f in @(Get-TrackedPat @('*.toml', '*.yaml', '*.yml'))) {
     if ($null -eq $c) { continue }
     foreach ($m in [regex]::Matches($c, $liveRe)) { $liveHits += "$f : $($m.Value)" }
     # bash grep is case-sensitive (no -i) on this check; [regex]::Matches is
-    # case-sensitive by default — parity holds.
+    # case-sensitive by default - parity holds.
 }
 if ($liveHits.Count -gt 0) {
     foreach ($h in $liveHits) { Write-Host $h -ForegroundColor Yellow }

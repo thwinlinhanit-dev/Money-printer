@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Design specification documents (000–045) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
+Design specification documents (000–048) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
 
 ## Ownership
 
@@ -53,6 +53,9 @@ Design specification documents (000–045) defining the system architecture, dat
 - `043-cex-flow-velocity.md` — CEX flow velocity features: netflow velocity, acceleration, regime, z-score from spec 034 snapshots (CFV requirements)
 - `044-per-token-ai-insight.md` — per-token AI insight agent: LLM-generated token summaries grounded in feature exports (TOK requirements)
 - `045-accumulation-detector.md` — accumulation detector screener rule: compound OI + smart money + exchange outflow signal (ACC requirements)
+- `046-defillama-regime-collector.md` — DeFiLlama regime collector: keyless stablecoin-supply + TVL + DEX-vol, third macro pillar (DEF requirements)
+- `047-coinalyze-validation-collector.md` — Coinalyze cross-exchange validation collector: OI/funding/liq/long-short, validation not alpha (COZ requirements)
+- `048-cross-asset-correlation.md` — cross-asset correlation feature: BTC-ETH-Gold-SPX from own recorded prices (COR requirements)
 
 ## Local Contracts
 

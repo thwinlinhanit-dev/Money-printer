@@ -120,6 +120,16 @@ pub struct RawLogAudit {
     /// [`STALE_BURST_GAP_NS`] of each other are one burst; start = first event,
     /// end = last event). Margin field — never a blocker (2026-08-12).
     pub stale_bursts: Vec<TimeRange>,
+    /// Per-`Status::Stale`-event ACTUAL observed silence in ms, aligned 1:1
+    /// with [`RawLogAudit::stale_periods`] (the same order), parsed from the
+    /// collector watchdog's detail (`"no valid event for N ms (threshold ...)"`).
+    /// This is the diagnostic that separates a short self-healing reconnect
+    /// (a few seconds past the bar -> no recv-clock loss, coverage stays 1.0)
+    /// from a real minutes-long feed outage (which also drops coverage). It is
+    /// a margin field — never a blocker. Older logs that predate the measured
+    /// silence (or a malformed detail) parse to 0.
+    #[serde(default)]
+    pub stale_silences_ms: Vec<u64>,
     /// Longest recv-clock hole in ns. Margin field — the gate's numeric
     /// criterion is aggregate [`RawLogAudit::coverage`], but the worst single
     /// hole must stay visible in every scorecard.
@@ -163,6 +173,11 @@ pub fn is_blocking_finding(code: &str) -> bool {
 
 /// Audit a single `(venue, symbol)` raw log.  Any malformed or older schema is
 /// a quarantine finding; no caller gets a partial "probably fine" verdict.
+///
+/// A missing day-file is its own named finding (`recording_missing`), distinct
+/// from a corrupt one (`unreadable_log`) — scoring a day whose sources never
+/// landed (failed VPS drain) must be greppable as "no data here", not look
+/// like decode trouble (incident 2026-08-22 post-mortem).
 pub fn audit_raw_log(path: &Path, config: &AuditConfig) -> RawLogAudit {
     let mut audit = RawLogAudit {
         event_count: 0,
@@ -173,10 +188,17 @@ pub fn audit_raw_log(path: &Path, config: &AuditConfig) -> RawLogAudit {
         gaps: Vec::new(),
         stale_periods: Vec::new(),
         stale_bursts: Vec::new(),
+        stale_silences_ms: Vec::new(),
         worst_gap_ns: 0,
         findings: Vec::new(),
     };
 
+    if !path.exists() {
+        audit
+            .findings
+            .push(finding("recording_missing", path.display().to_string()));
+        return audit;
+    }
     let mut reader = match LogReader::open(path) {
         Ok(reader) => reader,
         Err(error) => {
@@ -220,12 +242,15 @@ pub fn audit_raw_log(path: &Path, config: &AuditConfig) -> RawLogAudit {
                 });
             }
         }
-        if let MarketEvent::Status { kind, .. } = &event.body {
+        if let MarketEvent::Status { kind, detail } = &event.body {
             match kind {
-                mp_core::StatusKind::Stale => audit.stale_periods.push(TimeRange {
-                    start_ns: event.recv_ts_ns,
-                    end_ns: event.recv_ts_ns,
-                }),
+                mp_core::StatusKind::Stale => {
+                    audit.stale_periods.push(TimeRange {
+                        start_ns: event.recv_ts_ns,
+                        end_ns: event.recv_ts_ns,
+                    });
+                    audit.stale_silences_ms.push(parse_stale_silence_ms(detail));
+                }
                 mp_core::StatusKind::GapDetected => audit.findings.push(finding(
                     "sequence_gap",
                     format!("gap status at {}", event.recv_ts_ns),
@@ -335,6 +360,28 @@ fn validate_event(
             "book snapshot has no source",
         ));
     }
+}
+
+/// Parse the ACTUAL measured silence (ms) the collector observed before it
+/// declared a stream stale, from the `Status::Stale` detail string. Older
+/// logs use `"no valid event for {ns} ns"`; current ones encode
+/// `"no valid event for {ms} ms (threshold {ms} ms; topics)". A malformed or
+/// unknown detail parses to 0 (no loss attribution claimed).
+fn parse_stale_silence_ms(detail: &str) -> u64 {
+    if let Some(rest) = detail.strip_prefix("no valid event for ") {
+        let mut it = rest.split(' ');
+        if let (Some(num), Some(unit)) = (it.next(), it.next()) {
+            if let Ok(n) = num.parse::<u64>() {
+                if unit.starts_with("ms") {
+                    return n;
+                }
+                if unit.starts_with("ns") {
+                    return n / 1_000_000;
+                }
+            }
+        }
+    }
+    0
 }
 
 fn coverage(audit: &RawLogAudit) -> f64 {
@@ -505,6 +552,25 @@ mod tests {
     }
 
     #[test]
+    fn int_recording_missing_is_named_and_blocking() {
+        // Incident 2026-08-22 post-mortem: a day whose sources never landed
+        // must audit as "no data here" (recording_missing), not decode
+        // trouble — and it blocks like every other unattributable state.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let missing =
+            std::env::temp_dir().join(format!("mp-missing-{}-{seq}.log", std::process::id(),));
+        let _ = std::fs::remove_file(&missing);
+        let config = AuditConfig::single(Venue::BinanceFutures, "BTCUSDT");
+        let audit = audit_raw_log(&missing, &config);
+        assert_eq!(audit.event_count, 0);
+        let codes: Vec<_> = audit.findings.iter().map(|f| f.code.as_str()).collect();
+        assert!(codes.contains(&"recording_missing"), "{codes:?}");
+        assert!(!codes.contains(&"unreadable_log"), "{codes:?}");
+        assert!(!audit.is_clean());
+    }
+
+    #[test]
     fn int_3_audit_reports_gap_and_staleness() {
         let mut stale = event(300);
         stale.body = MarketEvent::Status {
@@ -640,6 +706,7 @@ mod tests {
             gaps: vec![],
             stale_periods: vec![],
             stale_bursts: vec![],
+            stale_silences_ms: vec![],
             worst_gap_ns: 0,
             findings: vec![finding(
                 "recv_time_reversal",
@@ -708,6 +775,7 @@ mod tests {
             gaps: vec![],
             stale_periods: vec![],
             stale_bursts: vec![],
+            stale_silences_ms: vec![],
             worst_gap_ns: 0,
             findings: vec![],
         };
@@ -770,6 +838,7 @@ mod tests {
             gaps: vec![],
             stale_periods: vec![],
             stale_bursts: vec![],
+            stale_silences_ms: vec![],
             worst_gap_ns: 0,
             findings: vec![],
         };

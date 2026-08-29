@@ -13,8 +13,10 @@
 pub mod accumulation;
 pub mod bar;
 pub mod catalog;
+pub mod climax_variants;
 pub mod cohort;
 pub mod config;
+pub mod corr;
 pub mod engine;
 pub mod hit_journal;
 pub mod ibit_cross;
@@ -45,6 +47,13 @@ pub use cohort::{
 pub use config::{
     BookDepthParams, ConfigError, FeaturesConfig, LiqDeltaParams, LiqFlowParams,
     MicrostructureParams, TapeParams,
+};
+pub use climax_variants::{
+    AbsorptionBar, MultiBarExhaustion, SqueezeExpansion, V1Config, V2Config, V3Config,
+    V4Config, V5Config, V6Config, VolumeDivergence, VolumeExhaustion, VolExpansion,
+};
+pub use corr::{
+    CorrConfig, CorrFeature, CorrLeg, CorrParams, CorrRegimeConfig, CorrRegimeKind, CorrSide,
 };
 pub use engine::{BarFeature, FeatureEngine, FeatureUpdate, Locality, TickFeature};
 pub use hit_journal::{HitJournal, HitRecord};
@@ -457,6 +466,35 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
                 Box::new(IbitDerivCross::new(p.clone(), CrossField::FlowCorr(lag)))
             });
         }
+    }
+    // Cross-asset regime correlations (spec 048): one global feature per
+    // configured pair, all operating on the same merged event stream.
+    if cfg.corr.enabled {
+        for pair in &cfg.corr.pairs {
+            let pair = pair.clone();
+            e.register_global_tick(move || Box::new(CorrFeature::new(pair.clone())));
+        }
+    }
+    // Climax variant patterns (6 non-standard exhaustion/expansion signals):
+    // bar-only features (SWG-2 compatible) that complement the standard
+    // climax detector (spec 004). Disabled when `enabled` is false.
+    if cfg.climax_variants.enabled {
+        use crate::climax_variants::{
+            AbsorptionBar, MultiBarExhaustion, SqueezeExpansion, VolumeDivergence,
+            VolumeExhaustion, VolExpansion,
+        };
+        let v1 = cfg.climax_variants.v1.clone();
+        e.register_bar(move || Box::new(VolumeExhaustion::new(v1.clone())));
+        let v2 = cfg.climax_variants.v2.clone();
+        e.register_bar(move || Box::new(MultiBarExhaustion::new(v2.clone())));
+        let v3 = cfg.climax_variants.v3.clone();
+        e.register_bar(move || Box::new(SqueezeExpansion::new(v3.clone())));
+        let v4 = cfg.climax_variants.v4.clone();
+        e.register_bar(move || Box::new(VolumeDivergence::new(v4.clone())));
+        let v5 = cfg.climax_variants.v5.clone();
+        e.register_bar(move || Box::new(AbsorptionBar::new(v5.clone())));
+        let v6 = cfg.climax_variants.v6.clone();
+        e.register_bar(move || Box::new(VolExpansion::new(v6.clone())));
     }
     Ok(e)
 }

@@ -236,6 +236,91 @@ proptest! {
 }
 
 #[test]
+fn regression_audit28_allocator_nan_inf_neg_inf_fail_closed() {
+    // Audit C-3: `f64::clamp` propagates NaN and `NaN.min(cap)` returns cap,
+    // so each NaN input must end up sizing to ZERO — never the cap. ±inf in a
+    // multiplier field clamps to 1.0 (finite raw), which must still never
+    // exceed the kelly cap; ±inf in base_w makes raw non-finite → 0.
+    let params = AllocParams { max_deployed: 0.8 };
+    let non_finite: [f64; 3] = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+    let fields = ["base_w", "regime_fit", "corr_penalty", "dd_gov"];
+    for field in fields {
+        for bad in non_finite {
+            let mut inputs = BTreeMap::new();
+            let mut i = StrategyInput {
+                base_w: 0.2,
+                regime_fit: 1.0,
+                corr_penalty: 1.0,
+                dd_gov: 1.0,
+                kelly_cap: 0.5,
+            };
+            match field {
+                "base_w" => i.base_w = bad,
+                "regime_fit" => i.regime_fit = bad,
+                "corr_penalty" => i.corr_penalty = bad,
+                "dd_gov" => i.dd_gov = bad,
+                _ => unreachable!(),
+            }
+            inputs.insert("bad".to_string(), i);
+            inputs.insert(
+                "healthy".to_string(),
+                StrategyInput {
+                    base_w: 0.1,
+                    regime_fit: 1.0,
+                    corr_penalty: 1.0,
+                    dd_gov: 1.0,
+                    kelly_cap: 0.5,
+                },
+            );
+            let w = allocate(&params, &inputs);
+            assert!(w.values().all(|v| v.is_finite() && *v >= 0.0));
+            if bad.is_nan() || field == "base_w" {
+                assert_eq!(
+                    w["bad"], 0.0,
+                    "{field}={bad} must size to 0, got {} (fail-open!)",
+                    w["bad"]
+                );
+            } else {
+                // ±inf multiplier: clamps to 1.0, raw stays finite — must be
+                // capped, never the old `NaN.min(cap) == cap` full-cap leak.
+                assert!(w["bad"] <= i.kelly_cap.max(0.0) + 1e-9);
+            }
+        }
+    }
+}
+
+proptest! {
+    // Audit C-3 regression: the old proptest only generated finite inputs and
+    // missed the NaN fail-open. `proptest::num::f64::ANY` includes NaN and
+    // both infinities: any NaN input must yield weight exactly 0.0 for that
+    // strategy, and no weight may ever be NaN.
+    #[test]
+    fn regression_audit28_allocator_nan_input_sizes_to_zero(
+        base_w in proptest::num::f64::ANY,
+        regime_fit in proptest::num::f64::ANY,
+        corr_penalty in proptest::num::f64::ANY,
+        dd_gov in proptest::num::f64::ANY,
+        kelly_cap in proptest::num::f64::ANY,
+    ) {
+        let params = AllocParams { max_deployed: 0.8 };
+        let mut inputs = BTreeMap::new();
+        inputs.insert("suspect".to_string(), StrategyInput {
+            base_w, regime_fit, corr_penalty, dd_gov, kelly_cap,
+        });
+        // A healthy peer shares the run; a NaN strategy must never scale it up
+        // (the old bug made the renormalizer pay for the phantom weight).
+        inputs.insert("healthy".to_string(), StrategyInput {
+            base_w: 0.2, regime_fit: 1.0, corr_penalty: 1.0, dd_gov: 1.0, kelly_cap: 0.5,
+        });
+        let w = allocate(&params, &inputs);
+        prop_assert!(w.values().all(|v| v.is_finite() && *v >= 0.0), "non-finite weight: {w:?}");
+        if base_w.is_nan() || regime_fit.is_nan() || corr_penalty.is_nan() || dd_gov.is_nan() {
+            prop_assert_eq!(w["suspect"], 0.0);
+        }
+    }
+}
+
+#[test]
 fn rsk_5_dd_budget_defaults_to_p95_mc_times_1_25() {
     use mp_risk::dd_budget_from_mc;
     // The sizing input is p95(maxDD) from the Monte-Carlo harness (SIM-9).
@@ -311,14 +396,29 @@ fn rsk_7_regime_fit_reads_live_features_not_opinion() {
     use mp_risk::regime_fit_from_features;
     let declared = vec!["trend".to_string()];
     // Live regime.trend = 1 (trend) ⇒ full fit; = 0 (chop) ⇒ penalty.
-    assert_eq!(regime_fit_from_features(&declared, 1.0, 1.0, 0.25), 1.0);
-    assert_eq!(regime_fit_from_features(&declared, 1.0, 0.0, 0.25), 0.25);
+    assert_eq!(
+        regime_fit_from_features(&declared, 1.0, 1.0, None, None, 0.25),
+        1.0
+    );
+    assert_eq!(
+        regime_fit_from_features(&declared, 1.0, 0.0, None, None, 0.25),
+        0.25
+    );
     // Vol labels resolve from the regime.vol encoding {0,1,2}.
     let hv = vec!["high_vol".to_string()];
-    assert_eq!(regime_fit_from_features(&hv, 2.0, 0.0, 0.5), 1.0);
-    assert_eq!(regime_fit_from_features(&hv, 0.0, 0.0, 0.5), 0.5);
+    assert_eq!(
+        regime_fit_from_features(&hv, 2.0, 0.0, None, None, 0.5),
+        1.0
+    );
+    assert_eq!(
+        regime_fit_from_features(&hv, 0.0, 0.0, None, None, 0.5),
+        0.5
+    );
     // Empty mask ⇒ any regime fits.
-    assert_eq!(regime_fit_from_features(&[], 0.0, 0.0, 0.1), 1.0);
+    assert_eq!(
+        regime_fit_from_features(&[], 0.0, 0.0, None, None, 0.1),
+        1.0
+    );
     // The fit feeds the allocator's regime_fit term (RSK-7 end-to-end).
     use mp_risk::{allocate, AllocParams, StrategyInput};
     let mut inputs = std::collections::BTreeMap::new();
@@ -326,7 +426,7 @@ fn rsk_7_regime_fit_reads_live_features_not_opinion() {
         "carry-v1".to_string(),
         StrategyInput {
             base_w: 1.0,
-            regime_fit: regime_fit_from_features(&declared, 1.0, 0.0, 0.25),
+            regime_fit: regime_fit_from_features(&declared, 1.0, 0.0, None, None, 0.25),
             corr_penalty: 1.0,
             dd_gov: 1.0,
             kelly_cap: 1.0,
@@ -348,13 +448,65 @@ fn regression_rsk_7_regime_fit_fails_closed_on_out_of_range_label() {
     let hv = vec!["high_vol".to_string()];
     let tr = vec!["trend".to_string()];
     // Even when the (valid) other dimension matches, an invalid vol label wins.
-    assert_eq!(regime_fit_from_features(&hv, 2.7, 1.0, 0.25), 0.25);
-    assert_eq!(regime_fit_from_features(&hv, -1.0, 1.0, 0.25), 0.25);
-    assert_eq!(regime_fit_from_features(&hv, f64::NAN, 0.0, 0.25), 0.25);
+    assert_eq!(
+        regime_fit_from_features(&hv, 2.7, 1.0, None, None, 0.25),
+        0.25
+    );
+    assert_eq!(
+        regime_fit_from_features(&hv, -1.0, 1.0, None, None, 0.25),
+        0.25
+    );
+    assert_eq!(
+        regime_fit_from_features(&hv, f64::NAN, 0.0, None, None, 0.25),
+        0.25
+    );
     // An invalid trend label is equally fail-closed.
-    assert_eq!(regime_fit_from_features(&tr, 1.0, 1.0, 0.25), 1.0); // valid control
-    assert_eq!(regime_fit_from_features(&tr, 1.0, 0.5, 0.25), 0.25); // fractional label
-    assert_eq!(regime_fit_from_features(&tr, 1.0, 7.0, 0.25), 0.25); // out of range
-                                                                     // The fail-closed penalty is still clamped to [0,1].
-    assert_eq!(regime_fit_from_features(&hv, 9.9, 0.0, 4.0), 1.0); // penalty clamped
+    assert_eq!(
+        regime_fit_from_features(&tr, 1.0, 1.0, None, None, 0.25),
+        1.0
+    ); // valid control
+    assert_eq!(
+        regime_fit_from_features(&tr, 1.0, 0.5, None, None, 0.25),
+        0.25
+    ); // fractional label
+    assert_eq!(
+        regime_fit_from_features(&tr, 1.0, 7.0, None, None, 0.25),
+        0.25
+    ); // out of range
+       // The fail-closed penalty is still clamped to [0,1].
+    assert_eq!(
+        regime_fit_from_features(&hv, 9.9, 0.0, None, None, 4.0),
+        1.0
+    ); // penalty clamped
+       // Correlation regime labels (spec 048): risk_on/risk_off/corr_neutral from
+       // corr_regime.* feature values (0=risk_on, 1=neutral, 2=risk_off).
+    let risk_off_decl = vec!["risk_off".to_string()];
+    assert_eq!(
+        regime_fit_from_features(&risk_off_decl, 0.0, 0.0, Some(2.0), None, 0.25),
+        1.0
+    );
+    assert_eq!(
+        regime_fit_from_features(&risk_off_decl, 0.0, 0.0, Some(0.0), None, 0.25),
+        0.25
+    );
+    let risk_on_decl = vec!["risk_on".to_string()];
+    assert_eq!(
+        regime_fit_from_features(&risk_on_decl, 0.0, 0.0, Some(0.0), None, 0.25),
+        1.0
+    );
+    assert_eq!(
+        regime_fit_from_features(&risk_on_decl, 0.0, 0.0, Some(2.0), None, 0.25),
+        0.25
+    );
+    // Correlation label + vol label combined: strategy matches EITHER.
+    let combo = vec!["high_vol".to_string(), "risk_off".to_string()];
+    assert_eq!(
+        regime_fit_from_features(&combo, 2.0, 0.0, Some(0.0), None, 0.5),
+        1.0
+    );
+    // Invalid corr label (3.5) is ignored, not fail-closed (RSK-7 warn).
+    assert_eq!(
+        regime_fit_from_features(&risk_off_decl, 0.0, 0.0, Some(3.5), None, 0.25),
+        0.25
+    );
 }

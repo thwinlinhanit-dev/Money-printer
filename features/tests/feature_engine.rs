@@ -3,7 +3,8 @@
 use mp_core::{EventEnvelope, MarketEvent, Side, SnapshotReason, SymbolId, Venue};
 use mp_features::catalog::*;
 use mp_features::{
-    Cond, FeatureEngine, FeatureUpdate, LiqDelta, Op, Rule, Screener, WhaleNet, WhaleNetDelta,
+    engine_from_config, Cond, FeatureEngine, FeatureUpdate, FeaturesConfig, LiqDelta, Op, Rule,
+    Screener, WhaleNet, WhaleNetDelta,
 };
 use smallvec::smallvec;
 
@@ -40,6 +41,21 @@ fn engine_with_all() -> FeatureEngine {
 fn value(engine: &FeatureEngine, ups: &[FeatureUpdate], feat: &str) -> Option<f64> {
     let id = engine.name_to_id(feat)?;
     ups.iter().rev().find(|u| u.feature == id).map(|u| u.value)
+}
+
+#[test]
+fn cor_3_configured_pair_registers_corr_feature() {
+    let cfg = FeaturesConfig::from_toml(
+        r#"
+        [corr]
+        enabled = true
+        pairs = [{ window_days = 30, min_overlap_days = 10, leg_a = { venue = "hyperliquid", symbol = "BTC" }, leg_b = { venue = "hyperliquid", symbol = "ETH" } }]
+        "#,
+    )
+    .expect("a configured correlation family is valid");
+
+    let engine = engine_from_config(&cfg).expect("correlation registration succeeds");
+    assert!(engine.is_interned("corr.btc_eth"));
 }
 
 #[test]
@@ -1147,4 +1163,35 @@ fn slq_engine_from_config_registers_sweep_and_profile_family() {
     }
     // Unknown [swing] keys still fail closed (FEA-7).
     assert!(FeaturesConfig::from_toml("[swing]\nsweep_range_k = 5").is_err());
+}
+
+#[test]
+fn cv_engine_from_config_registers_climax_variant_features() {
+    use mp_features::FeaturesConfig;
+    let cfg = FeaturesConfig::from_toml(
+        r#"
+        bar_tf_ns = 60000000000
+        [climax_variants]
+        enabled = true
+        "#,
+    )
+    .unwrap();
+    let e = mp_features::engine_from_config(&cfg).unwrap();
+    // All 6 variant pattern features must register (FEA-4 one-code-path).
+    for id in [
+        "climax.variant.v1_volume_exhaustion",
+        "climax.variant.v2_multi_bar_exhaustion",
+        "climax.variant.v3_squeeze_expansion",
+        "climax.variant.v4_volume_divergence",
+        "climax.variant.v5_absorption_bar",
+        "climax.variant.v6_vol_expansion",
+    ] {
+        assert!(e.name_to_id(id).is_some(), "{id} must register");
+    }
+    // Disabled when enabled = false (default).
+    let off = FeaturesConfig::from_toml("").unwrap();
+    let e2 = mp_features::engine_from_config(&off).unwrap();
+    assert!(e2.name_to_id("climax.variant.v1_volume_exhaustion").is_none());
+    // Unknown [climax_variants] keys fail closed (FEA-7).
+    assert!(FeaturesConfig::from_toml("[climax_variants]\nunknown_key = 5").is_err());
 }

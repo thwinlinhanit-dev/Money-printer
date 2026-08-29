@@ -142,6 +142,7 @@ rolling_vwap_bars = 48
 #   target\debug\cohort_score.exe --log data\raw\*_hyperliquid_positions.log
 # from the recorded 08-08..08-18 census (95 addresses). Re-run weekly.
 enabled = true
+
 [cohort.inner]
 snapshot_path = "data/cohorts/2026-08-18.json"
 
@@ -164,4 +165,91 @@ enabled = false
 [netflow_flow]
 # CEX flow velocity (spec 043) - LIVE: fed by the mp-netflow daemon
 # (5 exchange USDT wallets @ 300s cadence, recording since 2026-08-24).
+enabled = true
+
+[corr]
+# Spec 048: cross-asset regime correlations — BTC-ETH (own recorded prices),
+# BTC-Gold/BTC-SPX/ETH-SPX (FRED MacroPoints), BTC-DeFiLlama regime series
+# (spec 046: TVL, stablecoin supply, DEX volume), and BTC-Coinalyze validation
+# series (spec 047: cross-exchange OI, funding, long/short ratio).
+# Regime conditioner only — never standalone entry (COR-4).
+enabled = true
+
+# Core crypto + TradFi pairs
+[[corr.pairs]]
+window_days = 30
+min_overlap_days = 10
+leg_a = { venue = "hyperliquid", symbol = "BTC" }
+leg_b = { venue = "hyperliquid", symbol = "ETH" }
+
+[[corr.pairs]]
+window_days = 30
+min_overlap_days = 10
+leg_a = { venue = "hyperliquid", symbol = "BTC" }
+leg_b = { venue = "fred", symbol = "GOLDAMGBD228NLBM" }
+
+[[corr.pairs]]
+window_days = 30
+min_overlap_days = 10
+leg_a = { venue = "hyperliquid", symbol = "BTC" }
+leg_b = { venue = "fred", symbol = "SP500" }
+
+[[corr.pairs]]
+window_days = 30
+min_overlap_days = 10
+leg_a = { venue = "hyperliquid", symbol = "ETH" }
+leg_b = { venue = "fred", symbol = "SP500" }
+
+# DeFiLlama regime series (spec 046) — regime-grade, never execution-grade.
+[[corr.pairs]]
+window_days = 30
+min_overlap_days = 10
+leg_a = { venue = "hyperliquid", symbol = "BTC" }
+leg_b = { venue = "defillama", symbol = "DEFI_TVL_AGG" }
+
+[[corr.pairs]]
+window_days = 30
+min_overlap_days = 10
+leg_a = { venue = "hyperliquid", symbol = "BTC" }
+leg_b = { venue = "defillama", symbol = "STABLECOIN_MCAP" }
+
+[[corr.pairs]]
+window_days = 30
+min_overlap_days = 10
+leg_a = { venue = "hyperliquid", symbol = "BTC" }
+leg_b = { venue = "defillama", symbol = "DEX_VOL_1D" }
+
+# Coinalyze cross-exchange validation (spec 047) — validation/context, NOT alpha.
+[[corr.pairs]]
+window_days = 30
+min_overlap_days = 10
+leg_a = { venue = "hyperliquid", symbol = "BTC" }
+leg_b = { venue = "coinalyze", symbol = "AGG_OI_BTC" }
+
+[[corr.pairs]]
+window_days = 30
+min_overlap_days = 10
+leg_a = { venue = "hyperliquid", symbol = "BTC" }
+leg_b = { venue = "coinalyze", symbol = "AGG_FUNDING_BTC" }
+
+[[corr.pairs]]
+window_days = 30
+min_overlap_days = 10
+leg_a = { venue = "hyperliquid", symbol = "BTC" }
+leg_b = { venue = "coinalyze", symbol = "AGG_LS_BTC" }
+
+# Regime classification thresholds for corr.* values (spec 048 regime wiring).
+# corr_regime.* features consume the raw Pearson r and emit regime labels
+# (0=risk_on, 1=neutral, 2=risk_off) that feed regime_fit_from_features.
+[corr.regime]
+btc_spx_risk_off_threshold = 0.7   # corr.btc_sp500 >= 0.7 → risk_off
+btc_spx_risk_on_threshold = 0.3    # corr.btc_sp500 <= 0.3 → risk_on
+btc_gold_risk_off_threshold = -0.3 # corr.btc_gold <= -0.3 → risk_off (crypto≠safe-haven)
+stablecoin_expand_threshold = 1.05 # stablecoin supply growth > 5% → risk_on
+
+[climax_variants]
+# 6 non-standard exhaustion/expansion patterns discovered from BTC daily
+# analysis 2017-2026. The standard climax detector (spec 004 climax.{tf})
+# catches only ~7.5% of potential reversal signals — these fill the gap.
+# Bar-only (SWG-2 compatible), disabled by default.
 enabled = true

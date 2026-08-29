@@ -174,9 +174,11 @@ fn liq_5_no_new_event_variant() {
     // from owner-approved specs 033/034 (TradeWithAddr / NetflowSnapshot /
     // Venue::Ethereum), never from 029. Schema 5 (2026-08-22) came from
     // owner-approved spec 040 (Venue::Cboe for the IBIT options chain).
+    // Schema 6 (2026-08-26) came from owner-approved specs 046/047
+    // (Venue::DeFiLlama + Venue::Coinalyze appended, CONV-20).
     // Guard the exact version so a future amendment updates this test
     // deliberately.
-    assert_eq!(mp_core::SCHEMA_VER, 5);
+    assert_eq!(mp_core::SCHEMA_VER, 6);
 }
 
 #[test]

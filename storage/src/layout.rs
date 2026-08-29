@@ -17,6 +17,8 @@ pub fn venue_slug(v: Venue) -> &'static str {
         Venue::Fred => "fred",
         Venue::Ethereum => "ethereum",
         Venue::Cboe => "cboe",
+        Venue::DeFiLlama => "defillama",
+        Venue::Coinalyze => "coinalyze",
     }
 }
 
@@ -34,6 +36,8 @@ pub fn venue_code(v: Venue) -> u16 {
         Venue::Fred => 8,
         Venue::Ethereum => 9,
         Venue::Cboe => 10,
+        Venue::DeFiLlama => 11,
+        Venue::Coinalyze => 12,
     }
 }
 
@@ -50,6 +54,8 @@ pub fn venue_from_code(code: u16) -> Option<Venue> {
         8 => Some(Venue::Fred),
         9 => Some(Venue::Ethereum),
         10 => Some(Venue::Cboe),
+        11 => Some(Venue::DeFiLlama),
+        12 => Some(Venue::Coinalyze),
         _ => None,
     }
 }
@@ -97,6 +103,30 @@ pub fn manifest_file(root: &Path, venue: Venue, date: &str) -> PathBuf {
     root.join("manifests")
         .join(format!("venue={}", venue_slug(venue)))
         .join(format!("date={date}.json"))
+}
+
+/// The raw event-log directory that siblings the cold root. The compaction
+/// caller (`mp-ops compact`) reads `data/raw/{YYYYMMDD}_{venue}_{symbol}.log`
+/// and writes cold Parquet under `data/cold/`, so given a cold root the raw
+/// corpus is always the sibling `raw/` directory. Returns `None` when the cold
+/// root has no parent (e.g. a bare temp dir in tests) — callers treat that as
+/// "no raw logs to verify" (STO-3 prune provenance, C-2 audit 2026-08-28).
+pub fn raw_log_dir(cold_root: &Path) -> Option<PathBuf> {
+    cold_root.parent().map(|p| p.join("raw"))
+}
+
+/// Candidate venue tokens used in raw day-file names
+/// (`{YYYYMMDD}_{token}_{symbol}.log`). The primary token matches the
+/// `mp-ops compact --venue` spelling (`parse_venue`), which differs from
+/// [`venue_slug`] for the futures venues; the slug is kept as a fallback
+/// candidate so a differently-spelled but unambiguous day-file is still
+/// checked rather than silently skipped.
+pub fn raw_file_venue_tokens(v: Venue) -> Vec<&'static str> {
+    match v {
+        Venue::BinanceFutures => vec!["binance", "binance_futures"],
+        Venue::KrakenFutures => vec!["kraken", "kraken_futures"],
+        other => vec![venue_slug(other)],
+    }
 }
 
 /// Streams that own a cold Parquet partition: spec 003 v1 trades + specs

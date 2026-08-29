@@ -17,6 +17,20 @@ Usage:
                                                                 # snapshots (clustering)
 
 Snapshots are written to data/scorecards/<date>_bursts.json (gitignored data).
+
+VPS root-cause output (spec 024 COL-2 diagnostics): each burst is printed with
+its exact UTC timestamp (`start_full`) and the ACTUAL observed silence
+(`max_silence_ms`) recorded by the collector watchdog. A short silence (e.g.
+16-60s) with coverage=1.0 is a self-healing reconnect that lost no data; a
+long silence (minutes) is a real feed outage that also drops coverage. The
+exact timestamp is meant to be overlaid on the VPS at that same instant:
+```sh
+journalctl -k --since '<start_full>' --until '<start_full +2min>'
+free -m   # at the same instant, if you run top/free on a loop
+systemctl status 'mp-*@*'
+```
+Uncorrelated bursts on BTC vs ETH point to per-process stalls (CPU/RAM
+contention / a single collector wedging) rather than a shared network path.
 """
 
 import argparse
@@ -38,6 +52,19 @@ def iso(ns):
     return datetime.datetime.fromtimestamp(ns / 1e9, datetime.timezone.utc).strftime(
         "%H:%M:%S"
     )
+
+
+def full_iso(ns):
+    """Exact UTC date+time of a burst — the overlay key for correlating a
+    `Status::Stale` reconnect with `journalctl -k`, `dmesg`, or `top` at the
+    same instant on the VPS (resource contention vs a dead feed)."""
+    return datetime.datetime.fromtimestamp(ns / 1e9, datetime.timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+
+
+def unix_s(ns):
+    return int(ns / 1e9)
 
 
 def run_audit(date, symbol):
@@ -78,13 +105,35 @@ def bursts(stales):
 
 
 def bursts_from_audit(d):
-    """Prefer the Rust audit's grouped bursts; fall back to local grouping."""
+    """Prefer the Rust audit's grouped bursts (with REAL recorded start->end
+    windows); enrich each with the ACTUAL per-burst observed silence (ms) from
+    `stale_silences_ms` (aligned 1:1 with `stale_periods`) and the exact UTC
+    timestamp, so an operator can overlay `journalctl`/`dmesg`/`top` at the
+    same instant. Fall back to local grouping only for old snapshots."""
     raw = d.get("stale_bursts")
     if raw:
-        return [
-            {"start": iso(b["start_ns"]), "end": iso(b["end_ns"]), "count": 0}
-            for b in raw
-        ]
+        stale_periods = d.get("stale_periods", [])
+        silences = d.get("stale_silences_ms", [])
+        out = []
+        for b in raw:
+            lo, hi = b["start_ns"], b["end_ns"]
+            window = [
+                m
+                for (p, m) in zip(stale_periods, silences)
+                if lo - 1 <= p.get("start_ns", 0) <= hi
+            ]
+            out.append(
+                {
+                    "start": iso(b["start_ns"]),
+                    "end": iso(b["end_ns"]),
+                    "count": 0,
+                    # None => older snapshot / binary without the measured field
+                    "max_silence_ms": max(window) if window else None,
+                    "start_full": full_iso(b["start_ns"]),
+                    "start_unix": unix_s(b["start_ns"]),
+                }
+            )
+        return out
     return bursts(d.get("stale_periods", []))
 
 
@@ -175,15 +224,28 @@ def print_day(snap):
             f"  {sym}: events={s['event_count']} coverage={s['coverage']} stale={s['stale_count']} worst_gap={s.get('worst_gap_s', '?')}s"
         )
         if s["bursts"]:
-            # Per-burst counts only exist for fallback-grouped snapshots;
-            # Rust-side bursts render as start-end windows.
-            print(
-                "    bursts: "
-                + "  ".join(
-                    f"{b['start']}-{b['end']}"
-                    + (f"({b['count']})" if b.get("count") else "")
-                    for b in s["bursts"]
+            # Rust-side bursts carry exact full UTC + max silence; legacy
+            # fallback burst render start-end only.
+            print("    bursts:")
+            for b in s["bursts"]:
+                sil = b.get("max_silence_ms")
+                sil_txt = (
+                    f" silence_max={sil}ms"
+                    if sil is not None
+                    else " (silence unknown: old snapshot/binary)"
                 )
+                if b.get("start_full"):
+                    print(
+                        f"      {b['start_full']}  "
+                        f"window {b['start']}-{b['end']}{sil_txt}"
+                        f"  unix {b.get('start_unix')}"
+                    )
+                else:
+                    print(f"      {b['start']}-{b['end']}{sil_txt}")
+            print(
+                "      // on the VPS, overlay each exact 'start_full' instant with: "
+                "journalctl -k --since '<TS>' --until '<TS+2min>'; free -m; "
+                "systemctl status 'mp-*@*'"
             )
         else:
             print("    bursts: none")

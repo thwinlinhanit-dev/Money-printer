@@ -1,0 +1,63 @@
+# Coinalyze cross-exchange validation collector config (spec 047, COZ-7).
+# Validation/context grade — NOT alpha (COZ-9: predicted-funding is public
+# telegraphy). NO API KEY HERE — the key comes from the COINALYZE_API_KEY
+# env var only (COZ-1, PD-2 — never in this file or the repo).
+#
+# Endpoint/field names follow the documented v1 API surface; verify against
+# the live docs at deployment (venue schema drift = pitfall #2). A wrong
+# guess yields zero honest rows, never fabricated ones.
+#
+# Deploy:
+#   $env:COINALYZE_API_KEY = "..."   # env only (PD-2)
+#   cargo run -p mp-collectors --features live-http --bin mp-coinalyze -- \
+#     --config collectors/coinalyze.toml.example
+
+data_dir = "data"
+
+# How often due-pulls are checked (seconds). Small and cheap.
+tick_s = 60
+# Coinalyze permits 40 calls/min; 1 request/s stays below that limit.
+request_interval_ms = 1000
+
+# Symbol pairs: Coinalyze's own symbol code + the series-id suffix.
+symbols = [
+    { coinalyze = "BTCUSDT_PERP.A", suffix = "BTC" },
+    { coinalyze = "ETHUSDT_PERP.A", suffix = "ETH" },
+]
+
+# Pulls (spec 047 Decisions: hourly OI/funding/liq; daily long/short).
+#   endpoint     — API path (appended ?symbols=<code><extra_query>)
+#   field        — history-array field inside each per-symbol object
+#   prefix       — series-id prefix (rows become AGG_<PREFIX>_<SUFFIX>)
+#   every_hours  — pull cadence in hours
+[[pulls]]
+endpoint = "/open-interest-history"
+field = "history"
+value_field = "c"
+prefix = "AGG_OI"
+extra_query = "&interval=1hour"
+every_hours = 1
+
+[[pulls]]
+endpoint = "/funding-rate-history"
+field = "history"
+value_field = "c"
+prefix = "AGG_FUNDING"
+extra_query = "&interval=1hour"
+every_hours = 1
+
+[[pulls]]
+endpoint = "/liquidation-history"
+field = "history"
+value_field = "l+s"
+prefix = "AGG_LIQ"
+extra_query = "&interval=1hour"
+every_hours = 1
+
+[[pulls]]
+endpoint = "/long-short-ratio-history"
+field = "history"
+value_field = "r"
+prefix = "AGG_LS"
+extra_query = "&interval=daily"
+every_hours = 24

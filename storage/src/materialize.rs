@@ -368,6 +368,7 @@ pub fn materialize_logs_limited(
     let last_ts = merged.last().map(|e| e.recv_ts_ns).unwrap_or(0);
 
     let mut engine: FeatureEngine = engine_from_config(cfg).map_err(|e| e.to_string())?;
+    engine.bind_symbols(&symbols);
     let mut updates = engine.run(&merged);
     // End-of-stream: emit the final partial bars (engine docs mandate this for
     // offline loops, or the last bar per symbol is silently dropped).

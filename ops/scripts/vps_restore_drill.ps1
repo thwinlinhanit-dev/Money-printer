@@ -18,13 +18,18 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Destination,           # backup root that holds <Dest>\vps-data
-    [string]$VpsHost = "34.135.127.147",
+    [string]$VpsHost = $env:MP_VPS_HOST,
     [string]$SshUser = "mp-egress",
     [string]$SshKey  = "",
     [switch]$KeepScratch            # keep the scratch dir on FAIL/PASS for inspection
 )
 
 $ErrorActionPreference = "Stop"
+### VPS: fail-closed on missing host (PD-2; audit M-1) - never committed, never blank.
+if ([string]::IsNullOrWhiteSpace($VpsHost)) {
+    Write-Host "[!!] No VPS host set. Pass -VpsHost or set MP_VPS_HOST (never commit the IP - PD-2)." -ForegroundColor Red
+    Exit 2
+}
 
 # ---- workspace root resolution (walk up to the [workspace] Cargo.toml) -------
 $root = $PSScriptRoot

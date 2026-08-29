@@ -1885,7 +1885,7 @@ fn ops_15_held_drain_files_flags_landed_but_unreleased() {
 
     // Parser round-trip on the real manifest line shape; junk lines parse to
     // None (they never flag anything).
-    let line = r#"{"ts_utc":"2026-08-16T08:21:01.2471763Z","vps_host":"34.135.127.147","vps_base":"/opt/money-printer/data","file":"raw/20260810_draintest_A.log","size":25,"sha256":"aabc","action":"landed","release":"released","no_release":false}"#;
+    let line = r#"{"ts_utc":"2026-08-16T08:21:01.2471763Z","vps_host":"192.0.2.1","vps_base":"/opt/money-printer/data","file":"raw/20260810_draintest_A.log","size":25,"sha256":"aabc","action":"landed","release":"released","no_release":false}"#;
     let parsed = parse_drain_manifest_line(line).expect("real line parses");
     assert_eq!(parsed.file, "raw/20260810_draintest_A.log");
     assert_eq!(parsed.release, "released");
@@ -2803,7 +2803,12 @@ fn regression_incident_2026_08_22_current_schema_log_audits_nonzero() {
             recv_ns,
             recv_ns,
             1,
-            MarketEvent::Trade { price: 100.0, qty: 1.0, side: Side::Buy, trade_id: 0 },
+            MarketEvent::Trade {
+                price: 100.0,
+                qty: 1.0,
+                side: Side::Buy,
+                trade_id: 0,
+            },
         )
     };
     {
@@ -2817,13 +2822,27 @@ fn regression_incident_2026_08_22_current_schema_log_audits_nonzero() {
 
     // Shared-reader agreement first: the same LogReader mp-ops links must
     // decode every frame the current writer produced.
-    let decoded = LogReader::open(&log_path).unwrap().filter_map(|e| e.ok()).count();
-    assert_eq!(decoded, 10, "shared LogReader must decode every written frame");
+    let decoded = LogReader::open(&log_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .count();
+    assert_eq!(
+        decoded, 10,
+        "shared LogReader must decode every written frame"
+    );
 
     // The actual incident surface: `mp-ops audit` on that file must report a
     // nonzero event_count — never a silent all-zero scorecard input.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_mp-ops"))
-        .args(["audit", "--date", "20260822", "--venue", "hyperliquid", "--symbol", "BTC"])
+        .args([
+            "audit",
+            "--date",
+            "20260822",
+            "--venue",
+            "hyperliquid",
+            "--symbol",
+            "BTC",
+        ])
         .current_dir(&root)
         .output()
         .expect("run mp-ops audit");
@@ -2836,9 +2855,15 @@ fn regression_incident_2026_08_22_current_schema_log_audits_nonzero() {
     let json: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("audit stdout not JSON ({e}): {stdout}"));
     let count = json["event_count"].as_u64().unwrap_or(0);
-    let rejected = stdout.contains("unsupported event schema")
-        || stdout.contains("legacy_or_malformed");
-    assert!(!rejected, "current-schema log rejected by the audit path: {stdout}");
-    assert!(count > 0, "schema-current log audited as ZERO events: {json}");
+    let rejected =
+        stdout.contains("unsupported event schema") || stdout.contains("legacy_or_malformed");
+    assert!(
+        !rejected,
+        "current-schema log rejected by the audit path: {stdout}"
+    );
+    assert!(
+        count > 0,
+        "schema-current log audited as ZERO events: {json}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

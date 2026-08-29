@@ -1,0 +1,156 @@
+// ═══════════════════════════════════════════════════════════════
+// V2 RANGE BREAKOUT STRATEGY
+// 129 trades, Sharpe 0.32, PF 2.96
+// Timeframe: Daily recommended
+// Pattern: Multi-bar selling → Range → Breakout
+// ═══════════════════════════════════════════════════════════════
+//@version=6
+strategy("V2 Range Breakout", overlay=true, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=2,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.06,
+     slippage=5)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+// Exhaustion Detection
+minStreak      = input.int(3, "Min Down Days (Exhaustion)")
+containWin     = input.int(15, "Containment Window")
+maxRangeATR    = input.float(4.0, "Max Range Width (× ATR)", step=0.25)
+
+// Breakout Detection
+breakoutBufATR = input.float(0.15, "Breakout Buffer (× ATR)", step=0.05)
+breakoutVolMult = input.float(1.15, "Breakout Volume ×", step=0.05)
+
+// Trend Filter
+useTrendFilter = input.bool(true, "Use Trend Filter")
+smaLen         = input.int(50, "SMA Length")
+
+// Risk Management
+atrLen         = input.int(14, "ATR Length")
+trailATR       = input.float(1.5, "Trailing Stop (× ATR)", step=0.5)
+tpPct          = input.float(0.0, "Take Profit % (0 = no TP)", step=1.0)
+maxHoldBars    = input.int(21, "Max Hold Bars (21 = 3 weeks)")
+
+// ═══════════════════════════════════════════════════════════════
+// DETECTION: Multi-Bar Exhaustion → Range → Breakout
+// ═══════════════════════════════════════════════════════════════
+atr = ta.atr(atrLen)
+volMA = ta.sma(volume, 20)
+
+// Count consecutive down days
+var int downStreak = 0
+if close < close[1]
+    downStreak += 1
+else
+    downStreak := 0
+
+// After exhaustion, look for range formation
+var bool inRange = false
+var float rangeHigh = na
+var float rangeLow = na
+var int rangeStart = 0
+
+// Detect range after exhaustion
+if downStreak >= minStreak and not inRange
+    inRange := true
+    rangeHigh := ta.highest(high, containWin)
+    rangeLow := ta.lowest(low, containWin)
+    rangeStart := bar_index
+
+// Update range while in it
+if inRange
+    rangeHigh := math.max(rangeHigh, ta.highest(high, containWin))
+    rangeLow := math.min(rangeLow, ta.lowest(low, containWin))
+    
+    // Exit range if breakout or too wide
+    rangeWidth = rangeHigh - rangeLow
+    if rangeWidth > maxRangeATR * atr
+        inRange := false
+
+// Breakout detection
+breakoutUp = inRange and close > rangeHigh + breakoutBufATR * atr and volume > volMA * breakoutVolMult
+breakoutDown = inRange and close < rangeLow - breakoutBufATR * atr and volume > volMA * breakoutVolMult
+
+// ═══════════════════════════════════════════════════════════════
+// TREND FILTER
+// ═══════════════════════════════════════════════════════════════
+sma = ta.sma(close, smaLen)
+inUptrend = close > sma
+inDowntrend = close < sma
+
+// Apply filter
+buySignal = breakoutUp and (useTrendFilter ? inUptrend : true)
+sellSignal = breakoutDown and (useTrendFilter ? inDowntrend : true)
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY
+// ═══════════════════════════════════════════════════════════════
+if buySignal and strategy.position_size == 0
+    strategy.entry("V2 Long", strategy.long)
+    inRange := false
+
+if sellSignal and strategy.position_size == 0
+    strategy.entry("V2 Short", strategy.short)
+    inRange := false
+
+// ═══════════════════════════════════════════════════════════════
+// EXIT: Trailing Stop + Time Stop
+// ═══════════════════════════════════════════════════════════════
+var float trailPrice = na
+var int entryBar = 0
+var float entryPrice = 0
+
+if strategy.position_size != 0
+    if strategy.position_size > 0
+        newTrail = close - trailATR * atr
+        trailPrice := math.max(nz(trailPrice, newTrail), newTrail)
+        
+        tpLevel = entryPrice * (1 + tpPct / 100)
+        if tpPct > 0 and close >= tpLevel
+            strategy.exit("TP", "V2 Long", limit=tpLevel)
+        
+        strategy.exit("Trail", "V2 Long", stop=trailPrice)
+        
+        if bar_index - entryBar >= maxHoldBars
+            strategy.close("V2 Long", comment="Time Stop")
+    
+    else
+        newTrail = close + trailATR * atr
+        trailPrice := math.min(nz(trailPrice, newTrail), newTrail)
+        
+        tpLevel = entryPrice * (1 - tpPct / 100)
+        if tpPct > 0 and close <= tpLevel
+            strategy.exit("TP", "V2 Short", limit=tpLevel)
+        
+        strategy.exit("Trail", "V2 Short", stop=trailPrice)
+        
+        if bar_index - entryBar >= maxHoldBars
+            strategy.close("V2 Short", comment="Time Stop")
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryBar := bar_index
+    entryPrice := close
+    trailPrice := na
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+plot(sma, "SMA", color=color.new(color.white, 50))
+plot(trailPrice, "Trail Stop", color=color.new(color.orange, 30), style=plot.style_linebr)
+
+// Range visualization
+plot(inRange ? rangeHigh : na, "Range High", color=color.new(color.yellow, 50), style=plot.style_linebr)
+plot(inRange ? rangeLow : na, "Range Low", color=color.new(color.yellow, 50), style=plot.style_linebr)
+
+plotshape(buySignal, "Buy Signal", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+alertcondition(buySignal, "V2 Buy", "Range Breakout BUY signal")
+alertcondition(sellSignal, "V2 Sell", "Range Breakout SELL signal")

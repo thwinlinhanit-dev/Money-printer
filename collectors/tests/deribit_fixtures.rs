@@ -353,8 +353,8 @@ fn opt_10_host_and_schema_signed_off() {
     // config, with no credentials (PD-2).
     assert_eq!(
         mp_core::SCHEMA_VER,
-        5,
-        "schema amendment (spec 001) is live"
+        6,
+        "schema amendment (spec 001) is live — schema 6 added Venue::DeFiLlama + Venue::Coinalyze (specs 046/047)"
     );
     let example = include_str!("../deribit.example.toml");
     assert!(

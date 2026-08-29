@@ -13,7 +13,7 @@ Risk management framework: position sizing (Kelly), capital allocation, killswit
 - `src/governor.rs` — exposure governor
 - `src/killswitch.rs` — automated killswitch logic
 - `src/gate.rs` — risk gates (RG-1..13: RG-12 max concurrent positions — new-slot orders only; RG-13 correlation-adjusted exposure cap, caller-computed value)
-- `src/config.rs` — risk configuration
+- `src/config.rs` — risk configuration + `regime_fit_from_features` (RSK-7): maps `regime.vol`/`regime.trend` labels + optional `corr_regime.*` correlation-derived labels (spec 048: 0=risk_on/1=corr_neutral/2=risk_off from `CorrRegimeFeature`) to declared-strategy regime masks; fail-closed on invalid labels (CONV-8)
 - `risk.toml.example` — example config
 
 ## Verification

@@ -42,9 +42,40 @@ $heartbeats = @($recordings | ForEach-Object { "mp-collector-$($_.venue)-$($_.sy
 # ---- Reset collection state: kill collectors, drop stale locks/heartbeats ----
 # Heartbeat files are removed too so the (re)started watchdog sees "down" and
 # respawns immediately instead of waiting out its 75s staleness grace.
-Stop-Process -Name "mp-collector" -Force -ErrorAction SilentlyContinue
+#
+# SCOPE (audit H-5): reset ONLY the Phase-0 recording set. The old global
+# `Stop-Process -Name mp-collector` and `Remove-Item .lock_*` also killed the
+# independently-supervised swing set (swing_collectors.ps1) and deleted lock
+# files still held by live processes - which can admit a SECOND writer to the
+# same append-only W-6 log (interleaved/corrupt frames). Phase-0 collectors are
+# identified by their spawn command line: the watchdog launches them with
+# `--venue/--symbol` and WITHOUT `--config` (ops/watchdog_collectors.ps1:102),
+# whereas swing/whale/macro collectors are launched via `--config collectors/...`
+# and are left entirely alone.
+$phase0C = Get-CimInstance Win32_Process -Filter "Name='mp-collector.exe'" -ErrorAction SilentlyContinue
+$killed = @()
+foreach ($p in $phase0C) {
+    $cl = $p.CommandLine
+    if (-not $cl -or $cl -like "*--config*") { continue } # swing/macro/etc use --config
+    foreach ($r in $recordings) {
+        $sTok = "--symbol `"$($r.symbol)`""
+        if ($cl -like "*$sTok*") {
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+            $killed += "PID $($p.ProcessId) ($($r.venue):$($r.symbol))"
+            break
+        }
+    }
+}
 Start-Sleep -Seconds 1
-Remove-Item -Path (Join-Path $root "data\raw\.lock_*") -Force -ErrorAction SilentlyContinue
+# Clear ONLY the Phase-0 instance locks (a force-killed prior writer may have
+# left one); never a glob delete of every .lock_* file.
+foreach ($r in $recordings) {
+    $lock = ".lock_$($r.venue)_$($r.symbol)"
+    Remove-Item -Path (Join-Path $root "data\raw\$lock") -Force -ErrorAction SilentlyContinue
+}
+if ($killed.Count -gt 0) {
+    Write-Host ("[OK] Stopped stale Phase-0 collectors: {0}" -f ($killed -join "; "))
+}
 foreach ($hb in $heartbeats) {
     Remove-Item -Path (Join-Path $root "data\raw\$hb") -Force -ErrorAction SilentlyContinue
 }

@@ -7,7 +7,7 @@
 
 use crate::bar::{Bar, BarBuilder};
 use mp_core::event::EventEnvelope;
-use mp_core::{SymbolId, Venue};
+use mp_core::{SymbolId, SymbolTable, Venue};
 use std::collections::BTreeMap;
 
 /// A single feature output at a point in time. The `feature` field is an
@@ -57,6 +57,9 @@ pub trait TickFeature {
     }
     /// Update on one event; return `Some(value)` to emit.
     fn on_event(&mut self, ev: &EventEnvelope) -> Option<f64>;
+    /// Bind event-local symbol IDs to configuration-level names before replay.
+    /// Most features are symbol-agnostic and keep the default no-op.
+    fn bind_symbols(&mut self, _symbols: &SymbolTable) {}
 }
 
 /// A feature computed on bar close (no intra-bar repaint).
@@ -114,6 +117,9 @@ pub struct FeatureEngine {
     /// Reverse lookup: SymbolId → name (for resolution in logs/screener).
     id_to_name: BTreeMap<SymbolId, String>,
     next_feature_id: u32,
+    /// Canonical event-symbol table for global features configured by venue
+    /// symbol name (e.g. cross-asset correlations).
+    symbols: Option<SymbolTable>,
 }
 
 // Spec 023 FEA-18: SymbolId(0) is reserved as null/invalid.
@@ -133,6 +139,7 @@ impl FeatureEngine {
             name_to_id: BTreeMap::new(),
             id_to_name: BTreeMap::new(),
             next_feature_id: 1, // spec 023 FEA-18: ids start from 1
+            symbols: None,
         }
     }
 
@@ -226,6 +233,17 @@ impl FeatureEngine {
         self
     }
 
+    /// Bind configured global features to the canonical symbols for this
+    /// replay. This must run before the first event; callers with no symbol
+    /// table keep name-dependent features fail-closed.
+    pub fn bind_symbols(&mut self, symbols: &SymbolTable) {
+        self.symbols = Some(symbols.clone());
+        self.ensure_globals();
+        for feature in &mut self.globals {
+            feature.bind_symbols(symbols);
+        }
+    }
+
     /// Lazily materialize the global feature instances on first event (they
     /// are built ONCE, not per symbol).
     fn ensure_globals(&mut self) {
@@ -239,6 +257,11 @@ impl FeatureEngine {
         self.global_names = names;
         self.global_ids = ids;
         self.globals = globals;
+        if let Some(symbols) = &self.symbols {
+            for feature in &mut self.globals {
+                feature.bind_symbols(symbols);
+            }
+        }
     }
 
     /// Register a bar-feature factory.

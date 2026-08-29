@@ -113,6 +113,13 @@ Python research package for offline analysis: daily brief generation via LLM, st
   no venue keys (UI-2), research-only (CONV-2 — never on live paths); missing
   symbol-days return `[]` + a `note`, never a silent blank chart (UI-5);
   `TERMD_DATA_ROOT`/`TERMD_MP_QUERY`/`TERMD_TERMINAL_DIR` env overrides;
+  request-input hardening (audit 2026-08-25): every date query param is a strict
+  `YYYY-MM-DD` regex gate before it touches a filesystem path (VULN-002),
+  feature-family/date paths are containment-checked against the feature store
+  like `_serve_static` (VULN-001), and main() REFUSES a non-loopback
+  `--host` unless `TERMD_ALLOW_REMOTE=1` (HARDING-003 fail-closed — the
+  terminal is read-only but UNAUTHENTICATED by design; empty-string host is
+  deliberately rejected since `(\"\", port)` binds all interfaces);
   verify with `py -3.13 -m pytest research/tests/test_terminal.py research/tests/test_ws.py`
 - `terminal/` — static canvas viewer (`index.html` + `app.js`, no framework,
   no build): venue/symbol/date/tf/footprint-bucket/kind pickers, price candles

@@ -1,0 +1,140 @@
+// ═══════════════════════════════════════════════════════════════
+// V5 ABSORPTION BAR STRATEGY
+// Best performer: Sharpe 1.81, 64% win rate, PF 6.39
+// Timeframe: Weekly recommended (Daily also works)
+// ═══════════════════════════════════════════════════════════════
+//@version=6
+strategy("V5 Absorption Bar", overlay=true, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=2,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.06,
+     slippage=5)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+// Detection
+wickRatio      = input.float(2.0, "Min Wick/Body Ratio", step=0.1)
+bodyPctMax     = input.float(0.15, "Max Body % of Range", step=0.05)
+volSpike       = input.float(1.2, "Volume Spike × MA", step=0.1)
+volMALen       = input.int(20, "Volume MA Length")
+
+// Trend Filter (THE edge multiplier)
+useTrendFilter = input.bool(true, "Use Trend Filter")
+smaLen         = input.int(50, "SMA Length (Daily) / 20 for Weekly")
+
+// Risk Management
+atrLen         = input.int(14, "ATR Length")
+trailATR       = input.float(2.0, "Trailing Stop (× ATR)", step=0.5)
+tpPct          = input.float(0.0, "Take Profit % (0 = no TP)", step=1.0)
+maxHoldBars    = input.int(56, "Max Hold Bars (56 = 8w weekly)")
+
+// ═══════════════════════════════════════════════════════════════
+// DETECTION: Absorption Bar
+// ═══════════════════════════════════════════════════════════════
+atr = ta.atr(atrLen)
+range = high - low
+body = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+
+// Absorption criteria
+isSmallBody = range > 0 and (body / range) <= bodyPctMax
+hasLongWick = range > 0 and (math.max(upperWick, lowerWick) / math.max(body, 0.0001)) >= wickRatio
+
+// Direction
+buyersAbsorbing = lowerWick > upperWick  // Long lower wick = buyers absorbing sellers
+sellersAbsorbing = upperWick > lowerWick  // Long upper wick = sellers absorbing buyers
+
+// Volume confirmation
+volMA = ta.sma(volume, volMALen)
+volConfirm = volume > volMA * volSpike
+
+// Combined signal
+absorptionBuy = isSmallBody and hasLongWick and buyersAbsorbing and volConfirm
+absorptionSell = isSmallBody and hasLongWick and sellersAbsorbing and volConfirm
+
+// ═══════════════════════════════════════════════════════════════
+// TREND FILTER
+// ═══════════════════════════════════════════════════════════════
+sma = ta.sma(close, smaLen)
+inUptrend = close > sma
+inDowntrend = close < sma
+
+// Apply filter
+buySignal = absorptionBuy and (useTrendFilter ? inUptrend : true)
+sellSignal = absorptionSell and (useTrendFilter ? inDowntrend : true)
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY
+// ═══════════════════════════════════════════════════════════════
+if buySignal and strategy.position_size == 0
+    strategy.entry("V5 Long", strategy.long)
+
+if sellSignal and strategy.position_size == 0
+    strategy.entry("V5 Short", strategy.short)
+
+// ═══════════════════════════════════════════════════════════════
+// EXIT: Trailing Stop + Time Stop
+// ═══════════════════════════════════════════════════════════════
+var float trailPrice = na
+var int entryBar = 0
+var float entryPrice = 0
+
+if strategy.position_size != 0
+    if strategy.position_size > 0
+        // Long trailing stop
+        newTrail = close - trailATR * atr
+        trailPrice := math.max(nz(trailPrice, newTrail), newTrail)
+        
+        // Take profit
+        tpLevel = entryPrice * (1 + tpPct / 100)
+        if tpPct > 0 and close >= tpLevel
+            strategy.exit("TP", "V5 Long", limit=tpLevel)
+        
+        // Trailing stop
+        strategy.exit("Trail", "V5 Long", stop=trailPrice)
+        
+        // Time stop
+        if bar_index - entryBar >= maxHoldBars
+            strategy.close("V5 Long", comment="Time Stop")
+    
+    else
+        // Short trailing stop
+        newTrail = close + trailATR * atr
+        trailPrice := math.min(nz(trailPrice, newTrail), newTrail)
+        
+        // Take profit
+        tpLevel = entryPrice * (1 - tpPct / 100)
+        if tpPct > 0 and close <= tpLevel
+            strategy.exit("TP", "V5 Short", limit=tpLevel)
+        
+        // Trailing stop
+        strategy.exit("Trail", "V5 Short", stop=trailPrice)
+        
+        // Time stop
+        if bar_index - entryBar >= maxHoldBars
+            strategy.close("V5 Short", comment="Time Stop")
+
+// Reset on new entry
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryBar := bar_index
+    entryPrice := close
+    trailPrice := na
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+plot(sma, "SMA", color=color.new(color.white, 50))
+plot(trailPrice, "Trail Stop", color=color.new(color.orange, 30), style=plot.style_linebr)
+
+plotshape(buySignal, "Buy Signal", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+alertcondition(buySignal, "V5 Buy", "Absorption Bar BUY signal")
+alertcondition(sellSignal, "V5 Sell", "Absorption Bar SELL signal")

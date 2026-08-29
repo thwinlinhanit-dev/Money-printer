@@ -86,6 +86,17 @@ pub fn check_promotion_n(scorecards: &[DailyScorecard], required: usize) -> Prom
     let mut first_failure: Option<String> = None;
 
     for (i, card) in scorecards.iter().enumerate() {
+        // Adjacency gate: consecutive scorecards must be adjacent
+        // UTC calendar days (exactly 1 day apart). A missing
+        // scorecard file breaks the streak even if every present
+        // file is clean — filesystem listing is not proof of
+        // calendar continuity.
+        if i > 0 && !dates_are_adjacent(&scorecards[i - 1].date, &card.date) {
+            current_run = 0;
+            if first_failure.is_none() {
+                first_failure = Some(card.date.clone());
+            }
+        }
         if card.promotable {
             if current_run == 0 {
                 current_start = i;
@@ -188,6 +199,52 @@ fn day_has_bursts(card: &DailyScorecard) -> bool {
     card.recording_bursts.iter().any(|r| r.stale_bursts > 0)
 }
 
+/// Check whether two date strings (`YYYYMMDD`) are adjacent UTC calendar
+/// days (exactly 1 day apart). Returns `false` for equal dates, non-adjacent
+/// dates, or malformed input.
+fn dates_are_adjacent(a: &str, b: &str) -> bool {
+    let Ok((ya, ma, da)) = parse_ymd(a) else {
+        return false;
+    };
+    let Ok((yb, mb, db)) = parse_ymd(b) else {
+        return false;
+    };
+    days_since_epoch(yb, mb, db) - days_since_epoch(ya, ma, da) == 1
+}
+
+fn parse_ymd(s: &str) -> Result<(u32, u32, u32), ()> {
+    if s.len() != 8 {
+        return Err(());
+    }
+    let y: u32 = s[0..4].parse().map_err(|_| ())?;
+    let m: u32 = s[4..6].parse().map_err(|_| ())?;
+    let d: u32 = s[6..8].parse().map_err(|_| ())?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return Err(());
+    }
+    Ok((y, m, d))
+}
+
+/// Convert a (year, month, day) triple to days since a fixed epoch (2000-01-01).
+fn days_since_epoch(y: u32, m: u32, d: u32) -> i64 {
+    let y = y as i64;
+    let m = m as i64;
+    let d = d as i64;
+    let adjusted_month = m - 3;
+    let year_offset = if adjusted_month < 0 { y - 1 } else { y };
+    let month_offset = if adjusted_month < 0 {
+        adjusted_month + 12
+    } else {
+        adjusted_month
+    };
+    let era = year_offset / 400;
+    let year_of_era = year_offset - era * 400;
+    let doe =
+        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + (month_offset * 306 + 5) / 10 + d
+            - 1;
+    era * 146097 + doe - 719468
+}
+
 /// Longest contiguous run of burst-free days in `cards`; returns
 /// `(start_index, length)` of the latest longest run (consistent with the
 /// streak scan above, which also prefers the most recent on ties).
@@ -248,6 +305,7 @@ mod tests {
             gaps: vec![],
             stale_periods: vec![],
             stale_bursts: vec![],
+            stale_silences_ms: vec![],
             worst_gap_ns: 0,
             findings: vec![],
         }
@@ -290,6 +348,23 @@ mod tests {
         assert_eq!(v.consecutive_clean, 7);
         assert_eq!(v.window_start.as_deref(), Some("20260701"));
         assert_eq!(v.window_end.as_deref(), Some("20260707"));
+    }
+
+    #[test]
+    fn promotion_rejects_non_adjacent_clean_scorecard_dates() {
+        // A scorecard file can be absent when the pipeline fails. Seven files
+        // must never be mistaken for seven calendar days of evidence.
+        let cards = [
+            "20260701", "20260702", "20260703", "20260705", "20260706", "20260707", "20260708",
+        ]
+        .into_iter()
+        .map(|date| card(date, true))
+        .collect::<Vec<_>>();
+
+        let v = check_promotion(&cards);
+
+        assert!(!v.promoted);
+        assert_eq!(v.consecutive_clean, 4);
     }
 
     #[test]

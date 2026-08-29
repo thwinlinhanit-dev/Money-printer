@@ -1,0 +1,19 @@
+# DeFiLlama regime collector config (spec 046, DEF-6).
+# Regime-grade only — never execution-grade (DEF-4). Keyless API: there is NO
+# API key and none belongs here (PD-2 trivially satisfied; do not add one).
+# Deploy:
+#   cargo run -p mp-collectors --features live-http --bin mp-defillama -- \
+#     --config collectors/defillama.toml.example
+
+data_dir = "data"
+
+# Daily cadence (DEF-3): default 1/day. The snapshot-day watermark makes
+# re-runs idempotent (DEF-8).
+poll_cadence_s = 86400
+
+# Recorded series (spec 046 Decisions 2026-08-26):
+#   DEFI_TVL_AGG   — all-chains DeFi TVL (latest point of global history)
+#   USDT_SUPPLY    — USDT circulating supply (peggedUSD)
+#   USDC_SUPPLY    — USDC circulating supply (peggedUSD)
+#   STABLECOIN_MCAP — aggregate stablecoin mcap (peggedUSD census total)
+#   DEX_VOL_1D     — 24h DEX volume aggregate

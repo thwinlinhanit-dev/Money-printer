@@ -518,7 +518,7 @@ fn load_scorecards(dir: &str, required: &BTreeSet<String>) -> Result<Vec<Scoreca
     if !required.is_empty() {
         // Filter to days that include every required venue:symbol recording.
         // Invariant: the daily pipeline always generates scorecards with the
-        // FULL required set (a missing raw log audits as unreadable_log =>
+        // FULL required set (a missing raw log audits as recording_missing =>
         // clean=false => promotable=false), so no day is ever silently
         // dropped from the streak here.
         files.retain(|card| {
@@ -915,7 +915,18 @@ fn cmd_status(args: &[String]) -> Result<String, String> {
                 "ts_ns": latch.ts_ns,
             })
         }
-        Err(_) => serde_json::json!({ "latched": false, "file": latch_path.to_string_lossy() }),
+        // Missing = fresh state (H-2: not an error). Any OTHER read failure
+        // (permissions, IO) cannot be verified — fail closed like a corrupt
+        // latch instead of reporting an unverified "latched: false".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::json!({ "latched": false, "file": latch_path.to_string_lossy() })
+        }
+        Err(e) => {
+            return Err(format!(
+                "kill-latch {} unreadable — failing closed: {e}",
+                latch_path.display()
+            ))
+        }
     };
 
     serde_json::to_string(&serde_json::json!({
@@ -1025,6 +1036,30 @@ fn scorecard_from_root(data_root: &Path, args: &[String]) -> Result<String, Stri
             .join(format!("{date}_{venue_name}_{symbol}.log"));
         let audit = audit_raw_log(&path, &audit_config(args, venue, symbol)?);
         entries.push((venue, symbol.to_owned(), audit));
+    }
+    // Gate-integrity plausibility guard (incident 2026-08-22): when EVERY
+    // required recording audits to zero events, this is not a dirty day —
+    // the gate read nothing (raw sources never drained, or a reader/writer
+    // schema split like the one that blinded the VPS gate 08-19..21).
+    // Verdicts computed from zero bytes are not evidence: refuse loudly
+    // instead of archiving a plausible-looking DIRTY verdict that silently
+    // eats the promotion streak. The missed archive then surfaces through
+    // the existing dead-man (`pipeline-stale`, OPS-17) as a P1. An operator
+    // who genuinely wants the zero-verdict JSON passes --allow-all-zero.
+    if entries.iter().all(|(_, _, a)| a.event_count == 0)
+        && !args.iter().any(|a| a == "--allow-all-zero")
+    {
+        eprintln!(
+            "gate-integrity anomaly: every required recording for {dashed} audited to \
+             0 events (missing raw sources or a reader/writer schema split) - \
+             refusing to emit a verdict from zero bytes; re-score after the \
+             sources land or pass --allow-all-zero"
+        );
+        return Err(format!(
+            "all-zero event counts across {} recording(s) for {dashed} - \
+             not a dirty day but a gate-integrity anomaly (incident 2026-08-22)",
+            entries.len()
+        ));
     }
     // Lightweight file: verdict + per-recording counts only, never the full
     // findings Vec (legacy days balloon to GB otherwise — 2026-08-04).
@@ -2299,6 +2334,100 @@ mod tests {
         let after = std::fs::read_to_string(runs_dir.join("index.jsonl")).unwrap();
         assert_eq!(before, after, "no run to correlate ⇒ no verdict line");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Incident 2026-08-22 plausibility guard: every-required-recording-zero
+    /// is a gate-integrity anomaly (missing drain / reader-writer schema
+    /// split), NOT a dirty day — the command refuses (exit 2, no verdict
+    /// JSON) unless the operator explicitly passes --allow-all-zero.
+    #[test]
+    fn scorecard_all_zero_refuses_verdict_unless_allowed() {
+        let root = std::env::temp_dir().join(format!("mp-allzero-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("raw")).unwrap();
+        let args = vec![
+            "scorecard".into(),
+            "--date".into(),
+            "2026-08-24".into(),
+            "--required".into(),
+            "hyperliquid:BTC".into(),
+        ];
+        let err = scorecard_from_root(&root, &args).unwrap_err();
+        assert!(err.contains("all-zero"), "{err}");
+        assert!(!root.join("scorecards/2026-08-24.json").exists());
+        // Operator escape hatch: explicit, on-record, still promotable=false.
+        let mut allowed = args.clone();
+        allowed.push("--allow-all-zero".into());
+        let json = scorecard_from_root(&root, &allowed).expect("allowed zero-verdict");
+        let card: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(card["promotable"], false);
+        assert_eq!(card["recordings"][0]["event_count"], 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Incident 2026-08-22 version-skew regression: what the CURRENT writer
+    /// encodes, the scorecard's audit path must decode with real counts —
+    /// a reader/writer split inside one snapshot can never ship again
+    /// (asserting event_count > 0 through `scorecard_from_root`).
+    #[test]
+    fn scorecard_decodes_schema_current_writer_events() {
+        let root = std::env::temp_dir().join(format!("mp-pairsmoke-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("raw")).unwrap();
+        let raw = root.join("raw/20260825_hyperliquid_BTC.log");
+        let (mut writer, _) = EventLogWriter::open(&raw).unwrap();
+        writer
+            .write_symbols(&[SymbolMeta::new(
+                SymbolId(0),
+                Venue::Hyperliquid,
+                "BTC",
+                "BTC",
+                "USD",
+                InstrumentKind::Perp,
+                0.1,
+                0.1,
+                1.0,
+            )])
+            .unwrap();
+        for seq in 1i64..=2 {
+            writer
+                .append(
+                    &EventEnvelope::new(
+                        Venue::Hyperliquid,
+                        SymbolId(0),
+                        seq * 1_000_000_000,
+                        seq * 1_000_000_000,
+                        seq as u64,
+                        MarketEvent::Trade {
+                            price: 100.0,
+                            qty: 1.0,
+                            side: Side::Buy,
+                            trade_id: seq as u64,
+                        },
+                    )
+                    .with_provenance(EventProvenance {
+                        stream: "trade".into(),
+                        subscription: "x".into(),
+                        connection_id: 1,
+                        snapshot_source: SnapshotSource::None,
+                    }),
+                )
+                .unwrap();
+        }
+        writer.sync().unwrap();
+        let args = vec![
+            "scorecard".into(),
+            "--date".into(),
+            "2026-08-25".into(),
+            "--required".into(),
+            "hyperliquid:BTC".into(),
+        ];
+        let json = scorecard_from_root(&root, &args).expect("schema-current audit decodes");
+        let card: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(card["recordings"][0]["event_count"], 2, "{json}");
+        assert_eq!(card["recordings"][0]["clean"], true);
+        assert_eq!(card["promotable"], true);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The audit's `stale_bursts` count and `worst_gap_ns` must surface in the

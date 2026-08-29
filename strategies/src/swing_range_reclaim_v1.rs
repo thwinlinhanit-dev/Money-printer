@@ -120,6 +120,18 @@ enum State {
         entry_ts_ns: i64,
         units: f64,
     },
+    /// The entry fill landed but no valid T1 could be computed (stale range or
+    /// a fast move that printed the fill beyond the boundary). Audit H-4: the
+    /// engine has ALREADY booked the fill, so going `Idle` would orphan the
+    /// position — no stop, no T1, no trail, no time stop, ever. This state
+    /// drives an immediate reduce-only close and keeps re-emitting it until
+    /// the position is actually flat (fail-closed: never an unmanaged hold).
+    Exiting {
+        venue: Venue,
+        symbol: SymbolId,
+        /// The SIDE that was entered (the close is the opposite side).
+        side: Side,
+    },
     ExitSignaled,
 }
 
@@ -545,6 +557,30 @@ impl Strategy for SwingRangeReclaimV1 {
                 self.state = State::Idle;
                 Vec::new()
             }
+            State::Exiting { venue, symbol, side } => {
+                if (venue, symbol) != (u.venue, u.symbol) {
+                    return Vec::new();
+                }
+                // Audit H-4: keep re-emitting the reduce-only close until the
+                // position is actually flat (the T1-failure orphan). Once the
+                // engine reports a zero position the cycle is complete.
+                if ctx.position(symbol).abs() > 0.0 {
+                    let exit_side = match side {
+                        Side::Buy => Side::Sell,
+                        Side::Sell => Side::Buy,
+                    };
+                    vec![self.make_intent(
+                        venue,
+                        symbol,
+                        exit_side,
+                        self.risk_units(),
+                        "swr-v1 flat retry",
+                    )]
+                } else {
+                    self.state = State::Idle;
+                    Vec::new()
+                }
+            }
             State::Entered { venue, symbol, .. } => {
                 if (venue, symbol) != (u.venue, u.symbol) {
                     return Vec::new();
@@ -581,8 +617,29 @@ impl Strategy for SwingRangeReclaimV1 {
                     units: self.risk_units(),
                 };
             } else {
-                self.state = State::Idle;
+                // Audit H-4: the fill is ALREADY booked by the engine, so we
+                // must NOT drop to `Idle` — that would leave the position
+                // unmanaged for the rest of the run. Emit an immediate
+                // opposite-side close and track the flatten in `State::Exiting`.
+                let exit_side = match side {
+                    Side::Buy => Side::Sell,
+                    Side::Sell => Side::Buy,
+                };
+                let close =
+                    self.make_intent(venue, symbol, exit_side, self.risk_units(), "swr-v1 flat");
+                self.state = State::Exiting { venue, symbol, side };
+                return vec![close];
             }
+        } else if let State::Exiting {
+            venue, symbol, ..
+        } = self.state
+        {
+            // A fill while we're flattening the orphaned position — the close
+            // landed; mark the cycle complete so the next entry is unblocked.
+            // (If the close did NOT fill, State::Exiting persists and
+            // on_feature keeps re-emitting the close — never an unmanaged hold.)
+            let _ = (venue, symbol);
+            self.state = State::Idle;
         }
         Vec::new()
     }
@@ -762,6 +819,123 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].side, Side::Sell);
         assert_eq!(out[0].tag, "swr-v1 stop-out");
+    }
+
+    /// Test Ctx that reports a configurable position (for the H-4 Exiting retry).
+    struct HeldCtx {
+        now: i64,
+        pos: f64,
+    }
+    impl Ctx for HeldCtx {
+        fn now_ns(&self) -> i64 {
+            self.now
+        }
+        fn position(&self, _: SymbolId) -> f64 {
+            self.pos
+        }
+        fn equity_allocated(&self) -> f64 {
+            1_000_000.0
+        }
+        fn next_u64(&mut self) -> u64 {
+            99
+        }
+        fn set_timer(&mut self, _: i64) -> TimerId {
+            TimerId(0)
+        }
+        fn log(&mut self, _: &str) {}
+    }
+
+    #[test]
+    fn regression_audit28_h4_t1_failure_never_orphans_position() {
+        // Stale range at fill time ⇒ compute_t1 returns None RIGHT AFTER the
+        // engine has booked the entry. The old code went `Idle`, leaving an
+        // unmanaged position. It must now emit an immediate opposite-side close
+        // (State::Exiting) and retry until the position is flat — never Idle.
+        let mut s = strat();
+        let mut c = ctx(40);
+        feed_context(&mut s, &mut c, 40);
+        let entry = s.on_feature(&up("swing.sweep.low.stop.20", 80.0, 41), &mut c);
+        assert_eq!(entry.len(), 1);
+        assert!(matches!(s.state, State::EntrySignaled { .. }));
+
+        // Fill arrives on a far-future clock so the stored range (day 40) is
+        // > 2-day stale → compute_t1 → None via `fresh`.
+        c.now = 60 * DAY; // 20 days after the range readings
+        let intents = s.on_fill(
+            &mp_core::Fill {
+                intent_id: IntentId(1),
+                symbol: SymbolId(1),
+                side: Side::Buy,
+                price: 100.0,
+                qty: 1.0,
+                fee: 0.0,
+                liquidity: mp_core::Liquidity::Taker,
+                ts_ns: c.now,
+            },
+            &mut c,
+        );
+        // Must NOT go Idle while holding, and MUST emit a close.
+        assert_eq!(intents.len(), 1, "T1 failure must emit a close, not an orphan");
+        assert_eq!(intents[0].side, Side::Sell, "close is opposite the entry");
+        assert_eq!(intents[0].tag, "swr-v1 flat");
+        assert!(matches!(s.state, State::Exiting { .. }), "must be Exiting while flattening");
+        assert!(!matches!(s.state, State::Idle), "must never sit Idle while holding");
+
+        // Retry: while the engine still reports a position, keep re-closing.
+        let mut held = HeldCtx { now: 62 * DAY, pos: 1.0 };
+        let retry = s.on_feature(&up("swing.close", 99.0, 62), &mut held);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].side, Side::Sell);
+        assert_eq!(retry[0].tag, "swr-v1 flat retry");
+
+        // Once flat, the cycle completes and the strategy returns to Idle.
+        let mut flat = HeldCtx { now: 63 * DAY, pos: 0.0 };
+        assert!(s.on_feature(&up("swing.close", 99.0, 63), &mut flat).is_empty());
+        assert!(matches!(s.state, State::Idle));
+    }
+
+    #[test]
+    fn regression_audit28_h4_close_fill_path_reconciles_to_idle() {
+        // Direct close-fill delivery also reconciles Exiting → Idle.
+        let mut s = strat();
+        let mut c = ctx(40);
+        feed_context(&mut s, &mut c, 40);
+        assert_eq!(
+            s.on_feature(&up("swing.sweep.low.stop.20", 80.0, 41), &mut c).len(),
+            1
+        );
+        c.now = 60 * DAY;
+        let intents = s.on_fill(
+            &mp_core::Fill {
+                intent_id: IntentId(1),
+                symbol: SymbolId(1),
+                side: Side::Buy,
+                price: 100.0,
+                qty: 1.0,
+                fee: 0.0,
+                liquidity: mp_core::Liquidity::Taker,
+                ts_ns: c.now,
+            },
+            &mut c,
+        );
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(s.state, State::Exiting { .. }));
+        // The closing fill arrives.
+        let more = s.on_fill(
+            &mp_core::Fill {
+                intent_id: intents[0].intent_id,
+                symbol: SymbolId(1),
+                side: Side::Sell,
+                price: 100.0,
+                qty: 1.0,
+                fee: 0.0,
+                liquidity: mp_core::Liquidity::Taker,
+                ts_ns: c.now,
+            },
+            &mut c,
+        );
+        assert!(more.is_empty());
+        assert!(matches!(s.state, State::Idle), "close fill must return to Idle");
     }
 
     #[test]
@@ -953,7 +1127,10 @@ mod tests {
     fn swl_s11_poc_flip_confluence_gates_entry_when_armed() {
         // require_poc_flip = true: without a fresh same-direction flip the
         // sweep alone must NOT enter.
-        let cfg = RangeReclaimConfig { require_poc_flip: true, ..Default::default() };
+        let cfg = RangeReclaimConfig {
+            require_poc_flip: true,
+            ..Default::default()
+        };
         let mut s = SwingRangeReclaimV1::new(
             StrategyId::new("swing-range-reclaim-v1"),
             Universe {
@@ -974,7 +1151,10 @@ mod tests {
     #[test]
     fn swl_s12_poc_flip_freshness_and_direction() {
         let mk = |flip: bool| {
-            let cfg = RangeReclaimConfig { require_poc_flip: flip, ..Default::default() };
+            let cfg = RangeReclaimConfig {
+                require_poc_flip: flip,
+                ..Default::default()
+            };
             SwingRangeReclaimV1::new(
                 StrategyId::new("swing-range-reclaim-v1"),
                 Universe {

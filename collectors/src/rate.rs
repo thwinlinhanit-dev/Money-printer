@@ -62,3 +62,26 @@ impl RateBudget {
         Self::new(2400.0, 40.0, now_ns)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regression_audit28_h1_budget_refills_when_now_advances() {
+        // Audit H-1: `try_take` only refills when the supplied `now_ns` is
+        // strictly greater than the last observed time. A caller that feeds the
+        // bucket its own `now()` (== last_ns) turns it into a pure countdown —
+        // the exact bug that silently killed Binance book seeding. This pins
+        // the contract: advancing `now_ns` must restore spendable tokens.
+        let mut b = RateBudget::new(10.0, 10.0, 0);
+        // Exhaust the bucket exactly (capacity 10).
+        assert!(b.try_take(0, 10.0));
+        // Feeding a stale now (the old `b.now()` behaviour) recovers nothing.
+        assert!(!b.try_take(0, 1.0), "stale now must not refill");
+        // Advancing the clock by 1s at 10 tokens/s restores ~10 tokens.
+        assert!(b.try_take(1_000_000_000, 5.0), "advancing now must refill");
+        // Hard upper bound: never above capacity.
+        assert!(b.available(2_000_000_000) <= 10.0 + 1e-9);
+    }
+}

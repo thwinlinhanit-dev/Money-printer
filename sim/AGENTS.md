@@ -18,7 +18,7 @@ Deterministic backtesting engine that replays event logs through strategy + risk
 - `src/gates.rs` — risk gate simulation
 - `src/paper.rs` — paper mode: batch-fed Backtester with merge-key dedup (SIM-15)
 - `src/error.rs` — error types
-- `src/bin/sim.rs` — CLI entry point (backtest|wf|plateau|mc|replay-live|paper|paper-tail); `wf` takes `--min-trades N` (default 10), `--embargo-ns` (SWG-5 purged split), `--bar-tf-ns` and `--bars-per-year` (SWG-5 bar replay / Deflated Sharpe), and emits an explicit `VACUOUS` verdict per window when no grid combo trades enough to judge
+- `src/bin/sim.rs` — CLI entry point (backtest|wf|plateau|mc|replay-live|paper|paper-tail); inherits `SimConfig::default()` conservative fill/latency defaults (150 ms, L1); `wf` takes `--min-trades N` (default 10), `--embargo-ns` (SWG-5 purged split), `--bar-tf-ns` and `--bars-per-year` (SWG-5 bar replay / Deflated Sharpe), and emits an explicit `VACUOUS` verdict per window when no grid combo trades enough to judge
 - `src/bin/gen_fixture.rs` — test fixture generator
 - `tests/backtest.rs`, `tests/fill_models.rs`, `tests/harness.rs`, `tests/regressions.rs`, `tests/swing_execution.rs` (SWG-7 bar-close dispatch: `swg_7_*`)
 

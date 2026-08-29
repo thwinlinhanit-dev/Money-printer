@@ -172,7 +172,11 @@ pub async fn fetch_depth_snapshot_budgeted(
     mut budget: Option<&mut crate::rate::RateBudget>,
 ) -> Result<MarketEvent, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(b) = &mut budget {
-        let now_ns = b.now();
+        // Feed the bucket the LIVE wall clock, not `b.now()` (= the bucket's own
+        // last_ns, which would never advance → the bucket never refills and book
+        // seeding silently dies; audit H-1). Live-edge network helper
+        // (feature-gated `live-http`), so wall clock here is PD-3-legal.
+        let now_ns = wall_now_ns();
         if !b.try_take(now_ns, depth_weight(limit, is_futures)) {
             return Err(
                 "rate budget exhausted for Binance depth snapshot; try again after refill".into(),
@@ -251,7 +255,11 @@ pub fn fetch_depth_snapshot_blocking_budgeted(
     mut budget: Option<&mut crate::rate::RateBudget>,
 ) -> Result<MarketEvent, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(b) = &mut budget {
-        let now_ns = b.now();
+        // Feed the bucket the LIVE wall clock, not `b.now()` (= last_ns, which
+        // never advances → the bucket never refills and the book seeding
+        // silently dies after ~2400 weight units; audit H-1). Live-edge helper
+        // (feature-gated `live-http`), wall clock is PD-3-legal here.
+        let now_ns = wall_now_ns();
         if !b.try_take(now_ns, depth_weight(limit, is_futures)) {
             return Err(
                 "rate budget exhausted for Binance depth snapshot; try again after refill".into(),

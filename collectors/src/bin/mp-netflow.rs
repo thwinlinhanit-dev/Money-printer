@@ -300,7 +300,10 @@ mod tests {
         let url = build_balance_url("KEY", &e);
         assert!(url.starts_with("https://api.etherscan.io/v2/api"), "{url}");
         assert!(url.contains("chainid=1"), "{url}");
-        assert!(url.contains("action=tokenbalance"), "token contract => tokenbalance");
+        assert!(
+            url.contains("action=tokenbalance"),
+            "token contract => tokenbalance"
+        );
         assert!(url.contains(&format!("contractaddress={usdt}")));
 
         // Native ETH entry (empty contract) → plain balance action, no
@@ -316,4 +319,3 @@ mod tests {
         assert!(!url.contains("contractaddress"));
     }
 }
-

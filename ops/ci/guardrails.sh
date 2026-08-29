@@ -32,6 +32,35 @@ if [ -n "$cred_hits" ]; then
   err "PD-2: credential-looking value in tracked config (use *.example with placeholders)"
 fi
 
+# Assigned, non-placeholder credentials in SOURCE files too (audit M-2): the
+# config-only scan above would never catch a key pasted into a .rs/.ps1/.sh.
+# Stricter than the config scan — the value must be a QUOTED string of length
+# >= 16 after `key :=`, so `env::var("API_KEY")`/`$env:API_KEY` identifier
+# mentions never match.
+src_cred_hits=$(tracked '*.rs' '*.ps1' '*.sh' 2>/dev/null \
+  | xargs -r grep -nEi '(api[_-]?key|api[_-]?secret|secret[_-]?key|access[_-]?token|bot[_-]?token)\s*[:=]\s*"[^"]{16,}' 2>/dev/null \
+  | grep -vEi 'example|placeholder|your[_-]|xxx|changeme|<[^>]+>' || true)
+if [ -n "$src_cred_hits" ]; then
+  echo "$src_cred_hits" >&2
+  err "PD-2: credential-looking value in tracked source (use env vars + *.example)"
+fi
+
+# ---- PD-2: no public IPv4 literals (audit M-1/M-2) -------------------------
+# Match only 4-octet dotted-quads (3-octet semver can't trip it). Scan CODE
+# and deliberately skip *.md/*.log documentation, which legitimately embeds
+# well-known public IPs (public DNS resolvers, cloud egress ranges)
+# that are not secrets. Allow loopback, RFC1918 private, link-local,
+# RFC5737 TEST-NET, and broadcast (`0`/`255`); any remaining dotted-quad in a
+# tracked script/config is treated as a public host = fail. grep -n output is
+# "file:line:…", so the allowlist matches a private octet after a colon too.
+ip_hits=$(tracked 2>/dev/null | grep -vE '\.(md|log)$' \
+  | xargs -r grep -InE '\b((25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)\b' 2>/dev/null \
+  | grep -vE '(^|:.*)(127|0|10|192\.168|172\.(1[6-9]|2[0-9]|3[01])|169\.254|192\.0\.2|198\.51\.100|203\.0\.113|255)\.' || true)
+if [ -n "$ip_hits" ]; then
+  echo "$ip_hits" >&2
+  err "PD-2: public IPv4 literal in tracked code/config (use a placeholder / env var)"
+fi
+
 # ---- PD-1: live mode must never be committed --------------------------------
 live_hits=$(tracked '*.toml' '*.yaml' '*.yml' 2>/dev/null \
   | xargs -r grep -nE '^\s*mode\s*=\s*"?live"?\s*(#.*)?$' 2>/dev/null || true)

@@ -449,3 +449,208 @@ fn sto_8_parquet_footer_carries_required_kv_metadata() {
     assert_eq!(get("compactor_version"), "gitsha9");
     assert_eq!(get("source_log_hash"), "srchash9");
 }
+
+// ---- C-2 regression tests (audit 2026-08-28): prune provenance guard ----
+//
+// verify_prunable must refuse to green-light raw-log deletion when the raw
+// day-file no longer matches the Parquet footer's `source_log_hash` (STO-8):
+// a compacted day whose log grew (late venue data appended) would otherwise
+// lose the appended events forever when the human deletes the raw logs (W-6).
+
+use mp_core::log::EventLogWriter;
+use std::path::Path;
+
+/// Write a real raw day-file (`raw/{YYYYMMDD}_{venue}_{symbol}.log`, the
+/// sibling raw dir of the cold root) using the real event-log format, and
+/// return its source hash — computed exactly as the compaction caller does
+/// (`mp-ops compact` → `compute_source_hash`: crc32fast over the whole file,
+/// `{:08x}` hex) before handing it to `compact_day`.
+fn write_raw_log(
+    data_root: &Path,
+    date: &str,
+    symbol: &str,
+    syms: &SymbolTable,
+    events: &[EventEnvelope],
+) -> String {
+    let raw_dir = data_root.join("raw");
+    std::fs::create_dir_all(&raw_dir).unwrap();
+    let path = raw_dir.join(format!("{}_bybit_{symbol}.log", date.replace('-', "")));
+    let (mut w, truncated) = EventLogWriter::open(&path).unwrap();
+    assert!(!truncated);
+    w.write_symbols(&syms.metas()).unwrap();
+    for e in events {
+        w.append(e).unwrap();
+    }
+    drop(w);
+    let data = std::fs::read(&path).unwrap();
+    format!("{:08x}", crc32fast::hash(&data))
+}
+
+#[test]
+fn regression_audit28_fresh_compaction_is_prunable() {
+    let data = tmp("audit28-ok");
+    let cold = data.join("cold");
+    let (syms, btc) = table();
+    let events = vec![trade(btc, 10, 1, 100.0), trade(btc, 20, 2, 101.0)];
+    let hash = write_raw_log(&data, "2026-07-10", "BTCUSDT", &syms, &events);
+    compact_day(
+        &cold, Venue::Bybit, "2026-07-10", 0, DAY, events, &syms, &hash, "g", 0,
+    )
+    .unwrap();
+    // Footer hash == current raw log hash, rows == manifest ⇒ safe.
+    assert_eq!(
+        prune::verify_prunable(&cold, Venue::Bybit, "2026-07-10"),
+        Ok(())
+    );
+}
+
+#[test]
+fn regression_audit28_raw_tail_append_refuses_hash_mismatch() {
+    let data = tmp("audit28-tail");
+    let cold = data.join("cold");
+    let (syms, btc) = table();
+    let events = vec![trade(btc, 10, 1, 100.0), trade(btc, 20, 2, 101.0)];
+    let hash = write_raw_log(&data, "2026-07-10", "BTCUSDT", &syms, &events);
+    compact_day(
+        &cold, Venue::Bybit, "2026-07-10", 0, DAY, events, &syms, &hash, "g", 0,
+    )
+    .unwrap();
+    // Honest state right after compaction: prunable.
+    assert!(prune::verify_prunable(&cold, Venue::Bybit, "2026-07-10").is_ok());
+
+    // Late venue data appends to the SAME raw day-file (append-only, W-6).
+    // The stale manifest still matches the stale Parquet — only the footer
+    // hash check can catch this.
+    let raw = data.join("raw").join("20260710_bybit_BTCUSDT.log");
+    let (mut w, truncated) = EventLogWriter::open(&raw).unwrap();
+    assert!(!truncated);
+    w.append(&trade(btc, 30, 3, 99.0)).unwrap();
+    drop(w);
+
+    let refusal = prune::verify_prunable(&cold, Venue::Bybit, "2026-07-10");
+    assert_eq!(
+        refusal,
+        Err(prune::PruneRefusal::SourceLogHashMismatch {
+            stream: "trades".into(),
+            symbol: "BTCUSDT".into(),
+        })
+    );
+}
+
+#[test]
+fn regression_audit28_footer_without_source_hash_refuses_fail_closed() {
+    let data = tmp("audit28-nokv");
+    let cold = data.join("cold");
+    let (syms, btc) = table();
+    let events = vec![trade(btc, 10, 1, 100.0)];
+    let hash = write_raw_log(&data, "2026-07-10", "BTCUSDT", &syms, &events);
+    compact_day(
+        &cold, Venue::Bybit, "2026-07-10", 0, DAY, events, &syms, &hash, "g", 0,
+    )
+    .unwrap();
+
+    // Replace the partition with a schema-valid, KV-less Parquet (one row, so
+    // the row-count check passes and ONLY the provenance guard can refuse).
+    use arrow::array::{
+        Float64Array, Int64Array, RecordBatch, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    };
+    use arrow::datatypes::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+    let path =
+        mp_storage::layout::partition_file(&cold, "trades", Venue::Bybit, "BTCUSDT", "2026-07-10");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("symbol_id", DataType::UInt32, false),
+        Field::new("venue_code", DataType::UInt16, false),
+        Field::new("exch_ts_ns", DataType::Int64, false),
+        Field::new("recv_ts_ns", DataType::Int64, false),
+        Field::new("stream_seq", DataType::UInt64, false),
+        Field::new("price", DataType::Float64, false),
+        Field::new("qty", DataType::Float64, false),
+        Field::new("side", DataType::UInt8, false),
+        Field::new("trade_id", DataType::UInt64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt32Array::from(vec![btc.0])),
+            Arc::new(UInt16Array::from(vec![2u16])), // layout::venue_code(Bybit)
+            Arc::new(Int64Array::from(vec![10i64])),
+            Arc::new(Int64Array::from(vec![10i64])),
+            Arc::new(UInt64Array::from(vec![1u64])),
+            Arc::new(Float64Array::from(vec![100.0])),
+            Arc::new(Float64Array::from(vec![1.0])),
+            Arc::new(UInt8Array::from(vec![0u8])),
+            Arc::new(UInt64Array::from(vec![1u64])),
+        ],
+    )
+    .unwrap();
+    let f = std::fs::File::create(&path).unwrap();
+    let mut w = ArrowWriter::try_new(f, schema, None).unwrap(); // no KV metadata
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+
+    // Fail-closed: no footer hash ⇒ provenance unknowable ⇒ never prunable.
+    let refusal = prune::verify_prunable(&cold, Venue::Bybit, "2026-07-10");
+    assert_eq!(
+        refusal,
+        Err(prune::PruneRefusal::FooterMissingSourceLogHash {
+            stream: "trades".into(),
+            symbol: "BTCUSDT".into(),
+        })
+    );
+}
+
+#[test]
+fn regression_audit28_raw_log_newer_than_parquet_refuses() {
+    let data = tmp("audit28-mtime");
+    let cold = data.join("cold");
+    let (syms, btc) = table();
+    let events = vec![trade(btc, 10, 1, 100.0)];
+    let hash = write_raw_log(&data, "2026-07-10", "BTCUSDT", &syms, &events);
+    compact_day(
+        &cold, Venue::Bybit, "2026-07-10", 0, DAY, events, &syms, &hash, "g", 0,
+    )
+    .unwrap();
+    assert!(prune::verify_prunable(&cold, Venue::Bybit, "2026-07-10").is_ok());
+
+    // Touch the raw log's mtime into the future — content (and therefore the
+    // hash) unchanged, isolating the mtime guard.
+    let raw = data.join("raw").join("20260710_bybit_BTCUSDT.log");
+    let f = std::fs::OpenOptions::new().append(true).open(&raw).unwrap();
+    f.set_modified(
+        std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+    )
+    .unwrap();
+    drop(f);
+
+    let refusal = prune::verify_prunable(&cold, Venue::Bybit, "2026-07-10");
+    assert_eq!(
+        refusal,
+        Err(prune::PruneRefusal::RawLogNewerThanParquet {
+            stream: "trades".into(),
+            symbol: "BTCUSDT".into(),
+        })
+    );
+}
+
+#[test]
+fn regression_audit28_hash_matches_caller_crc32fast() {
+    // CRC-32/ISO-HDLC (IEEE 802.3) check value for "123456789".
+    assert_eq!(prune::source_log_hash(b"123456789"), "cbf43926");
+    // Byte-for-byte agreement with the compaction caller's primitive
+    // (crc32fast::hash, as used by `mp-ops compact`'s compute_source_hash):
+    // the prune recomputation can never diverge from what the footer holds.
+    let cases: Vec<&[u8]> = vec![
+        b"",
+        b"a",
+        b"bybit BTCUSDT 2026-07-10",
+        &[0u8, 255, 17, 3, 0, 0, 128],
+    ];
+    for case in cases {
+        assert_eq!(
+            prune::source_log_hash(case),
+            format!("{:08x}", crc32fast::hash(case))
+        );
+    }
+}

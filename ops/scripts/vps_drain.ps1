@@ -5,7 +5,7 @@
 # where the corpus lives, so the 28 GB VPS disk stays flat.
 #
 # Contrast with vps_backup.ps1: that is a READ-ONLY mirror to a separate
-# backup root (W-6 safety copy). This drain is a MOVE into the master corpus —
+# backup root (W-6 safety copy). This drain is a MOVE into the master corpus -
 # it deletes from the VPS ONLY files whose sha256 was verified end-to-end into
 # data/raw. The two are complementary: backup first (00:30 UTC), drain after
 # (01:00 UTC), both after the VPS gate (00:05 UTC) has audited the day.
@@ -26,7 +26,7 @@
 #      Delete-only-when-verified is the W-6 exception the owner approved for
 #      the relay drain (2026-08-14).
 #   5. Slow-link economy (2026-08-16): the master corpus + manifest are
-#      consulted BEFORE the pull — a file byte-identical to master (a release
+#      consulted BEFORE the pull - a file byte-identical to master (a release
 #      re-attempt) and a KNOWN A-B collision (latest manifest entry
 #      action=collision with the same VPS sha256) are never re-transferred;
 #      the slow link moves only genuinely new closed days. The master-side
@@ -59,14 +59,14 @@
 # Manifest (data/vps_drain_manifest.jsonl): one entry per candidate with
 # `action` (landed | collision | missing) and `release` (the VPS copy's
 # disposition: released | skipped: <reason> | ssh_failed | no_release |
-# kept). `kept` = never in the releasable set (A-B collision etc.) — the VPS
+# kept). `kept` = never in the releasable set (A-B collision etc.) - the VPS
 # copy stays by design. A `landed` entry whose `release` is NOT `released`
 # means the VPS is still holding the file. A transfer that never landed also
 # records `transfer_error: transfer_failed` (the VPS copy stays; re-attempt
 # next run).
 
 param(
-    [string]$VpsHost = "34.135.127.147",
+    [string]$VpsHost = $env:MP_VPS_HOST,
     [string]$SshUser = "mp-egress",
     [string]$SshKey  = "",
     [string]$VpsBase = "/opt/money-printer/data",   # scratch base for tests
@@ -77,6 +77,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+### VPS host must be provided at runtime (PD-2; audit M-1) - never committed.
+if ([string]::IsNullOrWhiteSpace($VpsHost)) {
+    Write-Host "[!!] No VPS host set. Pass -VpsHost or set MP_VPS_HOST (never commit the IP - PD-2)." -ForegroundColor Red
+    Exit 3
+}
 
 # ---- workspace root resolution (walk up to the [workspace] Cargo.toml) -------
 $root = $PSScriptRoot
@@ -112,6 +117,62 @@ function Get-Sha256Hex {
     return (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+# ---- remote ssh with bounded retry + captured stderr (2026-08-25) ------------
+# The nightly legs are SINGLE-SHOT ssh calls: one transient failure (exit 255,
+# no output - seen 2026-08-24 19:48 on the release leg) held every verified
+# file on the VPS until the NEXT nightly run, piling closed days onto a disk
+# with no headroom (14 manifest entries went ssh_failed before this fix).
+# Windows OpenSSH does not support ControlMaster multiplexing, so connection
+# reuse is unavailable; resilience comes from bounded retries with linear
+# backoff instead. stderr is captured to $SshErrFile (never discarded - the
+# old `2>$null` made failures undiagnosable) and folded into the drain log.
+#
+# Returns the output lines (possibly empty), or $null when every attempt
+# failed (caller decides whether that is fatal). $script:LastRemoteExit and
+# $script:LastRemoteErr carry the final attempt's exit code / stderr summary.
+# PS 5.1 turns native stderr into a TERMINATING error under EAP=Stop even with
+# a redirect (the same bug fixed in the release/list phases below), so EAP is
+# overridden around the call and $LASTEXITCODE is authoritative.
+function Invoke-Remote {
+    param(
+        [string]$RemoteCmd,
+        [string]$SshErrFile,
+        [int]$MaxAttempts = 3,
+        $InputLines = $null   # optional stdin (the release leg pipes pairs)
+    )
+    $script:LastRemoteExit = -1
+    $script:LastRemoteErr = ""
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            Remove-Item $SshErrFile -Force -ErrorAction SilentlyContinue
+            $out = if ($null -ne $InputLines) {
+                $InputLines | & $ssh -i $SshKey -o BatchMode=yes -o StrictHostKeyChecking=accept-new `
+                    "$SshUser@$VpsHost" $RemoteCmd 2> $SshErrFile
+            } else {
+                & $ssh -i $SshKey -o BatchMode=yes -o StrictHostKeyChecking=accept-new `
+                    "$SshUser@$VpsHost" $RemoteCmd 2> $SshErrFile
+            }
+            $script:LastRemoteExit = $LASTEXITCODE
+            if ($LASTEXITCODE -eq 0) { return ,@($out) }
+            $errSummary = "(no stderr captured)"
+            if (Test-Path $SshErrFile) {
+                $lines = @(Get-Content $SshErrFile -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -ne "" })
+                if ($lines.Count -gt 0) {
+                    $errSummary = ($lines | Select-Object -First 3) -join "; "
+                    $script:LastRemoteErr = ($lines | Select-Object -First 10) -join "; "
+                }
+            }
+            Log ("ssh attempt {0}/{1} failed (exit {2}): {3}" -f $attempt, $MaxAttempts, $LASTEXITCODE, $errSummary) "WARN"
+            if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds (10 * $attempt) }
+        }
+        return $null
+    } finally {
+        $ErrorActionPreference = $oldEap
+    }
+}
+
 # ---- config sanity ------------------------------------------------------------
 foreach ($bin in @($ssh)) {
     if (-not (Test-Path $bin)) { Log "required binary missing: $bin" "ERROR"; Exit 3 }
@@ -144,17 +205,13 @@ if ($Register) {
 }
 
 # ---- list phase: VPS-side closed-day files with size + sha256 -----------------
-# PS 5.1 turns native stderr into a TERMINATING error under EAP=Stop even with
-# 2>$null (the same bug fixed in the release phase below): a transient ssh
-# stderr line must not abort the run before the manifest is written. Override
-# EAP around the call and check $LASTEXITCODE instead.
-$oldEap = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-$listOut = & $ssh -i $SshKey -o BatchMode=yes -o StrictHostKeyChecking=accept-new `
-    "$SshUser@$VpsHost" "bash ~/vps_drain_list.sh '$VpsBase'" 2>$null
-$ErrorActionPreference = $oldEap
-if ($LASTEXITCODE -ne 0) {
-    Log "remote list failed (ssh exit $LASTEXITCODE) - VPS unreachable or vps_drain_list.sh missing" "ERROR"
+# Retry-wrapped (Invoke-Remote, 2026-08-25): a transient ssh failure here used
+# to exit 3 and skip the ENTIRE night's drain.
+$listOut = Invoke-Remote `
+    -RemoteCmd "bash ~/vps_drain_list.sh '$VpsBase'" `
+    -SshErrFile (Join-Path $env:TEMP "vps-drain-list-ssh.err")
+if ($null -eq $listOut) {
+    Log "remote list failed after retries (last exit $script:LastRemoteExit): $script:LastRemoteErr - VPS unreachable or vps_drain_list.sh missing" "ERROR"
     Exit 3
 }
 $candidates = [System.Collections.Generic.List[object]]::new()
@@ -174,6 +231,46 @@ if ($candidates.Count -eq 0) {
 }
 Log ("Candidates: {0} closed day-file(s) from {1} ({2:N2} MiB)" -f `
     $candidates.Count, $VpsBase, (($candidates | Measure-Object -Property Size -Sum).Sum / 1MB))
+
+# Core-first ordering (2026-08-25): the REQUIRED Phase-0 recordings transfer
+# before every secondary leg (bybit swing days, macro, netflow). The slow link
+# moves one multi-hundred-MB file at a time, and a backlog night otherwise
+# starves the 07:30 gate of exactly the files it audits - on 2026-08-25 the
+# drain was still landing hyperliquid masters WHILE the gate ran, which both
+# dirtied that morning's determinism check and raced the scorecard. Ordering
+# only: classification/verification below is untouched, and a resolver
+# failure keeps the original order (an optimization, never a gate input).
+$corePairs = @()
+try {
+    . (Join-Path $PSScriptRoot "recordings.ps1")
+    $corePairs = @(Resolve-Recordings -CoreFile (Join-Path $root "ops\core_symbols.txt"))
+} catch {
+    Log "core resolver unavailable - drain order stays as listed" "WARN"
+}
+if ($corePairs.Count -gt 0) {
+    $coreRes = @()
+    # Resolve-Recordings returns PSCustomObjects (.venue/.symbol), NOT strings:
+    # `$p -split ':'` coerces to "@{venue=...; symbol=...}" (no colon -> count 1)
+    # and silently skipped EVERY pair, making core-first ordering a no-op
+    # (audit 2026-08-26). Read the properties directly.
+    foreach ($p in $corePairs) {
+        if ($p.venue -and $p.symbol) {
+            $coreRes += ("^\d{{8}}_{0}_{1}\.log$" -f [regex]::Escape($p.venue), [regex]::Escape($p.symbol))
+        }
+    }
+    if ($coreRes.Count -gt 0) {
+        $isCoreFile = { param($name) foreach ($re in $coreRes) { if ($name -match $re) { return $true } } $false }
+        $coreList  = @($candidates | Where-Object { & $isCoreFile $_.Name })
+        $otherList = @($candidates | Where-Object { -not (& $isCoreFile $_.Name) })
+        if ($coreList.Count -gt 0 -and $otherList.Count -gt 0) {
+            Log ("Core-first: transferring {0} required-recording file(s) before {1} other leg(s)" -f $coreList.Count, $otherList.Count)
+            $ordered = [System.Collections.Generic.List[object]]::new()
+            foreach ($c in $coreList)  { $ordered.Add($c) }
+            foreach ($c in $otherList) { $ordered.Add($c) }
+            $candidates = $ordered
+        }
+    }
+}
 
 if ($WhatIf) {
     foreach ($c in $candidates) {
@@ -216,7 +313,7 @@ if (-not (Test-Path $tar)) { Log "required binary missing: $tar" "ERROR"; Exit 3
 
 # Manifest memory: per-file LATEST entry (the manifest is append-only; a
 # later run's entry for a file wins). Used ONLY to prove a file is a known
-# kept collision (action=collision, same VPS sha256) — the master-side hash
+# kept collision (action=collision, same VPS sha256) - the master-side hash
 # check below remains the authority, so a deleted master file re-pulls
 # correctly. A corrupt line never aborts the run (best-effort memory).
 $manifestLatest = @{}
@@ -369,7 +466,8 @@ foreach ($c in $toPull) {
 
 if ($mismatch.Count -gt 0) {
     Log "INTEGRITY MISMATCH: $($mismatch.Count) file(s) failed verification - NOTHING released. Re-attempt next run." "ERROR"
-    Remove-Item (Join-Path $env:TEMP "vps-drain-ssh.err"), (Join-Path $env:TEMP "vps-drain-tar.err") -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $env:TEMP -Filter "vps-drain-*-ssh.err" -File -ErrorAction SilentlyContinue | Remove-Item -Force
+Remove-Item (Join-Path $env:TEMP "vps-drain-tar.err") -Force -ErrorAction SilentlyContinue
     Exit 2
 }
 
@@ -408,31 +506,29 @@ if ($NoRelease) {
     foreach ($r in $releasable) { $releaseState[$r.Rel] = "no_release" }
 } elseif ($releasable.Count -gt 0) {
     $pairs = ($releasable | ForEach-Object { "$($_.Rel) $($_.Hash)" }) -join "`n"
-    # PS 5.1 turns native stderr into a TERMINATING error under EAP=Stop even
-    # with 2>$null (the same bug fixed in offhost_backup.ps1): a transient ssh
-    # or remote stderr line must not abort the run mid-release (this is what
-    # killed every nightly run before the release-script elevation fix — the
-    # remote 'rm: Permission denied' became a throw, the manifest never wrote).
-    $oldEap = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $relOut = $pairs | & $ssh -i $SshKey -o BatchMode=yes -o StrictHostKeyChecking=accept-new `
-        "$SshUser@$VpsHost" "bash ~/vps_drain_release.sh '$VpsBase'" 2>$null
-    $ErrorActionPreference = $oldEap
-    if ($LASTEXITCODE -ne 0) {
-        if ($relOut.Count -eq 0) {
-            # ssh itself failed (unreachable/refused) - stderr is suppressed by
-            # the EAP override, so surface it via the exit code: count every
-            # releasable as not-released so the run exits 1 and the task result
-            # is visible. Per-file states stay ssh_failed below.
-            Log "release ssh failed (exit $LASTEXITCODE) - VPS copies NOT released; re-attempt next run" "ERROR"
-            $skipped = $releasable.Count
-            foreach ($r in $releasable) { $releaseState[$r.Rel] = "ssh_failed" }
-        } else {
-            # The remote script ran but exited non-zero (one or more skips,
-            # e.g. a hash changed before deletion) - per-line states below are
-            # authoritative; do NOT blanket-count releasable as skipped.
-            Log "release script exited $LASTEXITCODE - per-file states below" "WARN"
-        }
+    # Retry-wrapped (Invoke-Remote, 2026-08-25): this leg used to be ONE ssh
+    # call per night - a transient exit 255 held every verified file on the
+    # VPS until the next nightly run while the disk had no headroom. Retries
+    # are safe here: the release script re-hashes each file before deleting,
+    # so a re-run of an already-released pair comes back `skipped (missing)`.
+    $relOut = Invoke-Remote `
+        -RemoteCmd "bash ~/vps_drain_release.sh '$VpsBase'" `
+        -SshErrFile (Join-Path $env:TEMP "vps-drain-release-ssh.err") `
+        -InputLines $pairs
+    if ($null -eq $relOut) {
+        # Every attempt failed - stderr is captured in the temp file and the
+        # log; count every releasable as not-released so the run exits 1 and
+        # the task result is visible. Per-file states stay ssh_failed below.
+        Log "release ssh failed after retries (last exit $script:LastRemoteExit): $script:LastRemoteErr" "ERROR"
+        $skipped = $releasable.Count
+        foreach ($r in $releasable) { $releaseState[$r.Rel] = "ssh_failed" }
+    }
+    if ($null -ne $relOut -and $script:LastRemoteExit -ne 0) {
+        # The remote script ran but exited non-zero on the final attempt
+        # (one or more skips, e.g. a hash changed before deletion) -
+        # per-line states below are authoritative; do NOT blanket-count
+        # releasable as skipped.
+        Log "release script exited $($script:LastRemoteExit) - per-file states below" "WARN"
     }
     foreach ($line in $relOut) {
         if ($line -match '^released (\S+)') {
@@ -456,7 +552,7 @@ if ($NoRelease) {
 
 # ---- manifest (one entry per candidate, action- and release-labeled) ----------
 foreach ($c in $candidates) {
-    # Action from the MASTER state (authoritative for every candidate — the
+    # Action from the MASTER state (authoritative for every candidate - the
     # pre-classified identical/known-collision files never entered the stream).
     $destPath = Join-Path $rawDir $c.Name
     if (-not (Test-Path $destPath)) {
@@ -491,7 +587,8 @@ foreach ($c in $candidates) {
 # ---- behind, never trusts it). Mismatch paths exit 2 BEFORE this point, so ---
 # ---- staged evidence stays for inspection. ---------------------------------
 Get-ChildItem -Path $stagingDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
-Remove-Item (Join-Path $env:TEMP "vps-drain-ssh.err"), (Join-Path $env:TEMP "vps-drain-tar.err") -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "vps-drain-*-ssh.err" -File -ErrorAction SilentlyContinue | Remove-Item -Force
+Remove-Item (Join-Path $env:TEMP "vps-drain-tar.err") -Force -ErrorAction SilentlyContinue
 
 Log "Drain complete -> $rawDir (manifest: $manifestF)"
 # Audit 2026-08-17: the `$mismatch -gt 0 -> Exit 2` here was dead code - an

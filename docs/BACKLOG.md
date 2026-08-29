@@ -368,9 +368,26 @@ Still on the menu, in priority order:
   tier: custody shuffles and MM rebalancing masquerade as signals — event-
   study gate mandatory.
 - **[v2] news/social ingestion + narrative tracker** — deliberately excluded
-  from 010 v1 (determinism); needs its own spec: sources, dedupe, archival,
+  from 010 V1 (determinism); needs its own spec: sources, dedupe, archival,
   and the grounding contract extension.
 - **[v2] options/vol surface data** (pairs with Deribit strategy item).
+- **[v1.x] DeFiLlama regime collector — ✅ SPEC'D 2026-08-26 as spec 046
+  (DEF-1..8; draft).** Free keyless stablecoin-supply delta + TVL + DEX-volume
+  regime pillar (third macro pillar beside FRED 030 / netflow 034). Best RoI
+  in the external-data survey (`research/external_data_sources_findings.md`),
+  classified *regime/context, not alpha*. Awaiting owner sign-off on event-
+  variant shape (reuse `MacroPoint` vs new `DeFiSnapshot`, DEF-2) + new-host
+  sign-off before implementation. Implement after Phase-0 gate.
+- **[v1.x] Coinalyze cross-exchange validation collector (external SPEC'D
+  2026-08-26 as spec 047, COZ-1..10):** real cross-exchange OI / funding /
+  liquidation / long-short to **validate** `oi_regime` (045) + `liq_est_bands`
+  (029). Explicitly NOT "predicted-funding alpha" (public telegraphy, COZ-9);
+  NOT a long intraday history source (COZ-10). Written to a separate
+  `cold/external/coinalyze/` namespace (W-6).
+- **[v1.x] Cross-asset correlation feature (external SPEC'D 2026-08-26 as spec
+  048, COR-1..7):** BTC-ETH-Gold-SPX rolling correlation **from our own recorded
+  prices** + FRED (moat-first, zero external dep for the crypto leg). Regime
+  conditioner for the allocator/regime detector, not a standalone signal.
 
 ## Simulation & research
 - **[v2] L3 queue-position fill model** — unlocks maker strategies; spec must

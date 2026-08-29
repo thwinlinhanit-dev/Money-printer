@@ -44,6 +44,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -191,6 +192,14 @@ def _raw_dates(venue: str, symbol: str) -> list[str]:
     return sorted(dates)
 
 
+def _require_valid_date(date: str) -> None:
+    """Strict YYYY-MM-DD gate for date query params (VULN-002). The date flows
+    straight into a filesystem path (`_raw_log_path` / `_read_feature`), so it
+    must be exactly 8 digits with hyphens — never path separators or `..`."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise TermdError(400, f"date must be YYYY-MM-DD, got {date!r}")
+
+
 def _raw_log_path(venue: str, symbol: str, date: str) -> Path | None:
     ymd = date.replace("-", "")
     p = DATA_ROOT / "raw" / f"{ymd}_{venue}_{symbol}.log"
@@ -201,11 +210,23 @@ def _read_feature(
     family: str, venue: str, symbol_id: int, date: str
 ) -> list[dict[str, Any]]:
     """Long-format rows `[{ts_ns, value}]` for one (family, venue, symbol, date)."""
+    # VULN-001 hardening: `family`/`date` arrive from request input on the
+    # WebSocket subscribe/history paths (and are NOT whitelisted there), so the
+    # resolved parquet path must be forced to stay inside the feature store —
+    # the same containment discipline `_serve_static` uses for static files.
+    base = (DATA_ROOT / "features").resolve()
     root = DATA_ROOT / "features" / family
+    # Reject family traversal up-front (before any glob/read).
+    if not root.resolve().is_relative_to(base):
+        raise TermdError(400, f"unsafe feature family: {family!r}")
     ver = _max_ver_dir(root)
     if ver is None:
         return []
     p = ver / f"venue={venue}" / f"symbol={symbol_id}" / f"{date}.parquet"
+    if not p.resolve().is_relative_to(base):
+        raise TermdError(
+            400, f"unsafe feature path: {family}/{venue}/{symbol_id}/{date}"
+        )
     if not p.exists():
         return []
     try:
@@ -646,6 +667,7 @@ class TermdHandler(BaseHTTPRequestHandler):
     def _bars_handler(self, parsed: Any) -> dict[str, Any]:
         q = self._query(parsed, ["venue", "symbol", "date"])
         venue, symbol, _ = self._require_symbol(q)
+        _require_valid_date(q["date"])
         tf = int(q.get("tf", "60"))
         if tf <= 0:
             raise TermdError(400, "tf must be a positive interval in seconds")
@@ -840,6 +862,7 @@ class TermdHandler(BaseHTTPRequestHandler):
     def _dom_handler(self, parsed: Any) -> dict[str, Any]:
         q = self._query(parsed, ["venue", "symbol", "date"])
         venue, symbol, _ = self._require_symbol(q)
+        _require_valid_date(q["date"])
         every_ms = int(q.get("every_ms", "5000"))
         levels = int(q.get("levels", "5"))
         if every_ms <= 0 or levels <= 0:
@@ -923,6 +946,21 @@ def main(argv: list[str] | None = None) -> None:
         )
     if not DATA_ROOT.exists():
         parser.error(f"data root not found: {DATA_ROOT}")
+
+    # HARDING-003: the terminal is read-only, local-only, and UNAUTHENTICATED
+    # by design (spec 011 / TER-10). Refuse a non-loopback bind unless the
+    # operator explicitly opts in — fail-closed like the rest of the system.
+    remote_ok = os.environ.get("TERMD_ALLOW_REMOTE", "") == "1"
+    # "" is deliberately ABSENT from this list: ThreadingHTTPServer(("", port))
+    # binds INADDR_ANY (all interfaces), which is exactly the exposure the
+    # guard exists to prevent (audit 2026-08-26).
+    loopback = ("127.0.0.1", "::1", "localhost")
+    if not remote_ok and args.host not in loopback:
+        parser.error(
+            f"--host {args.host!r} is non-loopback; this read-only terminal has no "
+            "authentication. Bind to 127.0.0.1/::1, or set TERMD_ALLOW_REMOTE=1 "
+            "to override (not recommended)."
+        )
 
     server = ThreadingHTTPServer((args.host, args.port), TermdHandler)
     print(

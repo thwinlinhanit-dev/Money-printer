@@ -33,7 +33,14 @@ Phase 2 — Make Phase 0 trustworthy
   all work continuously. (2026-08-25: determinism_ok=true over 31 scorecards;
   guardrail blocker CONV-21 found and fixed — see Errors.)
 - [ ] Achieve and archive the required clean-recording streak.
-  (2026-08-25 verdict: 4/7 consecutive clean days, first break 2026-07-18.)
+  (2026-08-25 deep-dive: streak is 7/7 CLEAN (08-18..08-24) — promotion is
+  blocked ONLY by the burst-free-window condition (stale bursts on 08-21..24)
+  plus, latently, missing determinism artifacts for 08-19/20/21 — now written.
+  Bursts = HL feed stalls >15s during the venue's ~3h connection rotation;
+  zero-burst days occur naturally (18/19/20). Pipeline logistics fixes
+  shipped: drain core-first ordering, deferred-not-failed determinism,
+  14-day self-healing backfill pass. Earliest honest promotion ≈ 09-01 if a
+  fully burst-free week lands.)
 - **Status:** in_progress
 
 ### Phase 3: Expand the research corpus safely

@@ -24,18 +24,23 @@ pub struct MetricsSummary {
 impl MetricsSummary {
     /// SWG-5: Deflated Sharpe for the given `bars_per_year` and `n_trials` —
     /// the multiple-testing-adjusted version of `sharpe`. None when the raw
-    /// Sharpe is unavailable (warmup).
-    pub fn deflated_sharpe(&self, _bars_per_year: f64, n_trials: u64) -> Option<f64> {
+    /// Sharpe is unavailable (warmup). The expected-max correction lives on the
+    /// NON-annualized per-period scale, so we de-annualize the stored annualized
+    /// Sharpe (`.sharpe?`), deflate there, then re-annualize (audit H-3).
+    pub fn deflated_sharpe(&self, bars_per_year: f64, n_trials: u64) -> Option<f64> {
         let sr = self.sharpe?;
         if n_trials <= 1 {
             return Some(sr);
         }
+        let bpy = bars_per_year.sqrt();
+        let sr_period = sr / bpy; // de-annualize to per-period SR
         let euler_gamma = 0.577_215_664_901_532_9;
         let inv_n = 1.0 / n_trials as f64;
         let p1 = crate::metrics::probit(1.0 - inv_n);
         let p2 = crate::metrics::probit(1.0 - inv_n / std::f64::consts::E);
         let expected_max = (1.0 - euler_gamma) * p1 + euler_gamma * p2;
-        Some(sr - expected_max)
+        // Deflate on the per-period scale, then annualize the result.
+        Some((sr_period - expected_max) * bpy)
     }
 }
 

@@ -264,6 +264,23 @@ authenticated trading, strategy changes, and long-running hosting policy.
   watermark dedup, REST==WS body-equality, suppression, Bybit topic shapes,
   signature vector) + mp-ops venue-scoping test; gate wiring in
   `daily_pipeline.ps1` and `daily_maintenance.sh`.
+- 2026-08-25 (gate-integrity plausibility guard — incident 2026-08-22
+  follow-up): a scorecard whose **every** required recording audits to
+  `event_count == 0` is NOT a dirty day; it means the gate read nothing
+  (raw sources never drained, or a reader/writer schema split like the
+  Aug-18 deploy that blinded the VPS gate 08-19..21). `mp-ops scorecard`
+  now REFUSES such days: loud stderr + exit 2, no verdict JSON archived
+  (`--allow-all-zero` is the explicit operator escape hatch). The missed
+  archive surfaces through the existing dead-man (`pipeline-stale`,
+  OPS-17) as a P1 instead of silently eating the streak. Supporting
+  changes: `audit_raw_log` names a missing day-file `recording_missing`
+  (blocking, distinct from `unreadable_log`), the promote invariant
+  comment tracks the new code name, and the deploy pair-smoke lives in
+  `ops/scripts/smoke_reader_writer.sh` (run after ANY partial-binary
+  deploy; requires today's live logs to decode with real counts).
+  Regression tests: `scorecard_all_zero_refuses_verdict_unless_allowed`,
+  `scorecard_decodes_schema_current_writer_events` (mp-ops),
+  `int_recording_missing_is_named_and_blocking` (mp-storage).
 - 2026-08-25 (proactive WS connection rotation — Hyperliquid venue-TTL
   mitigation): the Phase-0 promotion amendment requires **zero
   `stale_bursts`** across the qualifying window, and every burst since

@@ -166,45 +166,59 @@ foreach ($s in $supervised) {
 
 Write-Host "Running. Ctrl+C to stop." -ForegroundColor Gray
 while ($true) {
-    $todayStr = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
-    foreach ($s in $supervised) {
-        $hbFile      = Join-Path $rawDir $s.heartbeat
-        $dataLog     = Join-Path $rawDir ($s.dataLog.Replace('{date}', $todayStr))
-        $tSinceSpawn = ((Get-Date) - $lastSpawn[$s.id]).TotalSeconds
+    try {
+        $todayStr = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+        foreach ($s in $supervised) {
+            $hbFile      = Join-Path $rawDir $s.heartbeat
+            $dataLog     = Join-Path $rawDir ($s.dataLog.Replace('{date}', $todayStr))
+            $tSinceSpawn = ((Get-Date) - $lastSpawn[$s.id]).TotalSeconds
 
-        $needRestart = $false; $restartReason = ""
+            $needRestart = $false; $restartReason = ""
 
-        if ($tSinceSpawn -gt $GraceSeconds) {
-            if (Test-Path $hbFile) {
-                $hbAge = ((Get-Date) - (Get-Item $hbFile).LastWriteTime).TotalSeconds
-                if ($hbAge -gt 75) { $needRestart = $true; $restartReason = "heartbeat stale ($([int]$hbAge)s)" }
-            } else {
-                $needRestart = $true; $restartReason = "no heartbeat file"
+            if ($tSinceSpawn -gt $GraceSeconds) {
+                if (Test-Path $hbFile) {
+                    $hbAge = ((Get-Date) - (Get-Item $hbFile).LastWriteTime).TotalSeconds
+                    if ($hbAge -gt 75) { $needRestart = $true; $restartReason = "heartbeat stale ($([int]$hbAge)s)" }
+                } else {
+                    $needRestart = $true; $restartReason = "no heartbeat file"
+                }
+                if (-not $needRestart -and (Test-Path $dataLog)) {
+                    $logAge = ((Get-Date) - (Get-Item $dataLog).LastWriteTime).TotalSeconds
+                    if ($logAge -gt 150) { $needRestart = $true; $restartReason = "data log stalled ($([int]$logAge)s)" }
+                }
             }
-            if (-not $needRestart -and (Test-Path $dataLog)) {
-                $logAge = ((Get-Date) - (Get-Item $dataLog).LastWriteTime).TotalSeconds
-                if ($logAge -gt 150) { $needRestart = $true; $restartReason = "data log stalled ($([int]$logAge)s)" }
+
+            if ($needRestart) {
+                if ($spawnedPids[$s.id]) { Stop-Process -Id $spawnedPids[$s.id] -Force -ErrorAction SilentlyContinue }
+                $spawnedPids[$s.id] = $null
+                Start-Sleep -Milliseconds 400
+                Remove-Item (Join-Path $rawDir $s.lock) -Force -ErrorAction SilentlyContinue
+                $lastDataLen[$s.id] = 0; $lastDataLenTs[$s.id] = [datetime]::MinValue
+
+                if ($spawnCount[$s.id] -gt 0 -and $tSinceSpawn -lt $CooldownSeconds) {
+                    HLog "$($s.id) cooldown ($([int]$tSinceSpawn)s < ${CooldownSeconds}s): $restartReason" "WARN"
+                    continue
+                }
+                $spawnCount[$s.id]++
+                $cfgPath = Join-Path $swingCfg $s.cfg
+                $argStr = "--config `"$cfgPath`""
+                $spawnedPids[$s.id] = Spawn-Process -ExePath $s.exe -ArgString $argStr
+                $lastSpawn[$s.id] = Get-Date
+                HLog "$($s.id) spawned #$($spawnCount[$s.id]) (PID $($spawnedPids[$s.id])): $restartReason"
             }
         }
-
-        if ($needRestart) {
-            if ($spawnedPids[$s.id]) { Stop-Process -Id $spawnedPids[$s.id] -Force -ErrorAction SilentlyContinue }
-            $spawnedPids[$s.id] = $null
-            Start-Sleep -Milliseconds 400
-            Remove-Item (Join-Path $rawDir $s.lock) -Force -ErrorAction SilentlyContinue
-            $lastDataLen[$s.id] = 0; $lastDataLenTs[$s.id] = [datetime]::MinValue
-
-            if ($spawnCount[$s.id] -gt 0 -and $tSinceSpawn -lt $CooldownSeconds) {
-                HLog "$($s.id) cooldown ($([int]$tSinceSpawn)s < ${CooldownSeconds}s): $restartReason" "WARN"
-                continue
-            }
-            $spawnCount[$s.id]++
-            $cfgPath = Join-Path $swingCfg $s.cfg
-            $argStr = "--config `"$cfgPath`""
-            $spawnedPids[$s.id] = Spawn-Process -ExePath $s.exe -ArgString $argStr
-            $lastSpawn[$s.id] = Get-Date
-            HLog "$($s.id) spawned #$($spawnCount[$s.id]) (PID $($spawnedPids[$s.id])): $restartReason"
+    } catch {
+        # Audit H-6: the whole superloop must NOT unwind and die on a transient
+        # race (heartbeat rotated between Test-Path/Get-Item, Stop-Process access
+        # denied, lock held by an exiting process). Under $ErrorActionPreference
+        # = 'Stop' any such error used to terminate this hidden-window watchdog
+        # silently. Log it and continue - never leave a set unsupervised.
+        try {
+            HLog "watchdog iteration error (continuing): $($_.Exception.Message)" "ERROR"
+        } catch {
+            # Belt-and-braces: never let logging kill the loop either.
         }
+        Start-Sleep -Seconds 5
     }
     Start-Sleep -Seconds $CheckIntervalSeconds
 }

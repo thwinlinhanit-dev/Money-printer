@@ -195,8 +195,6 @@ fn run_backtest(
     let cfg = SimConfig {
         min_coverage: coverage,
         bar_tf_ns,
-        latency_ns: 0,
-        fill_model: mp_sim::FillModel::L0BarFill,
         ..SimConfig::default()
     };
     let mut bt = Backtester::new(
@@ -263,8 +261,6 @@ fn run_paper(
     let cfg = SimConfig {
         min_coverage: 1.0,
         bar_tf_ns: 1_000_000,
-        latency_ns: 0,
-        fill_model: mp_sim::FillModel::L0BarFill,
         ..SimConfig::default()
     };
     let bt = Backtester::new(
@@ -381,8 +377,6 @@ fn run() -> Result<ExitCode, String> {
             let cfg = SimConfig {
                 min_coverage: 1.0,
                 bar_tf_ns: 1_000_000,
-                latency_ns: 0,
-                fill_model: mp_sim::FillModel::L0BarFill,
                 ..SimConfig::default()
             };
             let mut session = PaperSession::new(Backtester::new(
@@ -489,8 +483,6 @@ fn run() -> Result<ExitCode, String> {
             let base_cfg = SimConfig {
                 min_coverage: 1.0,
                 bar_tf_ns,
-                latency_ns: 0,
-                fill_model: mp_sim::FillModel::L0BarFill,
                 ..SimConfig::default()
             };
             // SWG-5 Deflated Sharpe: bars per year for the bar-return Sharpe

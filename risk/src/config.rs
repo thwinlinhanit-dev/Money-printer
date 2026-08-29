@@ -106,18 +106,25 @@ impl RiskConfig {
 
 /// RSK-7: regime fit computed from LIVE regime feature values — never a human
 /// opinion field. Inputs are the FEA catalog encodings: `regime.vol` ∈
-/// {0=low, 1=mid, 2=high}, `regime.trend` ∈ {0=chop, 1=trend}. The declared
-/// mask holds labels like "trend", "chop", "low_vol", "mid_vol", "high_vol";
-/// an empty mask means any regime. Returns 1.0 on match, `penalty` otherwise.
+/// {0=low, 1=mid, 2=high}, `regime.trend` ∈ {0=chop, 1=trend}, plus optional
+/// correlation-derived regime labels from `corr_regime.*` features (spec 048):
+/// `corr_risk_on` / `corr_neutral` / `corr_risk_off`.
 ///
-/// Fail-closed (CONV-8): the labels must be EXACTLY 0, 1, or 2. A silent
-/// `f64 as i64` cast would map e.g. 2.7 → 2 ("high_vol") — a malformed feature
-/// passing as a real regime. Any non-{0,1,2}, fractional, or non-finite label
-/// logs a WARN and falls back to `penalty` (de-weighted, never full fit).
+/// The declared mask holds labels like "trend", "chop", "low_vol",
+/// "mid_vol", "high_vol", "risk_on", "risk_off", "corr_neutral"; an empty
+/// mask means any regime. Returns 1.0 on match, `penalty` otherwise.
+///
+/// Fail-closed (CONV-8): the vol/trend labels must be EXACTLY 0, 1, or 2.
+/// Correlation labels are derived from `corr_regime.*` feature values (0=risk_on,
+/// 1=neutral, 2=risk_off) and mapped to string labels here. Any non-{0,1,2},
+/// fractional, or non-finite label logs a WARN and falls back to `penalty`
+/// (de-weighted, never full fit).
 pub fn regime_fit_from_features(
     declared: &[String],
     regime_vol: f64,
     regime_trend: f64,
+    corr_regime_btc_spx: Option<f64>,
+    corr_regime_btc_gold: Option<f64>,
     penalty: f64,
 ) -> f64 {
     let fallback = || penalty.clamp(0.0, 1.0);
@@ -149,7 +156,32 @@ pub fn regime_fit_from_features(
         );
         return fallback();
     };
-    let matches = declared.iter().any(|l| l == vol_label || l == trend_label);
+    // Map corr_regime feature values (0=risk_on, 1=neutral, 2=risk_off) to
+    // labels. Missing/NaN corr regime → label is None (no match on that dim).
+    let corr_label_of = |v: Option<f64>| -> Option<&'static str> {
+        let v = v?;
+        if !v.is_finite() {
+            return None;
+        }
+        // Fail-closed: only exactly 0, 1, or 2 are valid (same as vol/trend).
+        match v {
+            0.0 => Some("risk_on"),
+            1.0 => Some("corr_neutral"),
+            2.0 => Some("risk_off"),
+            _ => {
+                tracing::warn!(v, "invalid corr_regime label (not 0/1/2) → ignored (RSK-7)");
+                None
+            }
+        }
+    };
+    let corr_spx_label = corr_label_of(corr_regime_btc_spx);
+    let corr_gold_label = corr_label_of(corr_regime_btc_gold);
+    let matches = declared.iter().any(|l| {
+        l == vol_label
+            || l == trend_label
+            || corr_spx_label.is_some_and(|cl| cl == l.as_str())
+            || corr_gold_label.is_some_and(|cl| cl == l.as_str())
+    });
     if matches {
         1.0
     } else {

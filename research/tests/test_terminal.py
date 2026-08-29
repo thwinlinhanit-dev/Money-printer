@@ -161,3 +161,87 @@ def test_bars_and_dom_parity_on_real_log():
             ask_px = [p[0] for p in s["asks"]]
             assert bid_px == sorted(bid_px, reverse=True)
             assert ask_px == sorted(ask_px)
+
+
+# --- Security hardening regression tests (audit 2026-08-25) -----------------
+
+
+def test_read_feature_rejects_traversal_family(store):
+    """VULN-001: a feature_id with `..` must never leave the feature store."""
+    with pytest.raises(termd.TermdError) as e:
+        termd._read_feature("../../etc/passwd", VENUE, SYMBOL_ID, DATE)
+    assert e.value.status == 400
+    assert "unsafe feature family" in str(e.value)
+
+
+def test_read_feature_rejects_traversal_date(store):
+    """VULN-001: a date with enough `..` to escape the feature store is blocked
+    by the final-path containment guard (defense in depth beyond the family
+    root check)."""
+    escaping_date = "../../../../../outside"
+    with pytest.raises(termd.TermdError) as e:
+        termd._read_feature("cvd.hyperliquid", VENUE, SYMBOL_ID, escaping_date)
+    assert e.value.status == 400
+    assert "unsafe feature path" in str(e.value)
+
+
+def test_require_valid_date_accepts_iso(store):
+    """VULN-002: a well-formed YYYY-MM-DD date passes the gate."""
+    termd._require_valid_date(DATE)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "../16",  # traversal
+        "2026/08/13",  # wrong separators
+        "2026-8-1",  # non-zero-padded
+        "2026-0813",  # missing hyphen
+        "20260813",  # no hyphens at all
+        "2026-08-13.txt",  # trailing junk
+        "",  # empty
+    ],
+)
+def test_require_valid_date_rejects_malformed(store, bad):
+    """VULN-002: anything that is not exactly YYYY-MM-DD is rejected."""
+    with pytest.raises(termd.TermdError) as e:
+        termd._require_valid_date(bad)
+    assert e.value.status == 400
+
+
+@pytest.mark.parametrize("bad_host", ["0.0.0.0", "", "192.168.1.10"])
+def test_non_loopback_bind_is_refused(store, monkeypatch, capsys, bad_host):
+    """HARDING-003: the read-only terminal must fail-closed on a non-loopback
+    bind unless the operator explicitly opts in via TERMD_ALLOW_REMOTE=1.
+    The empty string is included deliberately: ThreadingHTTPServer(("", port))
+    binds INADDR_ANY (audit 2026-08-26)."""
+    monkeypatch.delenv("TERMD_ALLOW_REMOTE", raising=False)
+    with pytest.raises(SystemExit):
+        termd.main(["--host", bad_host, "--port", "0", "--data-root", str(store)])
+    assert "non-loopback" in capsys.readouterr().err
+
+
+def test_loopback_bind_allowed_with_remote_opt_in(store, monkeypatch):
+    """HARDING-003: TERMD_ALLOW_REMOTE=1 silences the refusal (host validation
+    passes; the server would then try to bind port 0 on 0.0.0.0/ephemeral —
+    use a monkeypatched server factory to avoid actually listening)."""
+    monkeypatch.setenv("TERMD_ALLOW_REMOTE", "1")
+    bound = {}
+
+    def fake_server(addr, handler):
+        bound["addr"] = addr
+
+        # Return a fake object whose serve_forever blocks forever; run it in a
+        # thread and stop immediately so main() exits.
+        class Fake:
+            def serve_forever(self):
+                pass
+
+            def server_close(self):
+                pass
+
+        return Fake()
+
+    monkeypatch.setattr(termd, "ThreadingHTTPServer", fake_server)
+    termd.main(["--host", "0.0.0.0", "--port", "0", "--data-root", str(store)])
+    assert bound["addr"] == ("0.0.0.0", 0)

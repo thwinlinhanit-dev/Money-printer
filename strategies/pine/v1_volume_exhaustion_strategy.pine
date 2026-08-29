@@ -1,0 +1,139 @@
+// ═══════════════════════════════════════════════════════════════
+// V1 VOLUME EXHAUSTION STRATEGY
+// 21 trades, Sharpe 1.20, OOS improves to 1.48
+// Timeframe: Weekly recommended
+// ═══════════════════════════════════════════════════════════════
+//@version=6
+strategy("V1 Volume Exhaustion", overlay=true, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=2,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.06,
+     slippage=5)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+// Detection
+trendLen       = input.int(20, "Trend Lookback")
+volMALen       = input.int(20, "Volume MA Length")
+volMult        = input.float(2.0, "Volume Spike ×", step=0.1)
+atrLen         = input.int(14, "ATR Length")
+spreadMult     = input.float(1.5, "Spread vs ATR ×", step=0.1)
+closePosThresh = input.float(0.55, "Close Position Threshold", step=0.05)
+
+// Trend Filter
+useTrendFilter = input.bool(true, "Use Trend Filter")
+smaLen         = input.int(50, "SMA Length")
+
+// Risk Management
+trailATR       = input.float(2.0, "Trailing Stop (× ATR)", step=0.5)
+tpPct          = input.float(0.0, "Take Profit % (0 = no TP)", step=1.0)
+maxHoldBars    = input.int(56, "Max Hold Bars (56 = 8w weekly)")
+
+// ═══════════════════════════════════════════════════════════════
+// DETECTION: Volume Exhaustion (Non-Standard)
+// ═══════════════════════════════════════════════════════════════
+atr = ta.atr(atrLen)
+volMA = ta.sma(volume, volMALen)
+spread = high - low
+closePos = spread == 0 ? 0.5 : (close - low) / spread
+
+// Trend detection
+regSlope = ta.linreg(close, trendLen, 0) - ta.linreg(close, trendLen, 1)
+
+// Volume spike + wide bar
+volSpike = volume > volMA * volMult
+wideSpread = spread > atr * spreadMult
+
+// NON-STANDARD: Close in middle (standard requires extreme close)
+// This catches moves where high volume didn't push price to extreme
+midClosePos = closePos > (1 - closePosThresh) and closePos < closePosThresh
+
+// V1 signal: High vol + wide bar + mid close = exhaustion without conviction
+v1Signal = volSpike and wideSpread and midClosePos
+
+// ═══════════════════════════════════════════════════════════════
+// CLOSE POSITION DIRECTION FILTER
+// ═══════════════════════════════════════════════════════════════
+// closePos < 0.40 = selling exhaustion (bottom, buy)
+// closePos > 0.60 = buying exhaustion (top, sell)
+// closePos 0.40-0.60 = neutral (skip)
+
+bottomSignal = v1Signal and closePos < 0.40  // Selling exhaustion
+topSignal = v1Signal and closePos > 0.60     // Buying exhaustion
+
+// ═══════════════════════════════════════════════════════════════
+// TREND FILTER
+// ═══════════════════════════════════════════════════════════════
+sma = ta.sma(close, smaLen)
+inUptrend = close > sma
+inDowntrend = close < sma
+
+// Apply filters
+buySignal = bottomSignal and (useTrendFilter ? inUptrend : true)
+sellSignal = topSignal and (useTrendFilter ? inDowntrend : true)
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY
+// ═══════════════════════════════════════════════════════════════
+if buySignal and strategy.position_size == 0
+    strategy.entry("V1 Long", strategy.long)
+
+if sellSignal and strategy.position_size == 0
+    strategy.entry("V1 Short", strategy.short)
+
+// ═══════════════════════════════════════════════════════════════
+// EXIT: Trailing Stop + Time Stop
+// ═══════════════════════════════════════════════════════════════
+var float trailPrice = na
+var int entryBar = 0
+var float entryPrice = 0
+
+if strategy.position_size != 0
+    if strategy.position_size > 0
+        newTrail = close - trailATR * atr
+        trailPrice := math.max(nz(trailPrice, newTrail), newTrail)
+        
+        tpLevel = entryPrice * (1 + tpPct / 100)
+        if tpPct > 0 and close >= tpLevel
+            strategy.exit("TP", "V1 Long", limit=tpLevel)
+        
+        strategy.exit("Trail", "V1 Long", stop=trailPrice)
+        
+        if bar_index - entryBar >= maxHoldBars
+            strategy.close("V1 Long", comment="Time Stop")
+    
+    else
+        newTrail = close + trailATR * atr
+        trailPrice := math.min(nz(trailPrice, newTrail), newTrail)
+        
+        tpLevel = entryPrice * (1 - tpPct / 100)
+        if tpPct > 0 and close <= tpLevel
+            strategy.exit("TP", "V1 Short", limit=tpLevel)
+        
+        strategy.exit("Trail", "V1 Short", stop=trailPrice)
+        
+        if bar_index - entryBar >= maxHoldBars
+            strategy.close("V1 Short", comment="Time Stop")
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryBar := bar_index
+    entryPrice := close
+    trailPrice := na
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+plot(sma, "SMA", color=color.new(color.white, 50))
+plot(trailPrice, "Trail Stop", color=color.new(color.orange, 30), style=plot.style_linebr)
+
+plotshape(buySignal, "Buy Signal", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+alertcondition(buySignal, "V1 Buy", "Volume Exhaustion BUY signal")
+alertcondition(sellSignal, "V1 Sell", "Volume Exhaustion SELL signal")

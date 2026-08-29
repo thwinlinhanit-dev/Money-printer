@@ -49,4 +49,18 @@ impl Staleness {
             .map(|(topic, _)| topic.clone())
             .collect()
     }
+
+    /// Stale topics at `now_ns` with the ACTUAL observed silence
+    /// (`now_ns - last_recv`) for each. The silence is the diagnostic that
+    /// tells an operator whether a `Status::Stale` reconnect was a short loop
+    /// hiccup (a few seconds past the threshold — no recv-clock loss) or a
+    /// long feed outage (tens of seconds to minutes — real loss). Both trip
+    /// the watchdog, but only the latter creates a coverage hole.
+    pub fn stale_silences(&self, now_ns: Nanos) -> Vec<(String, Nanos)> {
+        self.streams
+            .iter()
+            .filter(|(_, (last, thresh))| *thresh > 0 && now_ns - *last > *thresh)
+            .map(|(topic, (last, _))| (topic.clone(), now_ns - *last))
+            .collect()
+    }
 }

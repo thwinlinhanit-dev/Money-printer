@@ -164,11 +164,20 @@ impl Metrics {
     /// the observed Sharpe for the number of independent trials the strategy
     /// was selected from: the more combos tried, the higher the bar to call an
     /// edge real. None when the raw Sharpe is unavailable (FEA-3 warmup).
+    ///
+    /// The deflation term (López de Prado eq. 3.15) is an expected maximum on
+    /// the NON-annualized per-period scale, while [`Self::sharpe`] is
+    /// annualized (mean/std · √bars_per_year). To deflate correctly (audit
+    /// H-3), we de-annualize on to the per-period scale, apply the correction
+    /// there, then re-annualize — otherwise the correction is dwarfed by the
+    /// √bars_per_year multiplier and is effectively cosmetic.
     pub fn deflated_sharpe(&self, bars_per_year: f64, n_trials: u64) -> Option<f64> {
         let sr = self.sharpe(bars_per_year)?;
         if n_trials <= 1 {
             return Some(sr); // a single trial needs no correction
         }
+        let bpy = bars_per_year.sqrt();
+        let sr_period = sr / bpy; // de-annualize to per-period SR
         // Expected maximum Sharpe under the null (pure noise) for n_trials
         // independent strategies (López de Prado, "Advances in Financial
         // Machine Learning" eq. 3.15):
@@ -180,7 +189,8 @@ impl Metrics {
         let p1 = probit(1.0 - inv_n);
         let p2 = probit(1.0 - inv_n / std::f64::consts::E);
         let expected_max = (1.0 - euler_gamma) * p1 + euler_gamma * p2;
-        Some(sr - expected_max)
+        // Deflate on the per-period scale, then annualize the result.
+        Some((sr_period - expected_max) * bpy)
     }
 
     pub fn sample_equity(&mut self, equity: f64) {
@@ -311,5 +321,45 @@ mod tests {
         let p3 = probit(0.025);
         assert!(p1 > p2 && p2 > p3, "probit must be monotone");
         assert!((p1 + p3).abs() < 1e-6, "probit is antisymmetric about 0.5");
+    }
+
+    #[test]
+    fn regression_audit28_h3_deflated_sharpe_scale() {
+        // Audit H-3: the expected-max correction (eq. 3.15) is on the
+        // PER-PERIOD scale. The old code subtracted it directly from the
+        // ANNUALIZED Sharpe, so at daily bars the √365 factor (≈19.1) dwarfed
+        // the correction and deflation was nearly cosmetic. We now de-annualize
+        // on to the per-period scale, deflate, then re-annualize.
+        let mut m = Metrics::new();
+        m.record_bar_return(100.0);
+        for i in 1..10 {
+            m.record_bar_return(100.0 + (i as f64) * 0.5);
+        }
+        let bpy = 365.0;
+        let n_trials = 100;
+        let sr = m.sharpe(bpy).unwrap();
+        let bpy_sqrt = bpy.sqrt();
+        // Recompute the expected max exactly as the impl does (per-period).
+        let euler_gamma = 0.577_215_664_901_532_9;
+        let inv_n = 1.0 / n_trials as f64;
+        let expected_max =
+            (1.0 - euler_gamma) * probit(1.0 - inv_n) + euler_gamma * probit(1.0 - inv_n / std::f64::consts::E);
+        let expect = (sr / bpy_sqrt - expected_max) * bpy_sqrt;
+        let got = m.deflated_sharpe(bpy, n_trials).unwrap();
+        assert!(
+            (got - expect).abs() < 1e-9,
+            "deflated sharpe must deflate on the per-period scale then annualize: got {got}, expect {expect}"
+        );
+        // The old buggy value `sr - expected_max` (annualized minus per-period
+        // correction) must NOT equal the corrected result — proving the scale
+        // fix is actually active, not cosmetic.
+        let old_bug = sr - expected_max;
+        assert!(
+            (got - old_bug).abs() > 1e-6,
+            "correction must be applied on the per-period scale, not the annualized one"
+        );
+        // sanity: more trials still lowers it, single trial is unchanged
+        assert!(got < sr);
+        assert_eq!(m.deflated_sharpe(bpy, 1), Some(sr));
     }
 }

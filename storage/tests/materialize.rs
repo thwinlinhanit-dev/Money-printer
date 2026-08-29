@@ -6,7 +6,7 @@
 use mp_core::event::{EventEnvelope, MarketEvent, Side, StatusKind, Venue};
 use mp_core::log::EventLogWriter;
 use mp_core::{SymbolId, SymbolTable};
-use mp_features::FeaturesConfig;
+use mp_features::{CorrLeg, CorrParams, FeaturesConfig};
 use mp_storage::feature_store::{read_feature_meta, read_features};
 use mp_storage::{
     load_logs_merged, materialize_logs, materialize_logs_limited, stream_logs_merged,
@@ -309,6 +309,82 @@ fn mat_6_cross_venue_liq_delta_materializes_from_two_logs() {
     rows_all.sort_by_key(|r| r.ts_ns);
     let values: Vec<f64> = rows_all.iter().map(|r| r.value).collect();
     assert_eq!(values, vec![500.0, 800.0], "as-of divergence per event");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cor_3_materializes_btc_eth_from_own_recorded_trade_logs() {
+    let dir = tmpdir("corr");
+    let btc_log = dir.join("btc.log");
+    let eth_log = dir.join("eth.log");
+    let mut btc_table = SymbolTable::new();
+    btc_table.intern_default(Venue::Hyperliquid, "BTC");
+    let mut eth_table = SymbolTable::new();
+    eth_table.intern_default(Venue::Hyperliquid, "ETH");
+
+    let mut btc = 100.0;
+    let mut eth = 100.0;
+    let mut btc_events = Vec::new();
+    let mut eth_events = Vec::new();
+    for day in 0..14i64 {
+        if day > 0 {
+            let step = day as f64 / 100.0;
+            btc *= 1.0 + step;
+            eth *= 1.0 + step;
+        }
+        let ts = DAY0 + day * 86_400_000_000_000;
+        btc_events.push((
+            ts,
+            SymbolId(0),
+            MarketEvent::Trade {
+                price: btc,
+                qty: 1.0,
+                side: Side::Buy,
+                trade_id: day as u64,
+            },
+        ));
+        eth_events.push((
+            ts,
+            SymbolId(0),
+            MarketEvent::Trade {
+                price: eth,
+                qty: 1.0,
+                side: Side::Buy,
+                trade_id: day as u64,
+            },
+        ));
+    }
+    write_log_at(&btc_log, &btc_table, &btc_events, Venue::Hyperliquid);
+    write_log_at(&eth_log, &eth_table, &eth_events, Venue::Hyperliquid);
+
+    let mut cfg = FeaturesConfig::default();
+    cfg.corr.enabled = true;
+    cfg.corr.pairs = vec![CorrParams {
+        window_days: 30,
+        min_overlap_days: 5,
+        leg_a: CorrLeg {
+            venue: "hyperliquid".into(),
+            symbol: "BTC".into(),
+        },
+        leg_b: CorrLeg {
+            venue: "hyperliquid".into(),
+            symbol: "ETH".into(),
+        },
+    }];
+    let out = dir.join("features");
+    let stats = materialize_logs(&out, &cfg, &[btc_log, eth_log], "abc123").unwrap();
+    assert!(stats
+        .features
+        .iter()
+        .any(|feature| feature == "corr.btc_eth"));
+
+    let rows: Vec<_> = walk_parquet(&out)
+        .into_iter()
+        .filter(|path| path.to_string_lossy().contains("corr.btc_eth"))
+        .flat_map(|path| read_features(&path).expect("correlation parquet reads"))
+        .collect();
+    assert!(!rows.is_empty(), "corr.btc_eth must persist after warmup");
+    assert!(rows.iter().all(|row| row.value > 0.99));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

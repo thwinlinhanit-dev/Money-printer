@@ -644,9 +644,22 @@ mod inner {
         /// `STALE_AFTER_NS`, emit `Status::Stale` and drop the transport so the
         /// loop reconnects. Returns true when it forced a reconnect.
         fn check_stale(&mut self, out: &mut Vec<EventEnvelope>, now_recv_ns: i64) -> bool {
-            if self.staleness.stale_streams(now_recv_ns).is_empty() {
+            // Report the ACTUAL observed silence, not just the static threshold:
+            // a seconds past the 15s bar (loop stall, no recv loss) and a
+            // minutes-long feed outage look identical here until the silence is
+            // measured — this is the operator-facing root-cause signal that
+            // separates a false-firing watchdog from a real data hole (spec
+            // 024/COL-2, postponed diagnostics).
+            let silences = self.staleness.stale_silences(now_recv_ns);
+            if silences.is_empty() {
                 return false;
             }
+            let worst_silence_ns = silences
+                .iter()
+                .map(|(_, s)| *s)
+                .max()
+                .unwrap_or(STALE_AFTER_NS);
+            let topics: Vec<&str> = silences.iter().map(|(t, _)| t.as_str()).collect();
             tracing::warn!(stream = %self.name, symbol = %self.symbol, "stream stale; reconnecting (COL-2)");
             // Reset the observation so we don't emit one Stale per iteration.
             self.staleness.observe(&self.symbol, now_recv_ns);
@@ -664,7 +677,12 @@ mod inner {
                 0,
                 MarketEvent::Status {
                     kind: StatusKind::Stale,
-                    detail: format!("no valid event for {} ns", STALE_AFTER_NS),
+                    detail: format!(
+                        "no valid event for {} ms (threshold {} ms; {})",
+                        worst_silence_ns / 1_000_000,
+                        STALE_AFTER_NS / 1_000_000,
+                        topics.join(", "),
+                    ),
                 },
             );
             let provenance = self.provenance(&stale.body, SnapshotSource::None);

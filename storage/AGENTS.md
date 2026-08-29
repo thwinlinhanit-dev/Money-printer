@@ -14,9 +14,9 @@ Cold storage layer: transforms raw event logs into Hive-partitioned Parquet tabl
 - `src/scd2.rs` — slowly changing dimension tracking
 - `src/feature_store.rs` — feature store materialization (W-6 `rows_content_hash` excludes `engine_git_sha` — provenance, not content; FEA-6 `resolve_version` keys on `params_hash:feature_ver`, legacy bare-`params_hash` markers match when `ver` equals the running `feature_ver`)
 - `src/prune.rs` — data pruning
-- `src/audit.rs` — audit logging
+- `src/audit.rs` — audit logging (`audit_raw_log`: missing day-file = blocking `recording_missing`, distinct from `unreadable_log` — spec 024 decision 2026-08-25)
 - `src/migrate.rs` — legacy raw-log migration (schema-1 → current, W-6 write-new + verify)
-- `src/promotion.rs` — seven-day promotion gate (INT-5 / Phase 0)
+- `src/promotion.rs` — seven-day promotion gate (INT-5 / Phase 0); adjacency gate requires consecutive scorecards to be exactly 1 UTC calendar day apart
 - `src/cross_venue.rs` — cross-venue gap detector (spec 026, CVG-1..12)
 - `src/historical.rs` — historical bootstrap core (spec 027, HBS-2..7/HBS-9/HBS-10)
 - `src/historical_download.rs` — live Binance-archive download, `live-http` feature-gated (spec 027, HBS-1/HBS-8; owner-approved 2026-08-05)
