@@ -1943,6 +1943,14 @@ mod tests {
         SymbolId, SymbolMeta,
     };
 
+    /// Serializes tests that mutate the process environment (`std::env::set_var`
+    /// / `remove_var`). Rust runs tests in parallel threads within one binary,
+    /// and env mutation is process-global and NOT synchronized — two tests
+    /// reading env concurrently can observe each other's half-set state. The
+    /// one mutator (`pipeline_stale_fires_p1_when_gate_did_not_land`) caused
+    /// intermittent `promote_*` failures under full-suite parallelism.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// promote: a BOM-prefixed scorecard parses and a single DIRTY day yields
     /// `promoted=false` with the correct first_failure.
     #[test]
@@ -2695,6 +2703,9 @@ mod tests {
     /// test binary holds no other reader of those vars.)
     #[test]
     fn pipeline_stale_fires_p1_when_gate_did_not_land() {
+        // Hold the env mutex for the whole mutate→use→restore window so
+        // parallel tests (e.g. promote_*) never observe a half-mutated env.
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let root = std::env::temp_dir().join(format!("mp-pstale-miss-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
