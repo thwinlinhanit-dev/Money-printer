@@ -190,6 +190,13 @@ pub struct EventLogWriter {
     fsync_policy: FsyncPolicy,
     events_since_fsync: u64,
     last_fsync_ns: i64,
+    /// Whether the time-based interval has been anchored to an event's
+    /// `recv_ts_ns` (spec 014 FSP-2). Before the first append there is no
+    /// event-time reference, so the time threshold cannot fire; the anchor is
+    /// set by the first append after the policy takes effect. Without this,
+    /// `last_fsync_ns == 0` made a pure time-based policy (`every_n_events: 0`)
+    /// never fsync at all — found by writing `fsp_2_time_based_fsync`.
+    time_armed: bool,
 }
 
 impl EventLogWriter {
@@ -241,14 +248,18 @@ impl EventLogWriter {
                 fsync_policy: FsyncPolicy::default(),
                 events_since_fsync: 0,
                 last_fsync_ns: 0,
+                time_armed: false,
             },
             truncated,
         ))
     }
 
     /// Set the fsync policy (spec 014). Must be called before appending events.
+    /// Re-arms the time anchor so a policy set after appends began measures its
+    /// interval from the next append, not from a stale prior anchor.
     pub fn set_fsync_policy(&mut self, policy: FsyncPolicy) {
         self.fsync_policy = policy;
+        self.time_armed = false;
     }
 
     /// Persist a symbol-table snapshot (EVT-8). Write this before the events
@@ -272,8 +283,16 @@ impl EventLogWriter {
         // FSYNC cadence is paced on *event* time (`recv_ts_ns`), not the OS
         // wall clock — PD-3 / CONV-5: no wall-clock reads on the decision path.
         let now = e.recv_ts_ns;
+        // Arm the time anchor on the first append (FSP-2): the interval is
+        // measured from the first event after the policy takes effect. Without
+        // this, a pure time-based policy (`every_n_events: 0`) could never fire
+        // because `last_fsync_ns == 0` also means "no fsync yet".
+        if p.every_ns > 0 && !self.time_armed {
+            self.last_fsync_ns = now;
+            self.time_armed = true;
+        }
         let should_fsync_time = p.every_ns > 0
-            && self.last_fsync_ns > 0
+            && self.time_armed
             && now.saturating_sub(self.last_fsync_ns) >= p.every_ns;
         if should_fsync || should_fsync_time {
             self.file.flush()?;
@@ -315,6 +334,15 @@ impl EventLogWriter {
         self.file.flush()?;
         self.file.get_ref().sync_all()?;
         Ok(())
+    }
+
+    /// Fsync bookkeeping state for tests (spec 014): `(events_since_fsync,
+    /// last_fsync_ns)`. Exposes the threshold counters so `fsp_1`..`fsp_4`
+    /// can assert exactly when a fsync decision fired without intercepting
+    /// the OS `sync_data` call.
+    #[cfg(test)]
+    pub fn fsync_state(&self) -> (u64, i64) {
+        (self.events_since_fsync, self.last_fsync_ns)
     }
 }
 
@@ -891,5 +919,227 @@ mod tests {
             assert_eq!(e.stream_seq, i as u64);
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- spec 014: event log fsync policy (FSP-1..5) --------------------------
+
+    fn fsync_event(seq: u64, recv_ns: i64) -> EventEnvelope {
+        EventEnvelope::new(
+            Venue::Bybit,
+            SymbolId(1),
+            recv_ns,
+            recv_ns,
+            seq,
+            MarketEvent::Trade {
+                price: 1.0,
+                qty: 2.0,
+                side: Side::Buy,
+                trade_id: seq,
+            },
+        )
+    }
+
+    /// FSP-1: the count threshold fires exactly every `every_n_events` appends
+    /// and resets the counter; appends below the threshold never fsync.
+    #[test]
+    fn fsp_1_every_n_events_triggers_fsync() {
+        let dir = std::env::temp_dir().join(format!("mplog-f1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f1.log");
+        let _ = std::fs::remove_file(&path);
+
+        let (mut w, _) = EventLogWriter::open(&path).unwrap();
+        w.set_fsync_policy(FsyncPolicy {
+            every_n_events: 3,
+            every_ns: 0,
+            on_sigterm: true,
+        });
+        for seq in 1..=2 {
+            w.append(&fsync_event(seq, seq as i64)).unwrap();
+        }
+        assert_eq!(w.fsync_state(), (2, 0), "no fsync below the threshold");
+        // 3rd append crosses `every_n_events` → fsync fires and resets.
+        w.append(&fsync_event(3, 3)).unwrap();
+        assert_eq!(
+            w.fsync_state(),
+            (0, 3),
+            "count fsync resets the counter and stamps the crossing event's time"
+        );
+        // The next window accumulates and fires on schedule.
+        w.append(&fsync_event(4, 4)).unwrap();
+        w.append(&fsync_event(5, 5)).unwrap();
+        assert_eq!(w.fsync_state().0, 2);
+        w.append(&fsync_event(6, 6)).unwrap();
+        assert_eq!(w.fsync_state().0, 0, "second window fires on schedule");
+        drop(w);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// FSP-2: the time threshold fires on event-time pacing measured from the
+    /// first append after the policy takes effect, independent of the count
+    /// threshold (`every_n_events: 0`). Regression: the old
+    /// `last_fsync_ns > 0` guard made a pure time-based policy never fsync,
+    /// because `last_fsync_ns == 0` also meant "no fsync has happened yet".
+    #[test]
+    fn fsp_2_time_based_fsync() {
+        let dir = std::env::temp_dir().join(format!("mplog-f2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f2.log");
+        let _ = std::fs::remove_file(&path);
+
+        let (mut w, _) = EventLogWriter::open(&path).unwrap();
+        w.set_fsync_policy(FsyncPolicy {
+            every_n_events: 0,
+            every_ns: 1_000,
+            on_sigterm: true,
+        });
+        w.append(&fsync_event(1, 0)).unwrap(); // arms the anchor at t=0
+        assert_eq!(w.fsync_state(), (1, 0), "arming the anchor is not a fsync");
+        w.append(&fsync_event(2, 500)).unwrap(); // 500 < 1000 → no fsync
+        assert_eq!(w.fsync_state(), (2, 0));
+        w.append(&fsync_event(3, 1_500)).unwrap(); // 1500 − 0 ≥ 1000 → fsync
+        assert_eq!(
+            w.fsync_state(),
+            (0, 1_500),
+            "time fsync fires at the interval and re-anchors"
+        );
+        w.append(&fsync_event(4, 2_000)).unwrap(); // 500 < 1000 → no
+        assert_eq!(w.fsync_state(), (1, 1_500));
+        w.append(&fsync_event(5, 2_600)).unwrap(); // 1100 ≥ 1000 → fsync
+        assert_eq!(w.fsync_state(), (0, 2_600));
+        drop(w);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// FSP-3 (spec 014 acceptance `fsp_3_sigterm_handler_fsyncs`): the
+    /// shutdown hook flushes + fsyncs when the policy opts in, and the events
+    /// are durable even if the writer is leaked (crash-equivalent: no Drop
+    /// flush). With `on_sigterm: false` the hook is flush-only and the fsync
+    /// counters are left untouched. (The OS signal wiring itself lives in the
+    /// collector binaries — spec 002/019 scope; core exposes this hook.)
+    #[test]
+    fn fsp_3_sigterm_handler_fsyncs() {
+        // Opt-in branch: shutdown fsync must make the tail durable.
+        let dir = std::env::temp_dir().join(format!("mplog-f3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f3.log");
+        let _ = std::fs::remove_file(&path);
+        let (mut w, _) = EventLogWriter::open(&path).unwrap();
+        w.set_fsync_policy(FsyncPolicy {
+            every_n_events: 0,
+            every_ns: 0,
+            on_sigterm: true,
+        });
+        for seq in 1..=3 {
+            w.append(&fsync_event(seq, seq as i64)).unwrap();
+        }
+        assert_eq!(w.fsync_state().0, 3, "no auto-fsync during the session");
+        w.sync_on_shutdown().unwrap();
+        assert_eq!(w.fsync_state().0, 0, "shutdown fsync resets the counter");
+        // Leak the writer: no Drop flush may run, so what we read back came
+        // through the shutdown hook alone.
+        std::mem::forget(w);
+        let got: Vec<_> = LogReader::open(&path).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(got.len(), 3, "shutdown hook must make all events durable");
+        let _ = std::fs::remove_file(&path);
+
+        // Opt-out branch: flush-only, counters untouched.
+        let path2 = dir.join("f3b.log");
+        let _ = std::fs::remove_file(&path2);
+        let (mut w2, _) = EventLogWriter::open(&path2).unwrap();
+        w2.set_fsync_policy(FsyncPolicy {
+            every_n_events: 0,
+            every_ns: 0,
+            on_sigterm: false,
+        });
+        for seq in 1..=2 {
+            w2.append(&fsync_event(seq, seq as i64)).unwrap();
+        }
+        w2.sync_on_shutdown().unwrap();
+        assert_eq!(
+            w2.fsync_state().0,
+            2,
+            "on_sigterm=false is flush-only — no fsync, no counter reset"
+        );
+        drop(w2);
+        let _ = std::fs::remove_file(&path2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// FSP-5 (spec 014 acceptance `fsp_4_fsync_does_not_block_append`): with
+    /// both thresholds disabled, append() takes NO fsync decision across the
+    /// whole session — the write loop never blocks on durability I/O except at
+    /// the configured boundaries. The default durability call is `sync_data`
+    /// (log.rs `append`/`sync_on_shutdown`/`sync`); `sync_all` exists only as
+    /// the explicit opt-in (spec 014 Decision 2026-07-19).
+    #[test]
+    fn fsp_4_fsync_does_not_block_append() {
+        let dir = std::env::temp_dir().join(format!("mplog-f4-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f4.log");
+        let _ = std::fs::remove_file(&path);
+
+        let (mut w, _) = EventLogWriter::open(&path).unwrap();
+        w.set_fsync_policy(FsyncPolicy {
+            every_n_events: 0,
+            every_ns: 0,
+            on_sigterm: true,
+        });
+        for seq in 1..=50 {
+            w.append(&fsync_event(seq, seq as i64)).unwrap();
+        }
+        assert_eq!(
+            w.fsync_state(),
+            (50, 0),
+            "zero fsync decisions below thresholds — append never blocked on durability"
+        );
+        drop(w);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// FSP-5 (spec 014 acceptance `fsp_5_crash_recovery_loses_at_most_n_events`):
+    /// a kill -9 between fsync boundaries loses at most `every_n_events`
+    /// events, and the recovered log reopens cleanly (torn-tail handling). The
+    /// kill is simulated by truncating the file to the last fsynced boundary
+    /// and leaking the writer so no Drop flush can resurrect the tail.
+    #[test]
+    fn fsp_5_crash_recovery_loses_at_most_n_events() {
+        let dir = std::env::temp_dir().join(format!("mplog-f5-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f5.log");
+        let _ = std::fs::remove_file(&path);
+
+        let (mut w, _) = EventLogWriter::open(&path).unwrap();
+        w.set_fsync_policy(FsyncPolicy {
+            every_n_events: 2,
+            every_ns: 0,
+            on_sigterm: true,
+        });
+        w.append(&fsync_event(1, 1)).unwrap(); // count 1 — not fsynced
+        w.append(&fsync_event(2, 2)).unwrap(); // count 2 → fsync boundary
+        let durable_len = std::fs::metadata(&path).unwrap().len();
+        w.append(&fsync_event(3, 3)).unwrap(); // buffered tail — NOT fsynced
+        assert_eq!(w.fsync_state().0, 1, "tail event is inside the open window");
+
+        // kill -9: the un-fsynced tail never reached the platter, and no Drop
+        // flush may run afterwards.
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_len(durable_len).unwrap();
+        drop(f);
+        std::mem::forget(w);
+
+        let got: Vec<_> = LogReader::open(&path).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(got.len(), 2, "exactly the fsynced prefix survives");
+        let lost = 3u64 - got.len() as u64;
+        assert!(lost <= 2, "loss ({lost}) must be at most every_n_events");
+        for (i, e) in got.iter().enumerate() {
+            assert_eq!(e.stream_seq, (i + 1) as u64, "prefix must be intact and ordered");
+        }
+        // The recovered log reopens cleanly for further appends.
+        let (w2, truncated) = EventLogWriter::open(&path).unwrap();
+        assert!(!truncated, "a frame-boundary truncation is not a torn tail");
+        drop(w2);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

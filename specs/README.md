@@ -22,7 +22,7 @@ should be updated).
 | 011 | [WASM Terminal](011-terminal.md) | decision plane | ✅ ready |
 | 012 | [Zero-Copy Event Pipeline](012-zero-copy-pipeline.md) | core | 📝 draft |
 | 013 | [WS Backpressure Policy](013-ws-backpressure.md) | collectors | 📝 draft |
-| 014 | [Event Log Fsync Policy](014-event-log-fsync.md) | core/storage | 📝 draft |
+| 014 | [Event Log Fsync Policy](014-event-log-fsync.md) | core/storage | 🔨 implementing (FSP-1..5 implemented in `core/src/log.rs` with all five acceptance tests `fsp_1..5` passing, 2026-08-28; remaining: `[fsync]` TOML plumbing + SIGTERM wiring in non-mp-collector binaries — collector config scope, spec 019) |
 | 015 | [carry-v1 Strategy](015-carry-v1.md) | intelligence | 🔨 implementing |
 | 016 | [Feature Materialization](016-feature-materialization.md) | intelligence | 📝 draft |
 | 017 | [Screener Hit Journal & Grading](017-screener-grading.md) | intelligence | 🔨 implementing |
