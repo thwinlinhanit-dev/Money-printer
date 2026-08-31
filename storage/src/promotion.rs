@@ -12,6 +12,13 @@ use serde::Serialize;
 /// Minimum consecutive clean days required for promotion (ROADMAP Phase 0).
 pub const REQUIRED_CONSECUTIVE_CLEAN_DAYS: usize = 7;
 
+/// Zero-Cost Mode: relaxed promotion requirements (docs/ZERO_COST_MODE.md).
+/// Longer streak (14 days) compensates for lower per-day bar (0.95 vs 0.995).
+pub const ZERO_COST_REQUIRED_CONSECUTIVE_CLEAN_DAYS: usize = 14;
+
+/// Zero-Cost Mode: minimum coverage threshold (down from 0.995).
+pub const ZERO_COST_MIN_COVERAGE: f64 = 0.95;
+
 /// Result of the promotion check.
 #[derive(Debug, Clone, Serialize)]
 pub struct PromotionVerdict {
@@ -213,12 +220,18 @@ fn dates_are_adjacent(a: &str, b: &str) -> bool {
 }
 
 fn parse_ymd(s: &str) -> Result<(u32, u32, u32), ()> {
-    if s.len() != 8 {
+    // Accept both YYYYMMDD (8 chars) and YYYY-MM-DD (10 chars)
+    let (y, m, d) = if s.len() == 8 {
+        (s[0..4].parse::<u32>().map_err(|_| ())?,
+         s[4..6].parse::<u32>().map_err(|_| ())?,
+         s[6..8].parse::<u32>().map_err(|_| ())?)
+    } else if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
+        (s[0..4].parse::<u32>().map_err(|_| ())?,
+         s[5..7].parse::<u32>().map_err(|_| ())?,
+         s[8..10].parse::<u32>().map_err(|_| ())?)
+    } else {
         return Err(());
-    }
-    let y: u32 = s[0..4].parse().map_err(|_| ())?;
-    let m: u32 = s[4..6].parse().map_err(|_| ())?;
-    let d: u32 = s[6..8].parse().map_err(|_| ())?;
+    };
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return Err(());
     }

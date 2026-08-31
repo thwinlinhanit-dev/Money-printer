@@ -281,6 +281,19 @@ authenticated trading, strategy changes, and long-running hosting policy.
   Regression tests: `scorecard_all_zero_refuses_verdict_unless_allowed`,
   `scorecard_decodes_schema_current_writer_events` (mp-ops),
   `int_recording_missing_is_named_and_blocking` (mp-storage).
+- 2026-08-31 (Zero-Cost Mode — lowered gate): under Zero-Cost Mode
+  (`docs/ZERO_COST_MODE.md`), the Phase-0 gate is relaxed:
+  - Required streams: `trade funding mark_price open_interest` (no `book`)
+  - Coverage threshold: >= 0.95 (down from 0.995)
+  - Stale bursts: warnings only, not a promotion blocker
+  - Full book absence: expected, not a dirty finding
+  - Promotion streak: 14 consecutive clean days (up from 7)
+  - Determinism check: still required on the decision path
+  Rationale: with $0 budget and free-tier constraints, the system must be
+  able to promote without full book data. The longer streak compensates for
+  the lower per-day bar. Zero-Cost Mode is activated by
+  `--zero-cost-mode` flag on `mp-ops scorecard`/`promote`, or by setting
+  `mode = "zero-cost"` in the ops config.
 - 2026-08-25 (proactive WS connection rotation — Hyperliquid venue-TTL
   mitigation): the Phase-0 promotion amendment requires **zero
   `stale_bursts`** across the qualifying window, and every burst since

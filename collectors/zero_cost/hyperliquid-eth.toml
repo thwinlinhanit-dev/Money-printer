@@ -1,0 +1,21 @@
+# Zero-Cost Mode Hyperliquid collector — ETH
+# (docs/ZERO_COST_MODE.md)
+#
+# Minimal viable recording for ETH on Hyperliquid under $0 budget.
+# Streams: trades + activeAssetCtx (funding + mark + OI).
+# No L2 book. swing_only = true drops l2Book.
+#
+# Start manually:
+#   cargo run -p mp-collectors --features live-ws --bin mp-collector -- \
+#     --config collectors/zero_cost/hyperliquid-eth.toml
+#
+# Or via swing_collectors.ps1 (uses swing/hyperliquid-eth.toml which is identical).
+#
+# Writes: data/raw/{date}_hyperliquid_ETH.log
+# Required gate streams (Zero-Cost): trade funding mark_price open_interest
+venue = "hyperliquid"
+symbol = "ETH"
+data_dir = "data"
+channel_capacity = 10000
+backpressure = "drop_oldest"
+swing_only = true

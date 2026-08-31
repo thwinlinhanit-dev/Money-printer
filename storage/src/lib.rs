@@ -29,6 +29,7 @@ pub mod parquet_positions;
 pub mod parquet_trades;
 pub mod promotion;
 pub mod prune;
+pub mod retention;
 pub mod scd2;
 
 /// Live Binance-archive download (spec 027 HBS-1/HBS-8) — gated on the
@@ -83,4 +84,8 @@ pub use promotion::{
     REQUIRED_CONSECUTIVE_CLEAN_DAYS,
 };
 pub use prune::{verify_prunable, PruneRefusal};
+pub use retention::{
+    project_usage, check_hot_tier, check_warm_tier, RetentionConfig, RetentionViolation,
+    StorageProjection,
+};
 pub use scd2::{Scd2AppendError, SymbolScd2, SymbolVersion};

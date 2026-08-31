@@ -113,6 +113,15 @@ pub struct SignalRecord {
     pub weekly_avg_excess: Vec<f64>,
     pub last_grade_ts_ns: i64,
     pub re_test_interval_ns: i64,
+    /// Whether this signal can be computed from trades + bars only (no full
+    /// L2 book needed). Under Zero-Cost Mode (docs/ZERO_COST_MODE.md), only
+    /// signals with `zero_cost_compatible = true` are registered.
+    #[serde(default = "default_zero_cost_compatible")]
+    pub zero_cost_compatible: bool,
+}
+
+fn default_zero_cost_compatible() -> bool {
+    true
 }
 
 impl SignalRecord {
@@ -140,6 +149,7 @@ impl SignalRecord {
             weekly_avg_excess: Vec::new(),
             last_grade_ts_ns: 0,
             re_test_interval_ns: RE_TEST_INTERVAL_NS,
+            zero_cost_compatible: true,
         })
     }
 

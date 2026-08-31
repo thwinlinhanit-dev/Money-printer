@@ -1,5 +1,22 @@
 # Progress Log
 
+## Session: 2026-08-31
+
+### Phase P0 planning (specs, not code)
+
+- **Status:** complete for planning; implementation pending owner
+- Actions taken:
+  - Wrote v1 definition of done (D1–D6) and cut list.
+  - Added specs 050–053 (ready), indexed 049, amended 011.
+  - Ideas doc: score-on-VPS, funding-arb, burst SLO, BTC benchmark, kill
+    extra research stacks, null-strategy paper week.
+- Files created/modified:
+  - `docs/COMPLETION-MASTER-PLAN.md`
+  - `docs/IDEAS-2026-08-31.md`
+  - `specs/050-lab-continuity.md` … `053-alpha-program.md`
+  - `specs/README.md`, `specs/AGENTS.md`, `specs/011-terminal.md`
+  - `ROADMAP.md`, `README.md`, `task_plan.md`, `findings.md`
+
 ## Session: 2026-08-18
 
 ### Phase 1: Lab foundations

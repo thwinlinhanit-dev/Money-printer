@@ -32,6 +32,26 @@ cooldown_ns = 14400000000000
 7. Per-symbol state maintained via ValueBuffer (ACC-7).
 8. Config uses deny_unknown_fields (ACC-8).
 
+**Zero-Cost Mode Behavior**
+
+Under Zero-Cost Mode (`docs/ZERO_COST_MODE.md`), the accumulation detector
+degrades gracefully:
+
+- **OI leg:** Always available (Hyperliquid `activeAssetCtx` provides OI)
+- **Smart money leg:** Available if whale census (spec 028) is running;
+  otherwise the sub-signal is marked inactive
+- **Exchange outflow leg:** Requires netflow data (spec 034); if absent,
+  the sub-signal is marked inactive
+
+The detector fires only when **all available legs** co-occur (AND logic).
+If fewer than 3 legs are active, the detector does not fire — it does not
+hallucinate signals from missing data. This is safe: the detector simply
+produces fewer hits until more data sources are available.
+
+The `zero_cost_compatible` flag is `true` for this detector because its
+core logic (OI + price regime) works with Zero-Cost streams; the exchange
+outflow leg is additive, not required.
+
 **Dependencies**
 - specs/004-feature-engine.md (FeatureUpdate, TickFeature, BarFeature)
 - specs/017-screener.md (ScreenerHit)

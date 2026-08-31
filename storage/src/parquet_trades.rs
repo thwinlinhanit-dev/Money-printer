@@ -29,10 +29,21 @@ pub fn writer_properties(
     compactor_version: &str,
     source_log_hash: &str,
 ) -> parquet::file::properties::WriterProperties {
+    writer_properties_with_level(compactor_version, source_log_hash, 3)
+}
+
+/// Shared footer KV metadata + configurable zstd compression level.
+/// Zero-Cost Mode uses level 6+ for tighter compression (docs/ZERO_COST_MODE.md).
+pub fn writer_properties_with_level(
+    compactor_version: &str,
+    source_log_hash: &str,
+    zstd_level: i32,
+) -> parquet::file::properties::WriterProperties {
     WriterProperties::builder()
-        // SAFETY: zstd level 3 is within the crate's valid range, so
-        // `ZstdLevel::try_new(3)` cannot fail (CONV-13).
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+        // SAFETY: zstd levels 1-22 are within the crate's valid range.
+        .set_compression(Compression::ZSTD(
+            ZstdLevel::try_new(zstd_level).unwrap_or_else(|_| ZstdLevel::try_new(3).unwrap()),
+        ))
         .set_key_value_metadata(Some(vec![
             KeyValue::new(KV_SCHEMA_VER.into(), mp_core::SCHEMA_VER.to_string()),
             KeyValue::new(KV_COMPACTOR_VERSION.into(), compactor_version.to_string()),

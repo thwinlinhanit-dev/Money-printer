@@ -24,28 +24,46 @@ evidence links).
 - New ideas do not jump the queue: they enter `docs/BACKLOG.md`, get a spec,
   then get built. (This file changes rarely; the backlog changes often.)
 
-**Current status:** Phase 0 in progress — workspace + collectors + sim/research
-stack built; live **Hyperliquid** recorder running (BTC, ETH) since 2026-08-08
-(Binance futures WS non-book streams are egress-filtered from this network,
-spec 024 — Hyperliquid's permissionless API is not geo-blocked; see
-`ops/core_symbols.txt`). The daily integrity gate is automated and verified
-running: `MoneyPrinterDailyPipeline` Task Scheduler task scores each day and
-prints the promotion streak on `data/scorecards/*` (07-18 onward), and
-`MoneyPrinterDataBackup` mirrors the corpus nightly (W-6). The Phase-0 core
-symbol set is a single source of truth (`ops/core_symbols.txt`,
-`hyperliquid:BTC`/`hyperliquid:ETH` — 2 perps) wired into both the collector
-watchdog and the daily pipeline so recorded == required. Validation gate (7
-consecutive clean days, coverage ≥ 0.995) not yet met. 2026-08-12: the gate
-now enforces the roadmap's own number — `is_clean()` requires coverage ≥
-0.995 and treats `stale_stream`/`coverage_gap` as warnings (spec 024,
-decision 2026-08-12 — the old gate vetoed any stale finding and was stricter
-than its requirement). Re-scoring the recent days: 08-09 is the first CLEAN
-day (coverage 0.9984; its only findings were the stale burst + one ~138s
-gap, both warnings), while 08-08 (0.989), 08-10 (0.983) and 08-11 (0.993)
-still fail the numeric bar — the ~3h20m-periodic WS burst on both symbols is
-a real data hole on the VPN/Wi-Fi path, NOT a collector defect (see
-`ops/runbooks/daily-pipeline.md`; keepalive pings added 2026-08-12 and VPS
-A-B in progress per `ops/runbooks/vps-phase0-bringup.md` §6, profiler
+## Zero-Cost Mode (2026-08-31)
+
+Under $0 budget / free-tier constraints, Phase-0 is redefined as
+**Zero-Cost Mode** (see `docs/ZERO_COST_MODE.md`):
+
+- **Venue:** Hyperliquid only (permissionless, no geo-blocks, no KYC)
+- **Symbols:** BTC + ETH only
+- **Streams:** trades + funding + OI + mark_price (no full L2 book)
+- **Storage:** < 400 MB/day compressed; strict 3-tier retention (hot/warm/cold)
+- **Promotion:** 14 consecutive clean days, coverage >= 0.95, stale bursts
+  are warnings only, full book absence is expected
+
+The original Phase-0 gate (7 consecutive days, coverage >= 0.995, zero
+stale bursts, full book required) is **deferred indefinitely** under current
+constraints. It remains the target if the system moves to a paid VPS or the
+owner obtains Oracle Always Free.
+
+Full L2 book recording, multi-symbol expansion, options, macro, heavy
+whale census, and cross-asset analytics are all deferred until storage is
+proven stable for months on free-tier.
+
+**v1 completion (2026-08-31):** [`docs/COMPLETION-MASTER-PLAN.md`](docs/COMPLETION-MASTER-PLAN.md)
+defines D1–D6. Specs 050–053. Capital remains $0. Live is not in v1.
+
+**Current status:** Phase 0 in progress — last archived scorecard **2026-08-24**;
+gate blind 08-25..08-30. Live **Hyperliquid** recorder (BTC, ETH) since 2026-08-08.
+VPS drain `ssh_failed` and compact 0-row parquet are spec 050. Workspace +
+collectors + sim/research stack built. Binance futures WS non-book streams are
+egress-filtered from this network (spec 024 — Hyperliquid's permissionless API
+is not geo-blocked; see `ops/core_symbols.txt`). The daily integrity gate is
+automated (`MoneyPrinterDailyPipeline`) but was not landing scorecards after
+08-24. The Phase-0 core symbol set is a single source of truth
+(`ops/core_symbols.txt`, `hyperliquid:BTC`/`hyperliquid:ETH`). Validation
+gate (7 consecutive clean days, coverage ≥ 0.995, burst-free window) not yet
+met. Historical notes from 2026-08-12 onward remain below.
+
+The ~3h20m-periodic WS burst on both symbols is a real data hole on the
+VPN/Wi-Fi path, NOT a collector defect (see `ops/runbooks/daily-pipeline.md`;
+keepalive pings added 2026-08-12 and VPS A-B in progress per
+`ops/runbooks/vps-phase0-bringup.md` §6, profiler
 `ops/scripts/audit_bursts.py`). 2026-08-12: the Phase-0 promotion now
 additionally requires zero `stale_bursts` across the qualifying 7-day
 window (spec 024, amendment 2026-08-12 — enforced in `mp-ops promote`;

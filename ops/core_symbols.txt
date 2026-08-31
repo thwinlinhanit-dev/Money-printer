@@ -35,6 +35,11 @@
 # VPS promotion gate carries it via daily_maintenance.sh RECORDINGS + the
 # venue-scoped `--require-stream bybit:liquidation` (spec 024 COL-29).
 #
+# Zero-Cost Mode (2026-08-31): under $0 budget constraints, the required
+# stream set is relaxed to: trade funding mark_price open_interest
+# (no book). Full book is deferred indefinitely. See docs/ZERO_COST_MODE.md.
+# The 14-day promotion streak and 0.95 coverage threshold apply.
+#
 # Disk cost: keep recorded market data on a dedicated backed-up drive (W-6),
 # NOT under ~/Downloads.
 #

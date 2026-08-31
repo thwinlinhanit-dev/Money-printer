@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 /// recovered stale blip must not veto an otherwise-complete day).
 pub const MIN_COVERAGE: f64 = 0.995;
 
+/// Zero-Cost Mode: lowered coverage threshold (docs/ZERO_COST_MODE.md).
+pub const ZERO_COST_MIN_COVERAGE: f64 = 0.95;
+
 /// Two `Status::Stale` events farther apart than this (ns) start a new burst
 /// window. Matches `ops/scripts/audit_bursts.py` `BURST_GAP_S = 90` so the
 /// burst grouping lives in one place (spec 024, decision 2026-08-12).
@@ -27,6 +30,9 @@ pub struct AuditConfig {
     pub symbol: String,
     pub max_gap_ns: i64,
     pub required_streams: BTreeSet<String>,
+    /// Zero-Cost Mode: use lowered coverage threshold (0.95 instead of 0.995)
+    /// and treat `book` stream absence as expected (docs/ZERO_COST_MODE.md).
+    pub zero_cost_mode: bool,
 }
 
 impl AuditConfig {
@@ -36,6 +42,7 @@ impl AuditConfig {
             symbol: symbol.into(),
             max_gap_ns: 120_000_000_000,
             required_streams: BTreeSet::new(),
+            zero_cost_mode: false,
         }
     }
 }
@@ -153,6 +160,14 @@ impl RawLogAudit {
     pub fn is_clean(&self) -> bool {
         self.event_count > 0
             && self.coverage >= MIN_COVERAGE
+            && self.findings.iter().all(|f| !is_blocking_finding(&f.code))
+    }
+
+    /// Zero-Cost Mode: clean means coverage >= 0.95 with no blocking findings
+    /// (docs/ZERO_COST_MODE.md). Full book absence is expected, not a finding.
+    pub fn is_clean_zero_cost(&self) -> bool {
+        self.event_count > 0
+            && self.coverage >= ZERO_COST_MIN_COVERAGE
             && self.findings.iter().all(|f| !is_blocking_finding(&f.code))
     }
 }
@@ -308,10 +323,15 @@ pub fn audit_raw_log(path: &Path, config: &AuditConfig) -> RawLogAudit {
         ));
     }
     audit.coverage = coverage(&audit);
-    if audit.event_count > 0 && audit.coverage < MIN_COVERAGE {
+    let min_cov = if config.zero_cost_mode {
+        ZERO_COST_MIN_COVERAGE
+    } else {
+        MIN_COVERAGE
+    };
+    if audit.event_count > 0 && audit.coverage < min_cov {
         audit.findings.push(finding(
             "low_coverage",
-            format!("coverage {:.4} < required {MIN_COVERAGE}", audit.coverage),
+            format!("coverage {:.4} < required {min_cov}", audit.coverage),
         ));
     }
     audit

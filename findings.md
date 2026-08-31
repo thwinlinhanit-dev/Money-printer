@@ -19,6 +19,11 @@
 - The current strategy evidence includes a losing order-flow baseline,
   liquidation-fade kill-direction evidence, and funding/carry ideas that are
   not yet gradeable as tradeable strategies (`docs/BACKLOG.md`).
+- 2026-08-31 audit: last scorecard 2026-08-24; pipeline blind through 08-30;
+  41.7 GB / 40 GB cap; drain ssh_failed ×14; compact 0-row; no promoted
+  strategy; Pine README is not funnel evidence.
+- v1 done = D1–D6 in `docs/COMPLETION-MASTER-PLAN.md`, not specs 011–049
+  completeness.
 
 ## Technical Decisions
 

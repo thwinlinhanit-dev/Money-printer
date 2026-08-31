@@ -32,6 +32,23 @@ A versioned, lifecycle-managed catalog of order-flow and derivatives signals tha
 - Accumulation detector (ACC-6) uses AND logic across three independent sub-signals with percentile thresholds.
 - All timestamps are nanoseconds UTC; no wall-clock in decision paths.
 
+**Zero-Cost Compatibility**
+
+Every signal in the catalog carries a `zero_cost_compatible` flag:
+
+- `true`: signal can be computed from trades + bars only (no full book needed)
+- `false`: signal requires full L2 book depth
+
+Under Zero-Cost Mode (`docs/ZERO_COST_MODE.md`), only `zero_cost_compatible
+= true` signals are registered. Signals requiring full book are disabled.
+
+Compatible signals: `footprint.cvd`, `footprint.delta`, `footprint.imb`,
+`footprint.volume.bubble`, `footprint.market.profile`, all swing features
+(realized_vol, trend_strength, value_area, VWAP, ATR, sweep), climax
+variants.
+
+Incompatible signals: any signal requiring multi-level book depth data.
+
 **Open questions**
 None — all resolved in the code.
 
