@@ -45,16 +45,32 @@ the signal catalog + accumulation detector.
 | `liquidation` | Derived/estimated later | Not available cheaply from Hyperliquid; estimate from whale census (spec 028) |
 | BBO / top-of-book (5 levels max) | Hyperliquid `l2Book` | Off by default; behind config flag |
 
-### Explicitly dropped
+### Explicitly dropped from Phase-0 gate
 
 - Full L2 book (20+ levels) — **not a Phase-0 requirement under Zero-Cost Mode**
-- Bybit, Binance, OKX, Coinbase, Kraken collectors
+- Bybit, Binance, OKX, Coinbase, Kraken streams — **not required for promotion**
 - Options, macro, whale census (as required streams — kept as optional context only)
 - Any path requiring paid storage or paid compute
 
+### Research context (swing path — optional, recommended)
+
+The swing collector path (`swing_collectors.ps1` / `deploy_swing.sh`) is the
+recommended research setup under Zero-Cost Mode. It adds cross-asset breadth
+and correlation context beyond the Phase-0 gate:
+
+| Stream | Source | Purpose |
+|---|---|---|
+| Bybit BTC/ETH/SOL trades | Bybit WS (credential-free) | Cross-venue correlation, breadth |
+| Whale positions | Hyperliquid on-chain | Liquidation estimation, whale bands |
+| FRED macro | FRED API (if key available) | Regime context |
+
+These are **research data**, not gate-required. The VPS runs both the
+Phase-0 Hyperliquid collectors AND the swing collectors. The daily gate
+only audits `hyperliquid:BTC` and `hyperliquid:ETH`.
+
 ## Storage Budget
 
-### Daily targets (compressed Parquet + ZSTD level >= 6)
+### Daily targets — Phase-0 gate (compressed Parquet + ZSTD level >= 6)
 
 | Data | Estimated daily (compressed) |
 |---|---|
@@ -64,15 +80,24 @@ the signal catalog + accumulation detector.
 | **Total tick-level** | **~215 MB/day** |
 | Bar aggregates (1m/5m/15m/1h/4h) | ~20 MB/day (after 7-14 days) |
 
+### Daily targets — Swing research context (VPS only, additional)
+
+| Data | Estimated daily (compressed) |
+|---|---|
+| Bybit BTC/ETH/SOL trades | ~300 MB |
+| Whale positions | ~10 MB |
+| FRED macro | < 1 MB |
+| **Total swing context** | **~311 MB/day** |
+
 ### 60-day target
 
 | Tier | Contents | Size |
 |---|---|---|
-| Hot (VPS, last 7-14 days) | Tick-level trades + funding + OI | ~3 GB |
+| Hot (VPS, last 7-14 days) | Phase-0 tick-level + swing context | ~7 GB |
 | Warm (VPS or PC, last 30-60 days) | 1m/5m bars + features | ~1.2 GB |
 | Cold (PC only, older) | Daily/4h bars or feature snapshots | < 500 MB |
 
-**Total 60-day footprint: ~4.7 GB** — fits comfortably in 30 GB free-tier.
+**Total 60-day footprint: ~8.7 GB** — fits in 30 GB free-tier with room to spare.
 
 ## Retention Policy
 
@@ -105,6 +130,8 @@ can sustain recording under real free-tier conditions.
 
 ## Collector Configuration
 
+### Phase-0 gate collectors (required)
+
 Zero-Cost Mode uses `swing_only = true` on Hyperliquid collectors:
 
 ```toml
@@ -122,7 +149,21 @@ The `swing_only` flag already:
 - Keeps `trades` (via `trade` subscription)
 - Keeps `activeAssetCtx` (funding + mark + OI)
 
-This is the exact stream set needed for Zero-Cost Mode.
+This is the exact stream set needed for the Phase-0 gate.
+
+### Swing research collectors (recommended, optional)
+
+The swing path adds cross-asset context for research:
+
+```powershell
+# Windows
+.\swing_collectors.ps1
+
+# VPS
+bash ~/mp-build/ops/scripts/deploy_swing.sh
+```
+
+These run alongside the Phase-0 collectors and are NOT gate-required.
 
 ## Signal Compatibility
 

@@ -13,10 +13,12 @@ enough history for signal research and backtesting.
 
 ### Hot (VPS — last 7-14 days)
 
-- **Contents:** Raw tick-level trades, funding, OI, mark_price for BTC + ETH
-- **Format:** Daily event logs (`{YYYYMMDD}_hyperliquid_{SYMBOL}.log`)
+- **Contents:** Raw tick-level data
+  - **Phase-0 gate:** trades, funding, OI, mark_price for BTC + ETH (Hyperliquid)
+  - **Swing research:** trades for BTC/ETH/SOL (Bybit), whale positions, FRED macro
+- **Format:** Daily event logs (`{YYYYMMDD}_hyperliquid_{SYMBOL}.log`, `{YYYYMMDD}_bybit_{SYMBOL}.log`)
 - **Compression:** ZSTD level >= 6 on Parquet compaction
-- **Target size:** ~215 MB/day uncompressed, ~70 MB/day compressed (3:1 ratio)
+- **Target size:** ~526 MB/day uncompressed (Phase-0 ~215 MB + swing ~311 MB)
 - **Retention:** 7 days minimum, 14 days if disk allows
 - **Cleanup:** Automatic via daily pipeline — oldest days deleted when hot tier exceeds budget
 

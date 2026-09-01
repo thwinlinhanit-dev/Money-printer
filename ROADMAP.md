@@ -32,18 +32,24 @@ Under $0 budget / free-tier constraints, Phase-0 is redefined as
 - **Venue:** Hyperliquid only (permissionless, no geo-blocks, no KYC)
 - **Symbols:** BTC + ETH only
 - **Streams:** trades + funding + OI + mark_price (no full L2 book)
-- **Storage:** < 400 MB/day compressed; strict 3-tier retention (hot/warm/cold)
+- **Storage:** < 530 MB/day compressed (Phase-0 ~215 MB + swing ~311 MB); strict 3-tier retention
 - **Promotion:** 14 consecutive clean days, coverage >= 0.95, stale bursts
   are warnings only, full book absence is expected
+
+The swing collector path (`swing_collectors.ps1` / `deploy_swing.sh`) adds
+cross-asset research context (Bybit BTC/ETH/SOL, whale positions, FRED macro)
+alongside the Phase-0 Hyperliquid collectors. These are **not gate-required**
+but provide correlation breadth for signal research.
 
 The original Phase-0 gate (7 consecutive days, coverage >= 0.995, zero
 stale bursts, full book required) is **deferred indefinitely** under current
 constraints. It remains the target if the system moves to a paid VPS or the
 owner obtains Oracle Always Free.
 
-Full L2 book recording, multi-symbol expansion, options, macro, heavy
-whale census, and cross-asset analytics are all deferred until storage is
-proven stable for months on free-tier.
+Full L2 book recording, multi-symbol expansion beyond BTC+ETH+SOL, options,
+heavy whale census, and cross-asset analytics are all deferred until storage
+is proven stable for months on free-tier. Bybit recordings are NOT deferred
+— they are part of the swing research path.
 
 **v1 completion (2026-08-31):** [`docs/COMPLETION-MASTER-PLAN.md`](docs/COMPLETION-MASTER-PLAN.md)
 defines D1–D6. Specs 050–053. Capital remains $0. Live is not in v1.
