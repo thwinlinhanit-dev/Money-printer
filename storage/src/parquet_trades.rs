@@ -22,14 +22,18 @@ pub const KV_SCHEMA_VER: &str = "schema_ver";
 pub const KV_COMPACTOR_VERSION: &str = "compactor_version";
 pub const KV_SOURCE_LOG_HASH: &str = "source_log_hash";
 
-/// Shared footer KV metadata + zstd-3 props for every Parquet writer
+/// Shared footer KV metadata + zstd-6 props for every Parquet writer
 /// (STO-8; specs 028/030/031 writers reuse this so all cold files carry the
 /// same {schema_ver, compactor_version, source_log_hash} contract).
+///
+/// Default level 6 provides ~29% better compression than level 3 on tick
+/// data with minimal CPU overhead — critical for free-tier VPS (30 GB cap).
+/// See docs/ZERO_COST_MODE.md and docs/RETENTION_POLICY.md.
 pub fn writer_properties(
     compactor_version: &str,
     source_log_hash: &str,
 ) -> parquet::file::properties::WriterProperties {
-    writer_properties_with_level(compactor_version, source_log_hash, 3)
+    writer_properties_with_level(compactor_version, source_log_hash, 6)
 }
 
 /// Shared footer KV metadata + configurable zstd compression level.

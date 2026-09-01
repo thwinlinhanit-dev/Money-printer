@@ -143,6 +143,24 @@ if ! grep -q '"promotable": true' "$SCORECARD_PATH"; then
     exit 1
 fi
 
+# --- 1.8 storage-budget watch (OPS-15, spec 001 appendix) ------------------
+# Projects when data/raw growth hits the budget cap and sends a P2 Telegram
+# alert when projected days-to-cap < 14. Best-effort: a failed check is
+# logged but never changes the pipeline exit code.
+if [ -n "${MP_STORAGE_BUDGET_BYTES:-}" ]; then
+    echo "[$(date -u)] Running storage-budget watch (cap=$MP_STORAGE_BUDGET_BYTES)"
+    if "${BIN_DIR}/mp-ops" storage-budget \
+        --dir "${LOG_DIR}/raw" \
+        --cap-bytes "$MP_STORAGE_BUDGET_BYTES" \
+        --telegram; then
+        echo "[$(date -u)] storage-budget: OK"
+    else
+        echo "[$(date -u)] storage-budget: check failed (best-effort, continuing)" >&2
+    fi
+else
+    echo "[$(date -u)] storage-budget: skipped (MP_STORAGE_BUDGET_BYTES not set)"
+fi
+
 # --- 2. Compact only scorecard-approved recordings ---
 for recording in ${RECORDINGS}; do
     VENUE="${recording%%:*}"

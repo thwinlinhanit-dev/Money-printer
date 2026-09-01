@@ -113,9 +113,8 @@ pub struct SignalRecord {
     pub weekly_avg_excess: Vec<f64>,
     pub last_grade_ts_ns: i64,
     pub re_test_interval_ns: i64,
-    /// Whether this signal can be computed from trades + bars only (no full
-    /// L2 book needed). Under Zero-Cost Mode (docs/ZERO_COST_MODE.md), only
-    /// signals with `zero_cost_compatible = true` are registered.
+    /// Whether this signal works under Zero-Cost Mode (no full L2 book).
+    /// Default true; set false for signals requiring L2 depth data.
     #[serde(default = "default_zero_cost_compatible")]
     pub zero_cost_compatible: bool,
 }
@@ -193,6 +192,23 @@ impl SignalRecord {
         self.last_grade_ts_ns = g.created_ts_ns;
         self.stage = next;
         Ok(())
+    }
+
+    /// Read-only decay check for health summaries (no mutation).
+    pub fn would_decay(&self) -> bool {
+        if self.stage == SignalStage::Killed {
+            return false;
+        }
+        if self.weekly_avg_excess.len() < 12 {
+            return false;
+        }
+        let w12: Vec<f64> = self.weekly_avg_excess.iter().rev().take(12).copied().collect();
+        let mean12: f64 = w12.iter().sum::<f64>() / 12.0;
+        if mean12 <= 0.0 {
+            return false;
+        }
+        let mean4: f64 = w12[..4].iter().sum::<f64>() / 4.0;
+        mean4 < 0.5 * mean12
     }
 
     /// SIG-3: decay re-test over the weekly-mean series (RES-3 semantics —

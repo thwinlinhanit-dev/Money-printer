@@ -890,6 +890,165 @@ fn last_log_line(path: &str) -> serde_json::Value {
 ///   --pipeline-log PATH      (default data/scorecards/pipeline.log)
 ///   --backup-manifest PATH   (default: the conventional off-host pull sink)
 ///   --latch PATH             kill-latch file (MP_OPS_KILL_LATCH overrides)
+/// Zero-Cost Mode status (docs/ZERO_COST_MODE.md, REQ-ZCS-1): a single
+/// command answering the daily operator's questions:
+/// - Collectors healthy?
+/// - Disk used / days-to-cap
+/// - Current promotion streak + last clean day
+/// - Any critical alerts
+///
+/// Usage: mp-ops zero-cost-status [--scorecards-dir DIR] [--data-dir DIR]
+///                                  [--cap-bytes N]
+fn cmd_zero_cost_status(args: &[String]) -> Result<String, String> {
+    use mp_ops::storage::{project_storage, sample_daily_sizes};
+    use mp_storage::promotion::ZERO_COST_REQUIRED_CONSECUTIVE_CLEAN_DAYS;
+
+    let scorecards_dir = flag(args, "--scorecards-dir")
+        .unwrap_or_else(|| "data/scorecards".to_string());
+    let data_dir = flag(args, "--data-dir")
+        .unwrap_or_else(|| "data/raw".to_string());
+    let cap_bytes: u64 = flag(args, "--cap-bytes")
+        .and_then(|s| s.parse().ok())
+        .or_else(|| std::env::var("MP_STORAGE_BUDGET_BYTES").ok().and_then(|s| s.parse().ok()))
+        .unwrap_or(30_000_000_000); // 30 GB free-tier default
+
+    let mut status = serde_json::json!({
+        "mode": "zero-cost",
+        "version": mp_core::SCHEMA_VER,
+    });
+
+    // 1. Disk usage: sample daily corpus sizes and project days-to-cap.
+    let now = now_ns();
+    let disk = match sample_daily_sizes(Path::new(&data_dir), now) {
+        Ok(samples) => {
+            let proj = project_storage(&samples, cap_bytes, 7);
+            serde_json::json!({
+                "data_dir": data_dir,
+                "cap_bytes": cap_bytes,
+                "current_bytes": proj.as_ref().map(|p| p.current_bytes),
+                "growth_bytes_per_day": proj.as_ref().and_then(|p| p.growth_bytes_per_day),
+                "days_to_cap": proj.as_ref().and_then(|p| p.days_to_cap),
+            })
+        }
+        Err(e) => serde_json::json!({ "error": e }),
+    };
+    status["disk"] = disk;
+
+    // 2. Promotion streak: load scorecards and run zero-cost promotion check.
+    let promotion = match load_scorecards(&scorecards_dir, &BTreeSet::new()) {
+        Ok(files) if files.is_empty() => serde_json::json!({
+            "streak": 0,
+            "required": ZERO_COST_REQUIRED_CONSECUTIVE_CLEAN_DAYS,
+            "last_clean_day": null,
+            "note": "no scorecards yet",
+        }),
+        Ok(files) => {
+            let artifacts = load_determinism_artifacts(&scorecards_dir, &files)
+                .unwrap_or_default();
+            let (verdict, _) = promotion_verdict_zero_cost(&files, &BTreeSet::new(), &artifacts);
+            let last_clean = files.iter().rev()
+                .find(|f| f.promotable)
+                .map(|f| f.date.as_str());
+            serde_json::json!({
+                "streak": verdict.consecutive_clean,
+                "required": verdict.required,
+                "promoted": verdict.promoted,
+                "window_start": verdict.window_start,
+                "window_end": verdict.window_end,
+                "last_clean_day": last_clean,
+                "determinism_ok": verdict.determinism_ok,
+            })
+        }
+        Err(e) => serde_json::json!({ "error": e }),
+    };
+    status["promotion"] = promotion;
+
+    // 3. Collector health: check for running mp-collector processes.
+    let collectors = {
+        let mut names = Vec::new();
+        // Check for common collector binary names.
+        for bin in &["mp-collector", "mp-whale"] {
+            let running = std::process::Command::new("pgrep")
+                .arg("-x")
+                .arg(bin)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            names.push(serde_json::json!({
+                "name": bin,
+                "running": running,
+            }));
+        }
+        serde_json::json!({ "processes": names })
+    };
+    status["collectors"] = collectors;
+
+    // 4. Pipeline health: last scorecard date + days since.
+    let pipeline = {
+        let pipeline_log = flag(args, "--pipeline-log")
+            .unwrap_or_else(|| "data/scorecards/pipeline.log".to_string());
+        let last_line = last_log_line(&pipeline_log);
+        serde_json::json!({
+            "last_log_line": last_line,
+        })
+    };
+    status["pipeline"] = pipeline;
+
+    // 5. Critical alerts: retention violations, disk high, etc.
+    let alerts = {
+        let mut alert_list = Vec::new();
+        // Check if raw dir exceeds 14 days (retention violation).
+        if let Ok(raw_dir) = std::fs::read_dir(&data_dir) {
+            let cutoff = now - (14 * 86_400_000_000_000_i64);
+            let mut old_count = 0u64;
+            let mut old_bytes = 0u64;
+            for entry in raw_dir.flatten() {
+                if entry.path().extension().map_or(false, |e| e == "log") {
+                    if let Ok(meta) = entry.metadata() {
+                        let mtime = meta.modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos() as i64)
+                            .unwrap_or(0);
+                        if mtime < cutoff {
+                            old_count += 1;
+                            old_bytes += meta.len();
+                        }
+                    }
+                }
+            }
+            if old_count > 0 {
+                alert_list.push(serde_json::json!({
+                    "severity": "warn",
+                    "code": "RETENTION_VIOLATION",
+                    "detail": format!("{} raw log(s) older than 14 days ({} bytes) — retention enforcement may not be running", old_count, old_bytes),
+                }));
+            }
+        }
+        // Check if promotion is blocked by determinism.
+        if let Some(prom) = status.get("promotion") {
+            if prom.get("determinism_ok") == Some(&serde_json::Value::Bool(false)) {
+                alert_list.push(serde_json::json!({
+                    "severity": "warn",
+                    "code": "DETERMINISM_FAILURE",
+                    "detail": "determinism check failing — promotion blocked",
+                }));
+            }
+            if prom.get("streak") == Some(&serde_json::json!(0)) {
+                alert_list.push(serde_json::json!({
+                    "severity": "info",
+                    "code": "NO_STREAK",
+                    "detail": "no promotion streak yet",
+                }));
+            }
+        }
+        serde_json::json!({ "count": alert_list.len(), "alerts": alert_list })
+    };
+    status["alerts"] = alerts;
+
+    serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
+}
+
 fn cmd_status(args: &[String]) -> Result<String, String> {
     let score_dir = flag(args, "--scorecards-dir").unwrap_or_else(|| "data/scorecards".to_string());
     let required = flags(args, "--required")
@@ -2139,7 +2298,7 @@ fn main() -> ExitCode {
     if args.len() < 2 {
         eprintln!("Usage: mp-ops <subcommand> [options]");
         eprintln!(
-            "Subcommands: compact, audit, scorecard, promote, status, check-config, pipeline-stale, band-accuracy-decay, telegram-flush, telegram-stale, storage-budget, telegram-send, p1-webhook"
+            "Subcommands: compact, audit, scorecard, promote, status, zero-cost-status, check-config, pipeline-stale, band-accuracy-decay, telegram-flush, telegram-stale, storage-budget, telegram-send, p1-webhook"
         );
         return ExitCode::FAILURE;
     }
@@ -2151,6 +2310,7 @@ fn main() -> ExitCode {
         "promote" => cmd_promote(&args[2..]),
         "band-accuracy-decay" => cmd_band_accuracy_decay(&args[2..]),
         "status" => cmd_status(&args[2..]),
+        "zero-cost-status" => cmd_zero_cost_status(&args[2..]),
         "check-config" => cmd_check_config(&args[2..]),
         "pipeline-stale" => cmd_pipeline_stale(&args[2..]),
         "telegram-flush" => cmd_telegram_flush(&args[2..]),

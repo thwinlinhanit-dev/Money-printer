@@ -62,11 +62,11 @@ fn run() -> Result<ExitCode, String> {
         .find(|a| {
             matches!(
                 a.as_str(),
-                "register" | "list" | "grade" | "retest" | "kill"
+                "register" | "list" | "grade" | "retest" | "kill" | "health"
             )
         })
         .cloned()
-        .ok_or("usage: signals --file <catalog.json> register|list|grade|retest|kill …")?;
+        .ok_or("usage: signals --file <catalog.json> register|list|grade|retest|kill|health …")?;
     let mut catalog = load(Path::new(&file))?;
 
     match cmd.as_str() {
@@ -81,9 +81,18 @@ fn run() -> Result<ExitCode, String> {
             println!("registered {id} (Hypothesis): {hypothesis} [params {params_hash}]");
         }
         "list" => {
-            for s in &catalog.signals {
+            // Zero-Cost Mode (docs/ZERO_COST_MODE.md): --zero-cost filters
+            // to only zero_cost_compatible signals.
+            let zero_cost_only = args.iter().any(|a| a == "--zero-cost");
+            let filtered: Vec<_> = catalog.signals.iter()
+                .filter(|s| !zero_cost_only || s.zero_cost_compatible)
+                .collect();
+            if zero_cost_only {
+                println!("Zero-Cost compatible signals ({}):", filtered.len());
+            }
+            for s in &filtered {
                 println!(
-                    "{:?} {:10} grades={} last={} weekly={} re-test_due={}",
+                    "{:?} {:10} grades={} last={} weekly={} re-test_due={} zc={}",
                     s.stage,
                     s.id,
                     s.grades.len(),
@@ -93,7 +102,8 @@ fn run() -> Result<ExitCode, String> {
                         s.last_grade_ts_ns.to_string()
                     },
                     s.weekly_avg_excess.len(),
-                    s.re_test_due(now_ns(&args)?)
+                    s.re_test_due(now_ns(&args)?),
+                    s.zero_cost_compatible,
                 );
             }
         }
@@ -159,6 +169,36 @@ fn run() -> Result<ExitCode, String> {
             rec.kill(why).map_err(|e| format!("kill {id}: {e}"))?;
             save(Path::new(&file), &catalog)?;
             println!("{id} killed (terminal)");
+        }
+        "health" => {
+            // Weekly Signal Health summary (Phase C13): graded, decayed,
+            // sample counts, zero-cost compatibility. Graded = at least 1
+            // grade. Decay = detect_decay() true. Stale = re_test_due() true.
+            let now = now_ns(&args)?;
+            let zero_cost_only = args.iter().any(|a| a == "--zero-cost");
+            let signals: Vec<_> = catalog.signals.iter()
+                .filter(|s| !zero_cost_only || s.zero_cost_compatible)
+                .collect();
+            let total = signals.len();
+            let graded = signals.iter().filter(|s| !s.grades.is_empty()).count();
+            let decayed = signals.iter().filter(|s| s.would_decay()).count();
+            let stale = signals.iter().filter(|s| s.re_test_due(now)).count();
+            let compatible = signals.iter().filter(|s| s.zero_cost_compatible).count();
+            println!("Signal Health Summary{}:", if zero_cost_only { " (Zero-Cost)" } else { "" });
+            println!("  Total: {total}  Graded: {graded}  Decayed: {decayed}  Stale: {stale}  Zero-Cost compatible: {compatible}");
+            if decayed > 0 {
+                println!("  Decayed signals:");
+                for s in signals.iter().filter(|s| s.would_decay()) {
+                    let last = if s.last_grade_ts_ns == 0 { "never".into() } else { s.last_grade_ts_ns.to_string() };
+                    println!("    {} (stage {:?}, last_grade={})", s.id, s.stage, last);
+                }
+            }
+            if stale > 0 {
+                println!("  Stale (re-test due):");
+                for s in signals.iter().filter(|s| s.re_test_due(now)) {
+                    println!("    {} (grades={}, zc={})", s.id, s.grades.len(), s.zero_cost_compatible);
+                }
+            }
         }
         other => return Err(format!("unknown command {other}")),
     }

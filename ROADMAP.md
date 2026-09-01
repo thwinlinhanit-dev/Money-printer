@@ -54,17 +54,31 @@ is proven stable for months on free-tier. Bybit recordings are NOT deferred
 **v1 completion (2026-08-31):** [`docs/COMPLETION-MASTER-PLAN.md`](docs/COMPLETION-MASTER-PLAN.md)
 defines D1–D6. Specs 050–053. Capital remains $0. Live is not in v1.
 
-**Current status:** Phase 0 in progress — last archived scorecard **2026-08-24**;
-gate blind 08-25..08-30. Live **Hyperliquid** recorder (BTC, ETH) since 2026-08-08.
-VPS drain `ssh_failed` and compact 0-row parquet are spec 050. Workspace +
-collectors + sim/research stack built. Binance futures WS non-book streams are
-egress-filtered from this network (spec 024 — Hyperliquid's permissionless API
-is not geo-blocked; see `ops/core_symbols.txt`). The daily integrity gate is
-automated (`MoneyPrinterDailyPipeline`) but was not landing scorecards after
-08-24. The Phase-0 core symbol set is a single source of truth
-(`ops/core_symbols.txt`, `hyperliquid:BTC`/`hyperliquid:ETH`). Validation
-gate (7 consecutive clean days, coverage ≥ 0.995, burst-free window) not yet
-met. Historical notes from 2026-08-12 onward remain below.
+**Current status:** Phase 0 is **Zero-Cost Mode** (see `docs/ZERO_COST_MODE.md`).
+Live **Hyperliquid** recorder (BTC, ETH) since 2026-08-08. Last archived
+scorecard **2026-08-24**; gate blind 08-25..08-30. Zero-Cost Mode is the
+**active Phase-0 path** under $0 budget constraints:
+
+- **Venue:** Hyperliquid only (permissionless, no geo-blocks, no KYC)
+- **Symbols:** BTC + ETH only
+- **Streams:** trades + funding + OI + mark_price (no full L2 book)
+- **Promotion:** 14 consecutive clean days, coverage ≥ 0.95, stale bursts
+  are warnings only, full book absence is expected
+- **Retention:** 14-day hot-tier pruning (raw logs), ZSTD ≥ 6 compression
+- **Daily pipeline:** `daily_maintenance.sh` (VPS, `ZERO_COST=1` default)
+  and `daily_pipeline.ps1` (Windows, `$env:ZERO_COST=1` default)
+
+The original Phase-0 gate (7 consecutive days, coverage ≥ 0.995, zero
+stale bursts, full book required) is **deferred indefinitely** under current
+constraints. It remains the target if the system moves to a paid VPS.
+
+Workspace + collectors + sim/research stack built. Binance futures WS
+non-book streams are egress-filtered from this network (spec 024 —
+Hyperliquid's permissionless API is not geo-blocked; see
+`ops/core_symbols.txt`). The daily integrity gate is automated
+(`MoneyPrinterDailyPipeline` / `daily_maintenance.sh`). The Phase-0 core
+symbol set is a single source of truth (`ops/core_symbols.txt`,
+`hyperliquid:BTC`/`hyperliquid:ETH`).
 
 The ~3h20m-periodic WS burst on both symbols is a real data hole on the
 VPN/Wi-Fi path, NOT a collector defect (see `ops/runbooks/daily-pipeline.md`;

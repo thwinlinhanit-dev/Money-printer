@@ -101,9 +101,10 @@ pub fn write_features(
     .map_err(|e| StorageError::Arrow(e.to_string()))?;
 
     let props = WriterProperties::builder()
-        // SAFETY: zstd level 3 is within the crate's valid range, so
-        // `ZstdLevel::try_new(3)` cannot fail (CONV-13).
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+        // SAFETY: zstd level 6 is within the crate's valid range, so
+        // `ZstdLevel::try_new(6)` cannot fail (CONV-13).
+        // Level 6 provides ~29% better compression on tick data (docs/ZERO_COST_MODE.md).
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(6).unwrap()))
         .set_key_value_metadata(Some(vec![
             KeyValue::new(KV_FEATURE_VER.into(), meta.feature_ver.to_string()),
             KeyValue::new(KV_ENGINE_GIT_SHA.into(), meta.engine_git_sha.clone()),
