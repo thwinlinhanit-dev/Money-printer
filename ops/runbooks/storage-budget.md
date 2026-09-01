@@ -35,11 +35,11 @@ files, and the same P2 fires regardless of the growth projection.
 - Recording host (Windows): `MP_STORAGE_BUDGET_BYTES=40000000000` (40 GB) —
   the master corpus (22.4 GB, ~0.62 GB/day).
 - VPS relay (`env MP_VPS_HOST` / `-VpsHost` at runtime, never committed — PD-2,
-  audit M-1): `MP_STORAGE_BUDGET_BYTES=15000000000` (15 GB)
-  in `/etc/money-printer/ops.env`, daily 01:30 UTC via
-  `storage-budget.timer` (28 GB disk; no automated pull yet, so the relay
-  corpus accumulates). VPS verdicts land in journald (`telegram:none` — no
-  creds there); the Windows pipeline hook is the telegram sender.
+  audit M-1): `MP_STORAGE_BUDGET_BYTES=30000000000` (30 GB)
+  in `/etc/money-printer/ops.env`, daily 06:00 UTC via cron
+  (see `ops/runbooks/zero-cost-mode.md` for crontab entry). VPS verdicts
+  land in journald and Telegram (`--telegram`). With `ZERO_COST=1`, the
+  daily pipeline auto-prunes raw logs > 14 days.
 - Re-run the projection by hand (the budget is explicit config):
   `mp-ops storage-budget --cap-bytes <N> --telegram` with
   `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` set (or `--cap-bytes` matching the

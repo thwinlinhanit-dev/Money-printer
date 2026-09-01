@@ -544,6 +544,22 @@ mod tests {
         path
     }
 
+    fn clean_audit() -> RawLogAudit {
+        RawLogAudit {
+            event_count: 100,
+            first_recv_ts_ns: Some(1),
+            last_recv_ts_ns: Some(1_000_000_000),
+            coverage: 1.0,
+            streams: BTreeMap::new(),
+            gaps: vec![],
+            stale_periods: vec![],
+            stale_bursts: vec![],
+            stale_silences_ms: vec![],
+            worst_gap_ns: 0,
+            findings: vec![],
+        }
+    }
+
     #[test]
     fn int_1_event_provenance_roundtrips() {
         let path = fixture(vec![event(1)]);
@@ -874,5 +890,81 @@ mod tests {
             ],
         );
         assert!(!card.promotable);
+    }
+
+    // ---- Zero-Cost Mode audit tests (docs/ZERO_COST_MODE.md) --------------------
+
+    #[test]
+    fn zero_cost_clean_at_095_coverage() {
+        let audit = RawLogAudit {
+            event_count: 100,
+            coverage: 0.95,
+            ..clean_audit()
+        };
+        assert!(audit.is_clean_zero_cost(), "0.95 coverage must pass Zero-Cost");
+    }
+
+    #[test]
+    fn zero_cost_clean_above_095_coverage() {
+        let audit = RawLogAudit {
+            event_count: 100,
+            coverage: 0.999,
+            ..clean_audit()
+        };
+        assert!(audit.is_clean_zero_cost(), ">0.95 coverage must pass Zero-Cost");
+    }
+
+    #[test]
+    fn zero_cost_dirty_below_095_coverage() {
+        let audit = RawLogAudit {
+            event_count: 100,
+            coverage: 0.94,
+            ..clean_audit()
+        };
+        assert!(!audit.is_clean_zero_cost(), "<0.95 coverage must fail Zero-Cost");
+    }
+
+    #[test]
+    fn zero_cost_dirty_with_blocking_finding() {
+        let audit = RawLogAudit {
+            event_count: 100,
+            coverage: 0.98,
+            findings: vec![finding("sequence_gap", "3 gap(s)")],
+            ..clean_audit()
+        };
+        assert!(!audit.is_clean_zero_cost(), "blocking finding must fail Zero-Cost");
+    }
+
+    #[test]
+    fn zero_cost_clean_with_warning_finding() {
+        let audit = RawLogAudit {
+            event_count: 100,
+            coverage: 0.96,
+            findings: vec![finding("stale_stream", "2 stale status event(s)")],
+            ..clean_audit()
+        };
+        assert!(audit.is_clean_zero_cost(), "warning finding must pass Zero-Cost");
+    }
+
+    #[test]
+    fn zero_cost_dirty_with_zero_events() {
+        let audit = RawLogAudit {
+            event_count: 0,
+            coverage: 0.0,
+            ..clean_audit()
+        };
+        assert!(!audit.is_clean_zero_cost(), "zero events must fail Zero-Cost");
+    }
+
+    /// Full-mode 0.95 coverage must FAIL (threshold is 0.995).
+    #[test]
+    fn full_mode_rejects_095_coverage() {
+        let audit = RawLogAudit {
+            event_count: 100,
+            coverage: 0.95,
+            ..clean_audit()
+        };
+        assert!(!audit.is_clean(), "0.95 coverage must fail full-mode (needs 0.995)");
+        assert!(audit.is_clean_zero_cost(), "0.95 coverage must pass Zero-Cost");
     }
 }

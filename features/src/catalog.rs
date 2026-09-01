@@ -870,3 +870,235 @@ impl BarFeature for DonchianBreakout {
         }
     }
 }
+
+// ---- footprint signal catalog (spec 049) -----------------------------------
+
+/// `footprint.volume.bubble.{tf}` — volume percentile rank over a rolling
+/// window. High values (>80) indicate volume climaxes; low values (<20)
+/// indicate volume dry-ups. Emits on bar close.
+pub struct VolumeBubble {
+    tf: String,
+    window: usize,
+    volumes: VecDeque<f64>,
+}
+impl VolumeBubble {
+    pub fn new(tf: &str, window: usize) -> Self {
+        Self {
+            tf: tf.to_owned(),
+            window,
+            volumes: VecDeque::new(),
+        }
+    }
+}
+impl BarFeature for VolumeBubble {
+    fn id(&self) -> String {
+        format!("footprint.volume.bubble.{}", self.tf)
+    }
+    fn warm(&self) -> bool {
+        self.volumes.len() >= self.window
+    }
+    fn on_bar(&mut self, bar: &Bar) -> Option<f64> {
+        self.volumes.push_back(bar.vol);
+        while self.volumes.len() > self.window {
+            self.volumes.pop_front();
+        }
+        if !self.warm() {
+            return None;
+        }
+        // Count how many volumes in window are less than current
+        let current = bar.vol;
+        let rank = self.volumes.iter().filter(|&&v| v < current).count() as f64;
+        Some(rank / self.window as f64 * 100.0)
+    }
+}
+
+/// `footprint.market.profile.poc.{tf}` — Point of Control: price level with
+/// highest volume over a rolling window. Emits on bar close.
+pub struct MarketProfilePoc {
+    tf: String,
+    window: usize,
+    bars: VecDeque<Bar>,
+    bucket_atr: f64,
+}
+impl MarketProfilePoc {
+    pub fn new(tf: &str, window: usize, bucket_atr: f64) -> Self {
+        Self {
+            tf: tf.to_owned(),
+            window,
+            bars: VecDeque::new(),
+            bucket_atr,
+        }
+    }
+}
+impl BarFeature for MarketProfilePoc {
+    fn id(&self) -> String {
+        format!("footprint.market.profile.poc.{}", self.tf)
+    }
+    fn warm(&self) -> bool {
+        self.bars.len() >= self.window
+    }
+    fn on_bar(&mut self, bar: &Bar) -> Option<f64> {
+        self.bars.push_back(bar.clone());
+        while self.bars.len() > self.window {
+            self.bars.pop_front();
+        }
+        if !self.warm() {
+            return None;
+        }
+        // Build volume profile: distribute volume across price buckets
+        let mut profile: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
+        let bucket_size = self.bucket_atr;
+        for b in self.bars.iter() {
+            let mid = (b.high + b.low) / 2.0;
+            let bucket = (mid / bucket_size).floor() as i64;
+            *profile.entry(bucket).or_insert(0.0) += b.vol;
+        }
+        // Find POC (bucket with highest volume)
+        profile
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(&bucket, _)| bucket as f64 * bucket_size + bucket_size / 2.0)
+    }
+}
+
+/// `footprint.market.profile.vah.{tf}` — Value Area High: upper boundary of
+/// 70% volume concentration. Emits on bar close.
+pub struct MarketProfileVah {
+    tf: String,
+    window: usize,
+    bars: VecDeque<Bar>,
+    bucket_atr: f64,
+}
+impl MarketProfileVah {
+    pub fn new(tf: &str, window: usize, bucket_atr: f64) -> Self {
+        Self {
+            tf: tf.to_owned(),
+            window,
+            bars: VecDeque::new(),
+            bucket_atr,
+        }
+    }
+}
+impl BarFeature for MarketProfileVah {
+    fn id(&self) -> String {
+        format!("footprint.market.profile.vah.{}", self.tf)
+    }
+    fn warm(&self) -> bool {
+        self.bars.len() >= self.window
+    }
+    fn on_bar(&mut self, bar: &Bar) -> Option<f64> {
+        self.bars.push_back(bar.clone());
+        while self.bars.len() > self.window {
+            self.bars.pop_front();
+        }
+        if !self.warm() {
+            return None;
+        }
+        // Build volume profile
+        let mut profile: Vec<(f64, f64)> = Vec::new();
+        let bucket_size = self.bucket_atr;
+        for b in self.bars.iter() {
+            let mid = (b.high + b.low) / 2.0;
+            let bucket = (mid / bucket_size).floor() as f64 * bucket_size + bucket_size / 2.0;
+            if let Some(entry) = profile.iter_mut().find(|(k, _)| (*k - bucket).abs() < 1e-9) {
+                entry.1 += b.vol;
+            } else {
+                profile.push((bucket, b.vol));
+            }
+        }
+        // Sort by price
+        profile.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // Find POC and expand to 70% volume
+        let total_vol: f64 = profile.iter().map(|(_, v)| v).sum();
+        let target_vol = total_vol * 0.7;
+        let poc_idx = profile.iter().enumerate().max_by(|a, b| a.1.1.partial_cmp(&b.1.1).unwrap_or(std::cmp::Ordering::Equal)).map(|(i, _)| i).unwrap_or(0);
+        let mut vol_sum = profile[poc_idx].1;
+        let mut high_idx = poc_idx;
+        let mut low_idx = poc_idx;
+        while vol_sum < target_vol && (high_idx < profile.len() - 1 || low_idx > 0) {
+            let up_vol = if high_idx < profile.len() - 1 { profile[high_idx + 1].1 } else { 0.0 };
+            let dn_vol = if low_idx > 0 { profile[low_idx - 1].1 } else { 0.0 };
+            if up_vol >= dn_vol && high_idx < profile.len() - 1 {
+                high_idx += 1;
+                vol_sum += profile[high_idx].1;
+            } else if low_idx > 0 {
+                low_idx -= 1;
+                vol_sum += profile[low_idx].1;
+            } else {
+                break;
+            }
+        }
+        Some(profile[high_idx].0)
+    }
+}
+
+/// `footprint.market.profile.val.{tf}` — Value Area Low: lower boundary of
+/// 70% volume concentration. Emits on bar close.
+pub struct MarketProfileVal {
+    tf: String,
+    window: usize,
+    bars: VecDeque<Bar>,
+    bucket_atr: f64,
+}
+impl MarketProfileVal {
+    pub fn new(tf: &str, window: usize, bucket_atr: f64) -> Self {
+        Self {
+            tf: tf.to_owned(),
+            window,
+            bars: VecDeque::new(),
+            bucket_atr,
+        }
+    }
+}
+impl BarFeature for MarketProfileVal {
+    fn id(&self) -> String {
+        format!("footprint.market.profile.val.{}", self.tf)
+    }
+    fn warm(&self) -> bool {
+        self.bars.len() >= self.window
+    }
+    fn on_bar(&mut self, bar: &Bar) -> Option<f64> {
+        self.bars.push_back(bar.clone());
+        while self.bars.len() > self.window {
+            self.bars.pop_front();
+        }
+        if !self.warm() {
+            return None;
+        }
+        // Build volume profile
+        let mut profile: Vec<(f64, f64)> = Vec::new();
+        let bucket_size = self.bucket_atr;
+        for b in self.bars.iter() {
+            let mid = (b.high + b.low) / 2.0;
+            let bucket = (mid / bucket_size).floor() as f64 * bucket_size + bucket_size / 2.0;
+            if let Some(entry) = profile.iter_mut().find(|(k, _)| (*k - bucket).abs() < 1e-9) {
+                entry.1 += b.vol;
+            } else {
+                profile.push((bucket, b.vol));
+            }
+        }
+        // Sort by price
+        profile.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // Find POC and expand to 70% volume
+        let total_vol: f64 = profile.iter().map(|(_, v)| v).sum();
+        let target_vol = total_vol * 0.7;
+        let poc_idx = profile.iter().enumerate().max_by(|a, b| a.1.1.partial_cmp(&b.1.1).unwrap_or(std::cmp::Ordering::Equal)).map(|(i, _)| i).unwrap_or(0);
+        let mut vol_sum = profile[poc_idx].1;
+        let mut high_idx = poc_idx;
+        let mut low_idx = poc_idx;
+        while vol_sum < target_vol && (high_idx < profile.len() - 1 || low_idx > 0) {
+            let up_vol = if high_idx < profile.len() - 1 { profile[high_idx + 1].1 } else { 0.0 };
+            let dn_vol = if low_idx > 0 { profile[low_idx - 1].1 } else { 0.0 };
+            if up_vol >= dn_vol && high_idx < profile.len() - 1 {
+                high_idx += 1;
+                vol_sum += profile[high_idx].1;
+            } else if low_idx > 0 {
+                low_idx -= 1;
+                vol_sum += profile[low_idx].1;
+            } else {
+                break;
+            }
+        }
+        Some(profile[low_idx].0)
+    }
+}

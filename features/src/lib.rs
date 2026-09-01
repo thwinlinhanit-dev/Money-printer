@@ -203,9 +203,8 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
     // Tape micro-stats: per-trade bps delta (tick) + per-bar TPS (bar).
     let min_bps = cfg.tape.min_bps_delta;
     e.register_tick(move || Box::new(TapeBpsDelta::new(min_bps)));
-    let (tf_secs, tf) = (cfg.bar_tf_ns / 1_000_000_000, cfg.bar_tf_ns / 1_000_000_000);
-    let tf_secs = tf_secs as f64;
-    let tf = format!("{tf}s");
+    let tf_secs = cfg.bar_tf_ns as f64 / 1_000_000_000.0;
+    let tf = format!("{}s", cfg.bar_tf_ns / 1_000_000_000);
     e.register_bar(move || Box::new(TapeTps::new(&tf, tf_secs)));
     // Swing HTF regime/structure (spec 035 SWG-2): bar-only realized vol,
     // signed trend strength, value area (POC/high/low) and rolling VWAP —
@@ -495,6 +494,23 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
         e.register_bar(move || Box::new(AbsorptionBar::new(v5.clone())));
         let v6 = cfg.climax_variants.v6.clone();
         e.register_bar(move || Box::new(VolExpansion::new(v6.clone())));
+    }
+    // Footprint signal catalog (spec 049): volume.bubble + market.profile.
+    // Bar features — per-symbol (bar state is symbol-local).
+    // Disabled when `enabled` is false.
+    if cfg.footprint_signals.enabled {
+        let tf = format!("{}s", cfg.bar_tf_ns / 1_000_000_000);
+        let bubble_window = cfg.footprint_signals.volume_bubble_window;
+        let bubble_tf = tf.clone();
+        e.register_bar(move || Box::new(crate::catalog::VolumeBubble::new(&bubble_tf, bubble_window)));
+        let profile_window = cfg.footprint_signals.market_profile_window;
+        let profile_tf = tf.clone();
+        let profile_bucket_atr = cfg.footprint_signals.market_profile_bucket_atr;
+        e.register_bar(move || Box::new(crate::catalog::MarketProfilePoc::new(&profile_tf, profile_window, profile_bucket_atr)));
+        let profile_tf = tf.clone();
+        e.register_bar(move || Box::new(crate::catalog::MarketProfileVah::new(&profile_tf, profile_window, profile_bucket_atr)));
+        let profile_tf = tf.clone();
+        e.register_bar(move || Box::new(crate::catalog::MarketProfileVal::new(&profile_tf, profile_window, profile_bucket_atr)));
     }
     Ok(e)
 }

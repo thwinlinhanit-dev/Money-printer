@@ -57,12 +57,21 @@ should be updated).
 | 046 | [DeFiLlama Regime Collector](046-defillama-regime-collector.md) | data plane | 🔨 implementing (DEF-1..8; normalizer + `mp-defillama` binary + fixtures; def_1..def_7 + def_malformed tests pass; cold-store write + watermark tests pending live integration) |
 | 047 | [Coinalyze Cross-Exchange Validation Collector](047-coinalyze-validation-collector.md) | data plane | 🔨 implementing (COZ-1..10; normalizer + `mp-coinalyze` binary + fixtures; coz_1..coz_9 + coz_rest + coz_5_pacer tests pass; cold-store write + watermark tests pending live integration) |
 | 048 | [Cross-Asset Correlation Feature](048-cross-asset-correlation.md) | intelligence | 🔨 implementing (COR-1..7; `corr.rs` + `CorrFeature` + engine registration; cor_1..cor_7 + proptest + cor_3 wiring test pass; regime wiring: `CorrRegimeFeature` + `regime_fit_from_features` extended with corr labels; 10 pairs incl. DeFiLlama/Coinalyze; cor_regime_* tests pass) |
+| 049 | [Footprint Signal Catalog](049-footprint-signal-catalog.md) | intelligence | 📝 draft — **not on v1 critical path** (`docs/COMPLETION-MASTER-PLAN.md`) |
+| 050 | [Lab Continuity](050-lab-continuity.md) | ops | ✅ implemented — LAB-1..10 all landed + tests lab_1..10 |
+| 051 | [Daily Paper Rehearsal](051-paper-rehearsal.md) | execution | ✅ implemented — daily_paper.ps1 + pipeline (PAP-1..9/10); PAP-8 slice B deferred |
+| 052 | [Operator Console](052-operator-console.md) | decision plane | ✅ implemented — /v1/status in termd.py (CON-1..7) |
+| 053 | [Alpha Program](053-alpha-program.md) | intelligence | ✅ implemented — ALP-1..9 all landed + tests alp_1..9 |
 
 Status values: `draft` → `ready` (implementable) → `implementing` →
 `implemented` → `superseded`. Update this table in the same commit as the work
 (rule W-7).
 
-**Recommended implementation order:** 001 → 002 → 003 → 005(L0) → 004 → 006 →
+**v1 completion order (2026-08-31):** 050 → 024 (burst-free week) → 051 →
+052 → 053. See [`docs/COMPLETION-MASTER-PLAN.md`](../docs/COMPLETION-MASTER-PLAN.md).
+Specs 011–023, 032, 037–040, 049 are **not** v1 blockers.
+
+**Recommended implementation order (historical):** 001 → 002 → 003 → 005(L0) → 004 → 006 →
 005(L1) → 008 → 007 → 009. Vertical slices beat horizontal completeness (W-4).
 Newer specs (012–023) are Phase 2+ and do not block Phase 0.
 
@@ -94,7 +103,7 @@ RES, UI, ZCP (012), BKP (013), FSP (014), MAT (016), GRD (017), MOD (018),
 INT (024), WHL (028), MAC (030), OPT (031), BDC (001 codec amendment), MSC (032),
 WAL (033), NFL (034), SWG (035), SLQ (036), GRE (037), IVS (038), OFI (039),
 IBI (040), TER (041), WCG (042), CFV (043), TOK (044), ACC (045), DEF (046),
-COZ (047), COR (048).
+COZ (047), COR (048), LAB (050), PAP (051), CON (052), ALP (053).
 
 ## How to implement a spec
 

@@ -491,7 +491,7 @@ pub struct SymbolRow {
 /// no-op; a different table under the same hash would be a collision and is
 /// refused. `hash`/`json` come from the caller so the hash is available to the
 /// Parquet footers before the file is persisted.
-fn write_symbols_snapshot_file(root: &Path, hash: &str, json: &[u8]) -> Result<(), String> {
+pub fn write_symbols_snapshot_file(root: &Path, hash: &str, json: &[u8]) -> Result<(), String> {
     let dir = root.join("symbols");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join(format!("{hash}.json"));

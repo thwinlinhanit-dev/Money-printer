@@ -137,7 +137,25 @@ def test_render_benchmark_unset_without_policy(tmp_path):
     runs, reg = _setup(tmp_path)
     missing = tmp_path / "no" / "policy.md"
     report = wr.render("2026-W34", reg, runs, tmp_path / "autopsies", missing)
-    assert "unset (1.1 pending)" in report
+    # ALP-8: "unset (1.1 pending)" is no longer rendered; the text now says
+    # the file is missing, not "pending" — a missing policy is a bug, not a
+    # pending decision.
+    assert "unset" in report
+    assert "OWNER_POLICY.md missing" in report
+
+
+def test_alp_8_policy_exists_but_unparseable_is_flagged_as_bug(tmp_path):
+    """ALP-8: when OWNER_POLICY.md exists but benchmark fields can't be
+    parsed, the report must flag this as a code defect, not render 'unset'".
+    """
+    runs, reg = _setup(tmp_path)
+    # Policy file exists but has no benchmark table.
+    bad_policy = tmp_path / "OWNER_POLICY.md"
+    bad_policy.write_text("# Empty policy\n", encoding="utf-8")
+    report = wr.render("2026-W34", reg, runs, tmp_path / "autopsies", bad_policy)
+    assert "unset" in report
+    assert "BUG" in report
+    assert "ALP-8" in report
 
 
 def test_render_lists_autopsies(tmp_path):

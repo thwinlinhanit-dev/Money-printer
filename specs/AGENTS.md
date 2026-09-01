@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Design specification documents (000–048) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
+Design specification documents (000–053) defining the system architecture, data schemas, protocols, behaviors, and invariants. Every crate references its governing specs.
 
 ## Ownership
 
@@ -56,6 +56,11 @@ Design specification documents (000–048) defining the system architecture, dat
 - `046-defillama-regime-collector.md` — DeFiLlama regime collector: keyless stablecoin-supply + TVL + DEX-vol, third macro pillar (DEF requirements)
 - `047-coinalyze-validation-collector.md` — Coinalyze cross-exchange validation collector: OI/funding/liq/long-short, validation not alpha (COZ requirements)
 - `048-cross-asset-correlation.md` — cross-asset correlation feature: BTC-ETH-Gold-SPX from own recorded prices (COR requirements)
+- `049-footprint-signal-catalog.md` — footprint catalog (draft; not v1)
+- `050-lab-continuity.md` — daily gate/drain/storage home (v1 P0)
+- `051-paper-rehearsal.md` — scheduled paper sessions (v1 P2)
+- `052-operator-console.md` — localhost operator UI (v1 P3)
+- `053-alpha-program.md` — research WIP limit and queue (v1 P4)
 
 ## Local Contracts
 

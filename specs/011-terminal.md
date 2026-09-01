@@ -147,6 +147,10 @@ this spec, never the internal storage layout.
      their Parquet (v1 Parquet is trades-only per spec 003 Decision).
   4. No browser WASM in v1 — the WASM/egui renderer remains Phase 7 (UI-4
      deferred; read-only `histd` builds first).
+  5. **2026-08-31:** Daily operator UI is spec 052 (localhost status), not
+     this spec. Completing the app for v1 does **not** require 011.
+     Status stays `ready` (history protocol frozen); do not mark
+     implemented until histd + a renderer exist.
 
 ## Open questions
 - egui vs custom wgpu renderer for the heatmap path — prototype when the WASM

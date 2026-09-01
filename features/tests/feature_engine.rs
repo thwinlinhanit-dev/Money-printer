@@ -1195,3 +1195,102 @@ fn cv_engine_from_config_registers_climax_variant_features() {
     // Unknown [climax_variants] keys fail closed (FEA-7).
     assert!(FeaturesConfig::from_toml("[climax_variants]\nunknown_key = 5").is_err());
 }
+
+// ---- spec 049: footprint signal catalog -----------------------------------
+
+#[test]
+fn fp_1_volume_bubble_emits_correct_percentile_rank() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_bar(|| Box::new(VolumeBubble::new("1s", 5)));
+    // Feed 6 bars (window=5) so 5 close with different volumes.
+    let mut all = Vec::new();
+    for i in 0..6 {
+        // Volume: 1, 2, 3, 4, 5 (increasing)
+        all.extend(e.on_event(&trade(
+            i * SEC + 1,
+            100.0,
+            (i + 1) as f64,
+            Side::Buy,
+        )));
+    }
+    // Last bar has volume=5. In window [1,2,3,4,5], rank of 5 = 4 (4 less than 5).
+    // Percentile = 4/5 * 100 = 80.
+    assert_eq!(value(&e, &all, "footprint.volume.bubble.1s"), Some(80.0));
+}
+
+#[test]
+fn fp_2_market_profile_poc_matches_highest_volume_price() {
+    let mut e = FeatureEngine::new(SEC);
+    // Window=3, bucket_atr=10 (for simplicity)
+    e.register_bar(|| Box::new(MarketProfilePoc::new("1s", 3, 10.0)));
+    // Feed 4 bars so 3 close: prices centered around 100.
+    let mut all = Vec::new();
+    // Bar 0: price ~100 (high=105, low=95, close=100)
+    all.extend(e.on_event(&trade(1, 100.0, 10.0, Side::Buy)));
+    all.extend(e.on_event(&trade(2, 102.0, 10.0, Side::Buy)));
+    // Bar 1: price ~100 (high=104, low=96, close=100)
+    all.extend(e.on_event(&trade(SEC + 1, 100.0, 20.0, Side::Buy)));
+    all.extend(e.on_event(&trade(SEC + 2, 101.0, 20.0, Side::Buy)));
+    // Bar 2: price ~100 (high=103, low=97, close=100)
+    all.extend(e.on_event(&trade(2 * SEC + 1, 100.0, 10.0, Side::Buy)));
+    all.extend(e.on_event(&trade(2 * SEC + 2, 100.0, 10.0, Side::Buy)));
+    // Close bar 2 by opening bar 3
+    all.extend(e.on_event(&trade(3 * SEC + 1, 100.0, 1.0, Side::Buy)));
+    // POC should be around 100 (bucket centered at 100 has most volume)
+    let poc = value(&e, &all, "footprint.market.profile.poc.1s");
+    assert!(poc.is_some(), "POC should emit after warmup");
+    let poc_val = poc.unwrap();
+    assert!((poc_val - 100.0).abs() < 15.0, "POC should be near 100, got {poc_val}");
+}
+
+#[test]
+fn fp_3_market_profile_vah_val_contain_70_percent_volume() {
+    let mut e = FeatureEngine::new(SEC);
+    e.register_bar(|| Box::new(MarketProfileVah::new("1s", 5, 10.0)));
+    e.register_bar(|| Box::new(MarketProfileVal::new("1s", 5, 10.0)));
+    // Feed 6 bars so 5 close.
+    let mut all = Vec::new();
+    for i in 0..6 {
+        all.extend(e.on_event(&trade(
+            i * SEC + 1,
+            100.0 + i as f64,
+            10.0,
+            Side::Buy,
+        )));
+    }
+    let vah = value(&e, &all, "footprint.market.profile.vah.1s");
+    let val = value(&e, &all, "footprint.market.profile.val.1s");
+    assert!(vah.is_some(), "VAH should emit after warmup");
+    assert!(val.is_some(), "VAL should emit after warmup");
+    // VAH >= VAL (VAH is upper boundary)
+    assert!(vah.unwrap() >= val.unwrap(), "VAH must be >= VAL");
+}
+
+#[test]
+fn fp_4_engine_from_config_registers_footprint_signals() {
+    use mp_features::FeaturesConfig;
+    let cfg = FeaturesConfig::from_toml(
+        r#"
+        bar_tf_ns = 60000000000
+        [footprint_signals]
+        enabled = true
+        "#,
+    )
+    .unwrap();
+    let e = mp_features::engine_from_config(&cfg).unwrap();
+    // All footprint signals must register when enabled.
+    for id in [
+        "footprint.volume.bubble.60s",
+        "footprint.market.profile.poc.60s",
+        "footprint.market.profile.vah.60s",
+        "footprint.market.profile.val.60s",
+    ] {
+        assert!(e.name_to_id(id).is_some(), "{id} must register");
+    }
+    // Disabled when enabled = false (default).
+    let off = FeaturesConfig::from_toml("").unwrap();
+    let e2 = mp_features::engine_from_config(&off).unwrap();
+    assert!(e2.name_to_id("footprint.volume.bubble.60s").is_none());
+    // Unknown keys fail closed (FEA-7).
+    assert!(FeaturesConfig::from_toml("[footprint_signals]\nunknown_key = 5").is_err());
+}

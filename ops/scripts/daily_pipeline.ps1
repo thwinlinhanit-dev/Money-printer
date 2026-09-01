@@ -31,6 +31,11 @@
 #   .\ops\scripts\daily_pipeline.ps1 -Date 2026-08-04   # backfill/re-check
 #   .\ops\scripts\daily_pipeline.ps1 -RegisterTask  # schedule at 07:30 UTC daily
 #   .\ops\scripts\daily_pipeline.ps1 -SkipCompact   # scorecard + verdict only
+#
+# Zero-Cost Mode (docs/ZERO_COST_MODE.md):
+#   Set $env:ZERO_COST=0 for full-mode (all venues, book stream).
+#   Default is 1 (free-tier VPS): Hyperliquid-only, no book, relaxed gate.
+#   $env:RETENTION_DAYS controls hot-tier pruning (default: 14).
 
 param(
     [string]$Date,                 # YYYY-MM-DD or YYYYMMDD (default: yesterday UTC)
@@ -139,6 +144,25 @@ if ($gr[1] -ne 0) {
 }
 Log "guardrails: all checks passed" "INFO"
 
+# ---- Zero-Cost Mode switch (docs/ZERO_COST_MODE.md) ------------------------
+# ZERO_COST defaults to 1 for the VPS (free-tier is the primary target).
+# Set $env:ZERO_COST=0 on the Windows host for full-mode recording.
+# Override $env:RECORDINGS, $env:REQUIRED_STREAMS before invoking this
+# script to customise the recording/stream sets.
+if (-not $env:ZERO_COST) { $env:ZERO_COST = "1" }
+if ($env:ZERO_COST -eq "1") {
+    # Override recordings to Hyperliquid-only (permissionless, no geo-blocks),
+    # BTC + ETH only (storage bounded). No book stream.
+    if ($Recordings.Count -eq 0) {
+        $Recordings = @("hyperliquid:BTC", "hyperliquid:ETH")
+    }
+    # Drop 'book' from required streams — Zero-Cost does not record L2 book.
+    $RequiredStreams = @("trade", "funding", "mark_price", "open_interest")
+    Log "Zero-Cost Mode: recordings=$($Recordings -join ',') streams=$($RequiredStreams -join ',')"
+} else {
+    Log "Full-mode: recordings=$($Recordings -join ',') streams=$($RequiredStreams -join ',')"
+}
+
 # ---- task registration ------------------------------------------------------
 if ($RegisterTask) {
     # Schedule at the LOCAL wall-clock time that corresponds to 07:30 UTC.
@@ -221,17 +245,22 @@ if ($RegisterStaleTask) {
     Exit 0
 }
 
-# ---- DST / clock-drift guard ------------------------------------------------
-# The daily trigger fires at a fixed local wall-clock; after a DST shift that
-# can land an hour away from 07:30 UTC. Only audit when we're within the UTC
-# 00:00-09:00 window (the 07:30 gate plus DST tolerance); otherwise no-op
-# (the next day's run catches up). An explicit -Date is a manual/backfill run
-# - the guard does not apply.
-$utcHour = (Get-Date).ToUniversalTime().Hour
-if (-not $Date -and $utcHour -gt 9) {
-    Log "Skipped: UTC hour $utcHour is outside the 00:00-09:00 window (clock drift / DST?). Re-run -RegisterTask after a DST change." "WARN"
-    Exit 0
+# ---- LAB-7: data home must not be Downloads ----------------------------------
+# If MP_DATA_HOME is set, it must not contain "Downloads" (case-insensitive).
+# The scheduled task on the host may inherit no env; when the data dir defaults
+# to a Downloads path, that is a hard stop (W-6: data lives off Downloads).
+if ($env:MP_DATA_HOME) {
+    if ($env:MP_DATA_HOME -imatch 'Downloads') {
+        Log "LAB-7: MP_DATA_HOME contains 'Downloads' ($($env:MP_DATA_HOME)) - data must live off Downloads (W-6). Hard stop." "ERROR"
+        Exit 1
+    }
 }
+
+# ---- LAB-1: no DST/hour-window skip; catch-up scores missing days ----------
+# The pipeline MUST attempt a scorecard for every UTC calendar day (LAB-1).
+# A skip because the hour is outside 00:00-09:00 is a defect. If the
+# scheduled task wakes late, it still scores the missing UTC day (catch-up),
+# then today's. The DST guard is removed per spec 050 LAB-1.
 
 # ---- date resolution --------------------------------------------------------
 if (-not $Date) {
@@ -338,6 +367,9 @@ foreach ($rec in $Recordings) { $required += "--required"; $required += $rec }
 
 Log "Running mp-ops scorecard --date $dateDashed ..."
 $scoreArgs = @("scorecard", "--date", $dateDashed) + $required + $requireArgs
+if ($env:ZERO_COST -eq "1") {
+    $scoreArgs += "--zero-cost"
+}
 $env:RUST_LOG = "off"
 Push-Location $root
 try {
@@ -517,6 +549,9 @@ if ($backfillScored -gt 0 -or $backfillDet -gt 0) {
 # data/scorecards/*.json and runs the real check_promotion) - single source of
 # truth, no PS-side shadow computation.
 $promoteArgs = @("promote", "--scorecards-dir", $scoreDir) + $required
+if ($env:ZERO_COST -eq "1") {
+    $promoteArgs += "--zero-cost"
+}
 $env:RUST_LOG = "off"
 Push-Location $root
 try {
@@ -696,14 +731,45 @@ if (-not $SkipMaterialize) {
             Remove-Item Env:RUST_LOG -ErrorAction SilentlyContinue
         }
         $matOut = $matResult[0]; $matExit = $matResult[1]
-        if ($matExit -ne 0) { Log "mp-materialize failed (exit $matExit): $matOut" "ERROR"; Exit 1 }
-        # Materialize the trimmed output FIRST (the trap at line ~437: inside
-        # a PS string `$($x | Out-String).Trim()` prints the literal text).
+        # LAB-6: materialize symbols_hash conflict is P2, not pipeline abort.
+        # The scorecard is already archived; overwrite refusal (W-6) stays, but
+        # the pipeline continues to compaction. A non-conflict failure is still
+        # a hard stop.
         $matLog = ($matOut | Out-String).Trim()
-        Log "  $matLog"
+        if ($matExit -ne 0) {
+            if ($matLog -match 'symbols snapshot hash collision') {
+                Log "LAB-6: materialize hash conflict (P2, pipeline continues): $matLog" "WARN"
+            } else {
+                Log "mp-materialize failed (exit $matExit): $matLog" "ERROR"
+                Exit 1
+            }
+        }
+        if ($matLog) { Log "  $matLog" }
     }
 } else {
     Log "SkipMaterialize set - no feature-store writes."
+}
+
+# ---- 2.7 Hot-tier retention enforcement (docs/RETENTION_POLICY.md) ---------
+# Under Zero-Cost Mode, raw tick data older than 14 days is deleted to
+# keep the VPS under the 30 GB free-tier cap. Only raw logs are pruned;
+# compacted Parquet in data/parquet/ and features in data/features/ are
+# kept (they are orders of magnitude smaller). Human-deletable: W-6.
+if ($env:ZERO_COST -eq "1") {
+    if (-not $env:RETENTION_DAYS) { $env:RETENTION_DAYS = "14" }
+    $retentionDays = [int]$env:RETENTION_DAYS
+    $rawDir = Join-Path $root "data\raw"
+    $cutoff = (Get-Date).ToUniversalTime().AddDays(-$retentionDays)
+    Log "Hot-tier retention: deleting raw logs older than $retentionDays days (before $($cutoff.ToString('yyyy-MM-dd')) UTC)"
+    $deleted = 0
+    Get-ChildItem -Path $rawDir -Filter "*.log" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime.ToUniversalTime() -lt $cutoff } |
+        ForEach-Object {
+            Log "Retention: deleting $($_.Name)"
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+            $deleted++
+        }
+    Log "Hot-tier retention: deleted $deleted old raw log(s)"
 }
 
 # ---- 3. compact through the INT-4 verified gate -----------------------------
@@ -728,6 +794,24 @@ if (-not $SkipCompact) {
     }
 } else {
     Log "SkipCompact set - no cold writes."
+}
+
+# ---- 4. paper rehearsal (spec 051, PAP-1) ----------------------------------
+# Run AFTER the scorecard attempt (even if compact failed, if the raw log
+# decodes). The paper script handles its own error reporting and Telegram.
+$paperScript = Join-Path $root "ops\scripts\daily_paper.ps1"
+if (Test-Path $paperScript) {
+    Log "Running paper rehearsal for $dateDashed (PAP-1)..."
+    $paperArgs = @("-ExecutionPolicy", "Bypass", "-File", $paperScript, "-Date", $dateDashed)
+    $paperResult = Invoke-Native -FilePath "powershell.exe" -Arguments $paperArgs
+    $paperOut = ($paperResult[0] | Out-String).Trim()
+    if ($paperResult[1] -ne 0) {
+        Log "Paper rehearsal exit $($paperResult[1]): $paperOut" "WARN"
+    } else {
+        Log "Paper rehearsal completed for $dateDashed"
+    }
+} else {
+    Log "Paper script not found at $paperScript — skipping paper rehearsal" "WARN"
 }
 
 Log "Daily pipeline complete: $dateDashed"

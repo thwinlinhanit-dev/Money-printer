@@ -1,5 +1,10 @@
 # Volume Pattern Pine Script Strategies
 
+> **NON-EVIDENCE: not in funnel until ported to Rust sim.**
+> Pine Sharpe/win-rate numbers in this document are NOT lab evidence (spec 053
+> ALP-4). Citing these numbers in weekly review is a PD-5 defect. Only the
+> Rust sim (`sim backtest` / `sim wf`) may promote a strategy.
+
 Based on corrected backtest research (walk-forward validated, minimum 10 trades).
 
 ## Strategies Overview

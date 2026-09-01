@@ -1,5 +1,9 @@
 # Money Printer — Trading Research & Intelligence System
 
+**To finish the usable product:** [`docs/COMPLETION-MASTER-PLAN.md`](docs/COMPLETION-MASTER-PLAN.md)
+(specs 050–053). Ideas: [`docs/IDEAS-2026-08-31.md`](docs/IDEAS-2026-08-31.md).
+“Implement every remaining spec” is not the definition of done.
+
 This repo is the home for a personal trading **research and intelligence platform**:
 a system that captures market data, computes order-flow and derivatives analytics,
 runs research/backtests over the recorded history, and surfaces everything through

@@ -27,7 +27,7 @@ pub use alert::{Alert, AlertRouter, Channel, Dispatch, QuietHours, RouteOutcome,
 pub use bot::{parse as parse_command, Bot, BotReply, Command, KillScope};
 pub use daemon::{OpsDaemon, ProcessHealth, StatusSnapshot};
 pub use deadman::DeadMan;
-pub use latch::{KillLatch, LatchError, LatchScope};
+pub use latch::{load_kill_switches_fail_closed, KillLatch, LatchError, LatchScope};
 pub use registry::{runbook_path, spec_for, AlertSpec, ALERTS};
 pub use report::{
     append_run_record, band_accuracy_decay_alert, load_band_accuracy_trend,

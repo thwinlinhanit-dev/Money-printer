@@ -1,3 +1,4 @@
+// NON-EVIDENCE: not in funnel until ported to Rust sim (spec 053 ALP-4)
 // ═══════════════════════════════════════════════════════════════
 // V5 ABSORPTION BAR — KELLY CRITERION SIZING
 // Positions sized by Kelly formula: f* = (W/A) - ((1-W)/B)

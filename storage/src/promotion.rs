@@ -542,4 +542,68 @@ mod tests {
         assert_eq!(v.window_start.as_deref(), Some("20260709"));
         assert_eq!(v.window_end.as_deref(), Some("20260715"));
     }
+
+    // ---- Zero-Cost Mode tests (docs/ZERO_COST_MODE.md) ------------------------
+
+    /// Zero-Cost Mode promotion requires 14 consecutive clean days (not 7).
+    #[test]
+    fn zero_cost_promotion_requires_fourteen_consecutive_clean_days() {
+        let cards: Vec<_> = (1..=14)
+            .map(|d| card(&format!("202607{d:02}"), true))
+            .collect();
+        let v = check_promotion_n(&cards, ZERO_COST_REQUIRED_CONSECUTIVE_CLEAN_DAYS);
+        assert!(v.promoted, "14 clean days must promote under Zero-Cost");
+        assert_eq!(v.consecutive_clean, 14);
+        assert_eq!(v.required, 14);
+    }
+
+    /// 13 clean days must NOT promote under Zero-Cost (needs 14).
+    #[test]
+    fn zero_cost_promotion_rejects_thirteen_clean_days() {
+        let cards: Vec<_> = (1..=13)
+            .map(|d| card(&format!("202607{d:02}"), true))
+            .collect();
+        let v = check_promotion_n(&cards, ZERO_COST_REQUIRED_CONSECUTIVE_CLEAN_DAYS);
+        assert!(!v.promoted, "13 clean days must not promote (needs 14)");
+        assert_eq!(v.consecutive_clean, 13);
+    }
+
+    /// Zero-Cost 14-day streak with one bursty day: the streak holds but
+    /// the burst-free window condition needs a 14-day burst-free sub-run.
+    #[test]
+    fn zero_cost_burst_free_window_required() {
+        let mut cards: Vec<_> = (1..=14)
+            .map(|d| card(&format!("202607{d:02}"), true))
+            .collect();
+        cards[6] = burst_card("20260707"); // burst on day 7
+        let v = check_promotion_n(&cards, ZERO_COST_REQUIRED_CONSECUTIVE_CLEAN_DAYS);
+        // The streak is 14 (burst days still count as clean), but the
+        // longest burst-free sub-run is 7 (days 8..14), which is < 14.
+        assert!(!v.promoted, "burst-free window must be 14 days");
+        assert_eq!(v.consecutive_clean, 14, "streak is intact");
+    }
+
+    /// 15 clean days with one bursty day in the middle: the burst-free tail
+    /// (days 8..15 = 8 days) is still < 14, so no promotion. But 21 clean
+    /// days with one burst at day 7: tail is 14 days (8..21), promoting.
+    #[test]
+    fn zero_cost_burst_free_tail_promotes_when_long_enough() {
+        let mut cards: Vec<_> = (1..=21)
+            .map(|d| card(&format!("202607{d:02}"), true))
+            .collect();
+        cards[6] = burst_card("20260707"); // burst on day 7
+        let v = check_promotion_n(&cards, ZERO_COST_REQUIRED_CONSECUTIVE_CLEAN_DAYS);
+        assert!(v.promoted, "14-day burst-free tail must qualify");
+        assert_eq!(v.window_start.as_deref(), Some("20260708"));
+        assert_eq!(v.window_end.as_deref(), Some("20260721"));
+    }
+
+    /// Zero-Cost empty input.
+    #[test]
+    fn zero_cost_promotion_empty_input() {
+        let v = check_promotion_n(&[], ZERO_COST_REQUIRED_CONSECUTIVE_CLEAN_DAYS);
+        assert!(!v.promoted);
+        assert_eq!(v.consecutive_clean, 0);
+        assert_eq!(v.required, 14);
+    }
 }

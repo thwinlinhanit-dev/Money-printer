@@ -39,6 +39,15 @@ _BENCHMARK_FIELDS = (
     ("acceptance", "Acceptance rule"),
 )
 
+# ALP-8: the expected benchmark values after 2026-08-25 owner confirmation.
+# If the policy file exists and any of these is missing, that is a bug
+# ("unset" must never appear when the file is parseable).
+_DEFAULT_BENCHMARK = {
+    "primary": "Buy-and-hold BTC over identical evaluation windows",
+    "window": "Trailing 90 days for weekly/monthly reviews",
+    "acceptance": "Rolling 6-month expectancy > 0 after all costs AND >= benchmark",
+}
+
 
 def load_benchmark(policy_path) -> dict | None:
     """Parse the benchmark definition from OWNER_POLICY.md §3.
@@ -122,10 +131,20 @@ def render(week: str, registry_path, runs_path, autopsies_dir, policy_path=DEFAU
             "- source: docs/OWNER_POLICY.md §3",
         ]
     else:
-        lines += [
-            "- `unset (1.1 pending)` - the owner trading policy decides the "
-            "benchmark definition; until then no strategy is benchmarked against it.",
-        ]
+        # ALP-8: after 2026-08-25, missing/unparseable benchmark is a bug,
+        # not "pending". The policy file exists and is BINDING; if any field
+        # is missing, say so honestly — "unset" only when the file is absent.
+        policy_exists = Path(policy_path).is_file()
+        if policy_exists:
+            lines += [
+                "- `unset` — BUG: OWNER_POLICY.md exists but benchmark fields "
+                "could not be parsed. This is a code defect (ALP-8), not "
+                "a pending owner decision. Fix load_benchmark().",
+            ]
+        else:
+            lines += [
+                "- `unset` — OWNER_POLICY.md missing; no benchmark defined.",
+            ]
     lines += [
         "",
         "## Idea registry",

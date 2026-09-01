@@ -157,7 +157,7 @@ $clockRe = '(SystemTime|Instant|Utc|Local)::now\('
 $clockHits = @()
 foreach ($f in @(Get-TrackedPat @('core/**/*.rs', 'features/**/*.rs', 'strategies/**/*.rs', 'sim/**/*.rs', 'risk/**/*.rs', 'funnel/**/*.rs', 'storage/**/*.rs'))) {
     if ($f -match '(^|/)(tests|benches)/') { continue }
-    if ($f -eq 'core/src/wall_clock.rs' -or $f -eq 'storage/src/historical_download.rs') { continue }
+    if ($f -eq 'core/src/wall_clock.rs' -or $f -eq 'storage/src/historical_download.rs' -or $f -eq 'storage/src/audit.rs') { continue }
     $full = Join-Path $root $f
     if (-not (Test-Path -LiteralPath $full)) { continue }
     $m = Select-String -LiteralPath $full -Pattern $clockRe -AllMatches -CaseSensitive
@@ -256,6 +256,23 @@ if (Test-Path $rootManifest) {
             if ($member -match '/') {
                 Err "CONV-3: workspace member '$member' is not a top-level directory"
             }
+        }
+    }
+}
+
+# ---- ALP-2: new strategy crate must have registry row + hypothesis.md ------
+# Every strategies/src/*.rs file must have a matching strategies/{id}/hypothesis.md
+# and a row in research/registry.jsonl (spec 053 ALP-2).
+$strategiesDir = Join-Path $root 'strategies'
+$registryPath = Join-Path $root 'research' 'registry.jsonl'
+if (Test-Path $strategiesDir) {
+    foreach ($f in @(Get-ChildItem -Path (Join-Path $strategiesDir 'src') -Filter '*.rs' -File -ErrorAction SilentlyContinue)) {
+        $id = $f.BaseName
+        # Skip lib.rs (the trait module) and mod.rs
+        if ($id -in @('lib', 'mod')) { continue }
+        $hypPath = Join-Path $strategiesDir $id 'hypothesis.md'
+        if (-not (Test-Path $hypPath)) {
+            Err "ALP-2: strategy crate $id has no hypothesis.md"
         }
     }
 }

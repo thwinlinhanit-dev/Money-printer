@@ -1,3 +1,4 @@
+// NON-EVIDENCE: not in funnel until ported to Rust sim (spec 053 ALP-4)
 // ═══════════════════════════════════════════════════════════════
 // V1 VOLUME EXHAUSTION STRATEGY
 // 21 trades, Sharpe 1.20, OOS improves to 1.48

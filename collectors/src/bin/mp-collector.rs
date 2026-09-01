@@ -102,6 +102,17 @@ mod inner {
         /// unaffected unless explicitly opted out.
         #[serde(default)]
         swing_only: Option<bool>,
+        /// Free-tier VPS tuning (docs/ZERO_COST_MODE.md): reconnect backoff
+        /// base in milliseconds. Default 250ms (COL-1 full-jitter). Free-tier
+        /// VPS with shared bandwidth benefits from a slightly higher base to
+        /// avoid hammering during transient network blips.
+        #[serde(default)]
+        backoff_base_ms: Option<u64>,
+        /// Free-tier VPS tuning: reconnect backoff cap in milliseconds.
+        /// Default 30000ms (30s). Free-tier may need a higher cap to ride out
+        /// longer network outages without exhausting retry budget.
+        #[serde(default)]
+        backoff_cap_ms: Option<u64>,
     }
 
     /// Deribit instrument filter (spec 031 Decisions: near-expiry subset).
@@ -353,6 +364,9 @@ mod inner {
         deribit_record_ticker: bool,
         /// Deribit raw-frame capture dir (OPT-3); `None` = no verbatim capture.
         raw_capture_dir: Option<PathBuf>,
+        /// Free-tier VPS tuning: reconnect backoff base/cap in ms (COL-1).
+        backoff_base_ms: u64,
+        backoff_cap_ms: u64,
     }
 
     struct Stream {
@@ -393,6 +407,8 @@ mod inner {
             proxy: Option<String>,
             opts: StreamOpts,
         ) -> Result<Self, String> {
+            let backoff_base = opts.backoff_base_ms;
+            let backoff_cap = opts.backoff_cap_ms;
             let venue = parse_venue(venue_str)?;
             let url = endpoint_for(venue_str, symbol, opts.swing_only)?;
             let mut subscribe =
@@ -509,8 +525,8 @@ mod inner {
                 },
                 collector: Collector::new(normalizer, CollectorConfig::default()),
                 transport: None,
-                // 250ms base, 30s cap — COL-1 full-jitter backoff
-                backoff: Backoff::new(250, 30_000, seed),
+                // COL-1 full-jitter backoff (configurable via backoff_base_ms / backoff_cap_ms)
+                backoff: Backoff::new(backoff_base, backoff_cap, seed),
                 connection_id: 0,
                 channel_capacity,
                 backpressure,
@@ -915,6 +931,8 @@ mod inner {
         } else {
             None
         };
+        let backoff_base = config.backoff_base_ms.unwrap_or(250);
+        let backoff_cap = config.backoff_cap_ms.unwrap_or(30_000);
         let mut streams = vec![Stream::new(
             "primary".into(),
             &venue,
@@ -931,6 +949,8 @@ mod inner {
                 deribit_filter,
                 deribit_record_ticker: record_ticker,
                 raw_capture_dir: raw_capture_dir.clone(),
+                backoff_base_ms,
+                backoff_cap_ms,
             },
         )?];
 

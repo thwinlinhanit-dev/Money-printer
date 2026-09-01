@@ -301,3 +301,16 @@ stablecoin_expand_threshold = 1.05 # stablecoin supply growth > 5% → risk_on
 # catches only ~7.5% of potential reversal signals — these fill the gap.
 # Bar-only (SWG-2 compatible), disabled by default.
 enabled = false
+
+[footprint_signals]
+# Footprint signal catalog (spec 049): volume.bubble + market.profile.
+# Volume bubble: percentile rank of volume over rolling window.
+# Market profile: POC (Point of Control) + VAH/VAL (Value Area High/Low).
+# Disabled by default.
+enabled = false
+# Rolling window (bars) for volume percentile rank.
+volume_bubble_window = 100
+# Rolling window (bars) for market profile POC/VAH/VAL.
+market_profile_window = 50
+# Bucket size as multiple of ATR for market profile.
+market_profile_bucket_atr = 0.5

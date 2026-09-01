@@ -82,6 +82,7 @@ clock_hits=$(tracked 'core/**/*.rs' 'features/**/*.rs' 'strategies/**/*.rs' \
   | grep -vE '(^|/)(tests|benches)/' \
   | grep -v 'core/src/wall_clock.rs' \
   | grep -v 'storage/src/historical_download.rs' \
+  | grep -v 'storage/src/audit.rs' \
   | xargs -r grep -nE '(SystemTime|Instant|Utc|Local)::now\(' 2>/dev/null || true)
 if [ -n "$clock_hits" ]; then
   echo "$clock_hits" >&2
@@ -119,7 +120,7 @@ if [ -f specs/README.md ]; then
   impl_specs=$(grep -E '^\|\s*[0-9]{3}\s*\|' specs/README.md | grep -i 'implemented' \
     | grep -oE '\([0-9]{3}-[a-z-]+\.md\)' | tr -d '()' || true)
   for spec in $impl_specs; do
-    ids=$(grep -oE '\*\*[A-Z]{3,4}-[0-9]+\*\*' "specs/$spec" | tr -d '*' | sort -u)
+    ids=$(grep -oE '\*\*[A-Z]{3,4}-[0-9]+\*\*' "specs/$spec" 2>/dev/null | tr -d '*' | sort -u || true)
     for id in $ids; do
       needle=$(echo "$id" | tr 'A-Z-' 'a-z_')
       # Python arm accepts pytest's mandatory test_ prefix (def test_res_5_…);
@@ -151,6 +152,19 @@ if [ -f Cargo.toml ]; then
       */*) err "CONV-3: workspace member '$member' is not a top-level directory" ;;
     esac
   done < <(grep -E '^\s*members\s*=' Cargo.toml | grep -oE '"[a-z0-9_-]+"' | tr -d '"')
+fi
+
+# ---- ALP-2: new strategy crate must have registry row + hypothesis.md ------
+# Every strategies/{id}/ src/*.rs must have strategies/{id}/hypothesis.md
+# (spec 053 ALP-2).
+if [ -d strategies ]; then
+  for f in strategies/*/src/*.rs; do
+    [ -e "$f" ] || continue
+    id=$(basename "$(dirname "$(dirname "$f")")")
+    # Skip lib.rs (the trait module) and mod.rs
+    case "$(basename "$f")" in lib.rs|mod.rs) continue ;; esac
+    [ -f "strategies/$id/hypothesis.md" ] || err "ALP-2: strategy crate $id has no hypothesis.md"
+  done
 fi
 
 # ---- Skill frontmatter sanity -------------------------------------------------

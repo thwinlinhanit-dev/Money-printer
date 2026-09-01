@@ -11,7 +11,7 @@
 //!   sim mc          --log <event.log> --strategy … --seed N --resamples R
 //!   sim replay-live --log <live.log> --log-b <replay.log> --strategy … --seed N
 //!   sim paper       --log <live.log> --strategy … --seed N \
-//!                   --run-id <ulid> --runs-dir <dir> [--chunk-size N]
+//!                   --run-id <ulid> --runs-dir <dir> [--chunk-size N] [--zero-intents]
 //!   sim paper-tail  --log <live.log> --strategy … --seed N \
 //!                   [--poll-ms M] [--max-idle-polls K] [--max-polls P]
 //!                   --run-id <ulid> --runs-dir <dir>
@@ -338,8 +338,21 @@ fn run() -> Result<ExitCode, String> {
             let run_id = need(rest, "--run-id")?;
             let runs_dir = need(rest, "--runs-dir")?;
             let git_sha = flag(rest, "--git-sha").unwrap_or_else(|| "unknown".into());
-            let bt = run_paper(&events, &strategy, seed, chunk)?;
-            let config_text = format!("paper;strategy={strategy};seed={seed};chunk={chunk}");
+            // PAP-4: --zero-intents overrides the strategy to NullStrategy,
+            // so the session still runs (bars built, events consumed) but
+            // emits zero intents. The PS1 script passes this when the
+            // kill-latch is tripped.
+            let effective_strategy = if flag(rest, "--zero-intents").is_some() {
+                "null"
+            } else {
+                strategy.as_str()
+            };
+            let bt = run_paper(&events, effective_strategy, seed, chunk)?;
+            let config_text = if flag(rest, "--zero-intents").is_some() {
+                format!("paper;strategy={strategy};seed={seed};chunk={chunk};zero_intents=true")
+            } else {
+                format!("paper;strategy={strategy};seed={seed};chunk={chunk}")
+            };
             record_run(&runs_dir, &run_id, &git_sha, &config_text, &bt, &events)?;
             Ok(ExitCode::SUCCESS)
         }

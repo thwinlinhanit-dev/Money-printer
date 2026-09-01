@@ -26,6 +26,11 @@ import json
 import re
 from dataclasses import dataclass
 
+# Active funnel states for the WIP limit (ALP-1). At most ONE record may be
+# in any of these states simultaneously — the rest must be killed, held,
+# recorded, or not-gradable.
+ACTIVE_STATES = {"hypothesis", "backtest", "paper", "shadow"}
+
 # Funnel states (spec 006) + terminal verdicts. ``recorded`` = backlog idea that
 # has not (yet) entered the funnel.
 ALLOWED_STATES = {
@@ -204,6 +209,8 @@ def check(
     for c in candidates:
         if c.id not in registry:
             problems.append(f"missing registry record for candidate '{c.id}'")
+    active_count = 0
+    active_names = []
     for cid, rec in sorted(registry.items()):
         if cid not in ids:
             problems.append(
@@ -211,9 +218,19 @@ def check(
             )
         if rec.get("state") not in ALLOWED_STATES:
             problems.append(f"'{cid}' has invalid state {rec.get('state')!r}")
+        if rec.get("state") in ACTIVE_STATES:
+            active_count += 1
+            active_names.append(cid)
         for rid in rec.get("run_ids", []):
             if not _run_exists(runs_path, rid):
                 problems.append(f"'{cid}' run_id {rid} not found in runs/index.jsonl")
+    # ALP-1: WIP limit — at most one active candidate.
+    if active_count > 1:
+        problems.append(
+            f"ALP-1: WIP limit exceeded — {active_count} active candidates "
+            f"({', '.join(active_names)}); at most 1 allowed "
+            f"(hypothesis|backtest|paper|shadow)"
+        )
     return problems
 
 

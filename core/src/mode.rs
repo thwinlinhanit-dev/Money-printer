@@ -153,9 +153,22 @@ mod tests {
             "env var alone must not select live (MOD-12)"
         );
         std::env::remove_var("MONEY_PRINTER_MODE");
+        // PAP-10: MONEY_PRINTER_MODE=live during paper => Sleep + P1 (covered by MOD-12).
         // Development overrides below live remain available.
         std::env::set_var("MONEY_PRINTER_MODE", "paper");
         assert_eq!(TradingMode::from_config(), TradingMode::Paper);
+        std::env::remove_var("MONEY_PRINTER_MODE");
+    }
+
+    #[test]
+    fn pap_10_live_env_during_paper_refuses() {
+        // PAP-10: MONEY_PRINTER_MODE=live during paper task => Sleep + P1, no session.
+        std::env::set_var("MONEY_PRINTER_MODE", "live");
+        assert_eq!(
+            TradingMode::from_config(),
+            TradingMode::Sleep,
+            "PAP-10: live env during paper must fall back to Sleep"
+        );
         std::env::remove_var("MONEY_PRINTER_MODE");
     }
 }

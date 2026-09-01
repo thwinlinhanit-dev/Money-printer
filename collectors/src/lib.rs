@@ -26,6 +26,7 @@ pub mod fred;
 pub mod hyperliquid;
 pub mod hyperliquid_positions;
 pub mod ibit;
+pub mod multisym;
 pub mod json;
 pub mod kraken;
 pub mod netflow;

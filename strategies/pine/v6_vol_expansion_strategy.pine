@@ -1,3 +1,4 @@
+// NON-EVIDENCE: not in funnel until ported to Rust sim (spec 053 ALP-4)
 // ═══════════════════════════════════════════════════════════════
 // V6 VOL EXPANSION STRATEGY
 // Strongest: 100% win rate (5 trades), Sharpe 16.01

@@ -2,6 +2,11 @@
 # Daily integrity gate -> compaction -> manifest pipeline (spec 024).
 # Schedule via crontab at 00:05 UTC:
 #   5 0 * * * /opt/money-printer/ops/scripts/daily_maintenance.sh
+#
+# Zero-Cost Mode (2026-08-31): set ZERO_COST=1 (or leave default) to run
+# under $0 budget constraints — Hyperliquid-only, no book stream, relaxed
+# gate. Set ZERO_COST=0 for full-mode (all venues, book required).
+# See docs/ZERO_COST_MODE.md.
 set -euo pipefail
 
 export PATH="/usr/local/bin:/usr/bin:/bin"
@@ -11,15 +16,31 @@ LOG_DIR="/opt/money-printer/data"
 BIN_DIR="/opt/money-printer/bin"
 SCRIPT_DIR="/opt/money-printer/ops/scripts"
 VENV_DIR="/opt/money-printer/.venv"
-# 2026-08-08: Phase-0 venue is hyperliquid (egress is geo-filtered by Binance
-# futures, spec 024). Symbols are bare coin names. Liquidation data comes from
-# the on-chain whale census (spec 028) and is not a required gate stream.
-# 2026-08-13 (COL-29): bybit:BTCUSDT joined the gate set — Bybit's public WS
-# liquidation topic is the real live source for the `Liquidation` event from
-# this egress, and its recording carries the full required stream set (trade
-# book funding mark_price open_interest + liquidation).
-RECORDINGS="${RECORDINGS:-hyperliquid:BTC hyperliquid:ETH bybit:BTCUSDT bybit:ETHUSDT bybit:SOLUSDT}"
-REQUIRED_STREAMS="${REQUIRED_STREAMS:-trade book funding mark_price open_interest}"
+
+# --- Zero-Cost Mode switch (docs/ZERO_COST_MODE.md) --------------------------
+# ZERO_COST defaults to 1 (free-tier VPS). Override with ZERO_COST=0 for
+# full-mode recording (requires paid VPS with enough disk for book streams).
+ZERO_COST="${ZERO_COST:-1}"
+
+if [ "$ZERO_COST" = "1" ]; then
+    # Zero-Cost Mode: Hyperliquid only (permissionless, no geo-blocks),
+    # BTC + ETH only (storage bounded). No book stream — trades +
+    # activeAssetCtx (funding/mark/OI) are the minimal viable set.
+    RECORDINGS="${RECORDINGS:-hyperliquid:BTC hyperliquid:ETH}"
+    REQUIRED_STREAMS="${REQUIRED_STREAMS:-trade funding mark_price open_interest}"
+    echo "[$(date -u)] Zero-Cost Mode: RECORDINGS=$RECORDINGS REQUIRED_STREAMS=$REQUIRED_STREAMS"
+else
+    # Full-mode: all venues, book stream required.
+    # 2026-08-08: Phase-0 venue is hyperliquid (egress is geo-filtered by Binance
+    # futures, spec 024). Symbols are bare coin names. Liquidation data comes from
+    # the on-chain whale census (spec 028) and is not a required gate stream.
+    # 2026-08-13 (COL-29): bybit:BTCUSDT joined the gate set — Bybit's public WS
+    # liquidation topic is the real live source for the `Liquidation` event from
+    # this egress, and its recording carries the full required stream set (trade
+    # book funding mark_price open_interest + liquidation).
+    RECORDINGS="${RECORDINGS:-hyperliquid:BTC hyperliquid:ETH bybit:BTCUSDT bybit:ETHUSDT bybit:SOLUSDT}"
+    REQUIRED_STREAMS="${REQUIRED_STREAMS:-trade book funding mark_price open_interest}"
+fi
 
 cd "/opt/money-printer"
 
@@ -63,6 +84,11 @@ for recording in ${RECORDINGS}; do
     scorecard_args+=(--required "$recording")
 done
 scorecard_args+=("${require_args[@]}")
+# Zero-Cost Mode (docs/ZERO_COST_MODE.md): pass --zero-cost to activate
+# the relaxed gate (0.95 coverage, 14-day streak, stale bursts as warnings).
+if [ "$ZERO_COST" = "1" ]; then
+    scorecard_args+=(--zero-cost)
+fi
 
 SCORECARD_DIR="${LOG_DIR}/scorecards"
 mkdir -p "$SCORECARD_DIR"
@@ -99,12 +125,17 @@ else
     exit 1
 fi
 
-# Promotion gate (streak N/7): a lost day is visible within 24h, never
+# Promotion gate: a lost day is visible within 24h, never
 # silently (ops/runbooks/vps-phase0-bringup.md sec 3).
+# Under Zero-Cost Mode: 14-day streak (up from 7), 0.95 coverage (down
+# from 0.995), stale bursts are warnings only (docs/ZERO_COST_MODE.md).
 promote_args=(promote --scorecards-dir "$SCORECARD_DIR")
 for recording in ${RECORDINGS}; do
     promote_args+=(--required "$recording")
 done
+if [ "$ZERO_COST" = "1" ]; then
+    promote_args+=(--zero-cost)
+fi
 SCORE="$("${BIN_DIR}/mp-ops" "${promote_args[@]}")"
 echo "[$(date -u)] Promotion gate: $SCORE"
 if ! grep -q '"promotable": true' "$SCORECARD_PATH"; then
@@ -151,6 +182,25 @@ if [ "${#mat_args[@]}" -eq 0 ]; then
 else
     echo "[$(date -u)] Materializing features for $YESTERDAY"
     "$MAT_BIN" "${mat_args[@]}" --config "$FEATURES_TOML" --out "${LOG_DIR}/features" --git-sha "$GIT_SHA"
+fi
+
+# --- 2.7 Hot-tier retention enforcement (docs/RETENTION_POLICY.md) -----------
+# Under Zero-Cost Mode, raw tick data older than 14 days is deleted to
+# keep the VPS under the 30 GB free-tier cap. Only raw logs are pruned;
+# compacted Parquet in data/parquet/ and features in data/features/ are
+# kept (they are orders of magnitude smaller). Human-deletable: W-6
+# (never auto-delete without hash-verified compact proof).
+if [ "$ZERO_COST" = "1" ]; then
+    RETENTION_DAYS="${RETENTION_DAYS:-14}"
+    RAW_DIR="${LOG_DIR}/raw"
+    echo "[$(date -u)] Hot-tier retention: deleting raw logs older than ${RETENTION_DAYS} days"
+    DELETED=0
+    while IFS= read -r -d '' old_file; do
+        echo "[$(date -u)] Retention: deleting $(basename "$old_file")"
+        rm -f "$old_file"
+        DELETED=$((DELETED + 1))
+    done < <(find "$RAW_DIR" -maxdepth 1 -name '*.log' -type f -mtime +"$RETENTION_DAYS" -print0 2>/dev/null || true)
+    echo "[$(date -u)] Hot-tier retention: deleted $DELETED old raw log(s)"
 fi
 
 # --- 3. Archive verified copies; source recordings remain append-only ---

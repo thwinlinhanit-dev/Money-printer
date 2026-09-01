@@ -46,6 +46,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -132,6 +133,35 @@ def require_symbol(venue: str, symbol: str) -> tuple[str, str, int]:
     if symbol_id is None:
         raise TermdError(404, f"unknown symbol {venue}/{symbol}")
     return venue, symbol, symbol_id
+
+
+def _ops_status_payload() -> dict[str, Any]:
+    """Run mp-ops status and return its JSON output (CON-2).
+
+    The console is a *renderer* of `mp-ops status` — never a second source
+    of truth. A missing binary or a failed status command returns a
+    degraded payload with honest error messaging.
+    """
+    mp_ops_bin = _REPO_ROOT / "target" / "release" / "mp-ops"
+    if sys.platform == "win32":
+        mp_ops_bin = mp_ops_bin.with_suffix(".exe")
+    if not mp_ops_bin.exists():
+        return {"error": "mp-ops binary not found", "present": False}
+    try:
+        result = subprocess.run(
+            [str(mp_ops_bin), "status"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(_REPO_ROOT),
+        )
+        if result.returncode != 0:
+            return {"error": f"mp-ops status failed: {result.stderr.strip()}", "present": False}
+        return json.loads(result.stdout)
+    except subprocess.TimeoutExpired:
+        return {"error": "mp-ops status timed out", "present": False}
+    except json.JSONDecodeError as e:
+        return {"error": f"mp-ops status output not JSON: {e}", "present": False}
 
 
 def symbols_payload() -> dict[str, Any]:
@@ -597,7 +627,9 @@ class TermdHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         try:
             parsed = urlparse(self.path)
-            if parsed.path == "/v1/ws":
+            if parsed.path == "/v1/status":
+                self._json(_ops_status_payload())
+            elif parsed.path == "/v1/ws":
                 self._websocket()
             elif parsed.path == "/v1/symbols":
                 self._json(symbols_payload())

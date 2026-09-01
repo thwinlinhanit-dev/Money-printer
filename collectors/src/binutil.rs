@@ -132,6 +132,7 @@ fn exclusive_lock_file(path: &Path) -> io::Result<File> {
 
 /// Process-lifetime exclusive lock so two collectors cannot write the same
 /// log (one process owns one recording). Held open for the whole run.
+#[derive(Debug)]
 pub struct InstanceLock {
     _file: File,
     path: PathBuf,

@@ -766,6 +766,46 @@ pub struct AccumulationParams {
     pub inner: AccumulationConfig,
 }
 
+/// Params for the footprint signal catalog (spec 049): volume.bubble and
+/// market.profile features.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FootprintSignalParams {
+    /// Enable/disable footprint signals (volume.bubble, market.profile).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Rolling window (bars) for volume percentile rank.
+    #[serde(default = "default_volume_bubble_window")]
+    pub volume_bubble_window: usize,
+    /// Rolling window (bars) for market profile POC/VAH/VAL.
+    #[serde(default = "default_market_profile_window")]
+    pub market_profile_window: usize,
+    /// Bucket size as multiple of ATR for market profile.
+    #[serde(default = "default_market_profile_bucket_atr")]
+    pub market_profile_bucket_atr: f64,
+}
+
+fn default_volume_bubble_window() -> usize {
+    100
+}
+fn default_market_profile_window() -> usize {
+    50
+}
+fn default_market_profile_bucket_atr() -> f64 {
+    0.5
+}
+
+impl Default for FootprintSignalParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            volume_bubble_window: default_volume_bubble_window(),
+            market_profile_window: default_market_profile_window(),
+            market_profile_bucket_atr: default_market_profile_bucket_atr(),
+        }
+    }
+}
+
 /// Params for the climax variant pattern family (6 non-standard exhaustion/
 /// expansion signals from BTC daily analysis 2017-2026).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -875,6 +915,9 @@ pub struct FeaturesConfig {
     /// discovered from BTC daily analysis 2017–2026).
     #[serde(default)]
     pub climax_variants: ClimaxVariantsParams,
+    /// Footprint signal catalog (spec 049): volume.bubble + market.profile.
+    #[serde(default)]
+    pub footprint_signals: FootprintSignalParams,
 }
 
 fn default_bar_tf() -> i64 {
@@ -908,6 +951,7 @@ impl Default for FeaturesConfig {
             accumulation: AccumulationParams::default(),
             corr: crate::corr::CorrConfig::default(),
             climax_variants: ClimaxVariantsParams::default(),
+            footprint_signals: FootprintSignalParams::default(),
         }
     }
 }

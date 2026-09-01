@@ -5,11 +5,16 @@
 # Streams: trades + activeAssetCtx (funding + mark + OI).
 # No L2 book. swing_only = true drops l2Book.
 #
+# Free-tier VPS tuning: backoff_base_ms=500 (vs default 250) and
+# backoff_cap_ms=60000 (vs default 30000) to ride out transient network
+# blips on shared-bandwidth free-tier without hammering the reconnect loop.
+#
 # Start manually:
 #   cargo run -p mp-collectors --features live-ws --bin mp-collector -- \
 #     --config collectors/zero_cost/hyperliquid-eth.toml
 #
-# Or via swing_collectors.ps1 (uses swing/hyperliquid-eth.toml which is identical).
+# Or via swing_collectors.ps1 (uses swing/hyperliquid-eth.toml which is
+# identical except for backoff tuning — use this config on free-tier VPS).
 #
 # Writes: data/raw/{date}_hyperliquid_ETH.log
 # Required gate streams (Zero-Cost): trade funding mark_price open_interest
@@ -19,3 +24,9 @@ data_dir = "data"
 channel_capacity = 10000
 backpressure = "drop_oldest"
 swing_only = true
+
+# Free-tier VPS reconnect tuning (COL-1): higher base delays the first
+# retry past a transient blip; higher cap avoids exhausting retries
+# during a longer outage (e.g. free-tier network maintenance).
+backoff_base_ms = 500
+backoff_cap_ms = 60000

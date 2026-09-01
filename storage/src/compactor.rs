@@ -9,7 +9,7 @@ use crate::manifest::{self, QualityManifest};
 use crate::{
     layout, parquet_macro, parquet_options, parquet_positions, parquet_trades, StorageError,
 };
-use mp_core::{EventEnvelope, SymbolTable, Venue};
+use mp_core::{EventEnvelope, MarketEvent, SymbolTable, Venue};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -94,6 +94,14 @@ pub fn compact_day(
 ) -> Result<CompactStats, StorageError> {
     let mut stats = CompactStats::default();
 
+    // LAB-5: count trade events before compaction so we can verify zero-row
+    // writes against a non-zero input. A live HL day with `n_trades > 0` and
+    // parquet_rows == 0 is a bug, not success.
+    let n_trade_events = events
+        .iter()
+        .filter(|e| matches!(e.body, MarketEvent::Trade { .. }))
+        .count();
+
     // Group Parquet-backed streams by (stream, symbol). BTreeMap ⇒
     // deterministic write order (CONV-10).
     let mut by_stream: BTreeMap<(&'static str, u32), Vec<EventEnvelope>> = BTreeMap::new();
@@ -164,6 +172,18 @@ pub fn compact_day(
             }
             _ => {}
         }
+    }
+
+    // LAB-5: if the raw log decoded trade events but compaction wrote a
+    // NEW trade parquet file with zero rows, refuse — "1 file written
+    // (0 rows)" on a live day is a bug, not success. Idempotent re-runs
+    // (trades_files_skipped > 0, nothing written) are exempt.
+    if n_trade_events > 0 && stats.trade_rows == 0 && stats.trades_files_written > 0 {
+        return Err(StorageError::Refused(format!(
+            "LAB-5: {}/{}: raw log decoded {n_trade_events} trade(s) but \
+             compact wrote 0 trade rows — refusing zero-row parquet on non-empty raw",
+            layout::venue_slug(venue), date
+        )));
     }
 
     // Manifest for ALL streams (STO-2).

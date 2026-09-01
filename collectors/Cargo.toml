@@ -17,8 +17,11 @@ path = "src/lib.rs"
 # PD-1: public data only — this transport never sends orders or auth.
 live-ws = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:url", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 # Live HTTP client for REST snapshot fetches (spec 020). Separate from live-ws
-# so snapshot fetch can be added independently.
-live-http = ["dep:reqwest", "dep:ring"]
+# so snapshot fetch can be added independently. tokio (already an optional
+# dependency for live-ws, incl. the `signal` feature) is shared here so the
+# REST poller binaries get the same SIGTERM/Ctrl+C shutdown flag (spec 014
+# FSP-4 collector side) without a new dependency.
+live-http = ["dep:reqwest", "dep:ring", "dep:tokio"]
 
 [dependencies]
 mp-core = { path = "../core" }
