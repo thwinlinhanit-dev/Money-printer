@@ -1,5 +1,12 @@
 //! Multi-symbol collector fan-out (spec 032, MSC-1..10).
 //!
+//! **UNWIRED — DEAD CODE (A-4, audit 2026-09-02).** No binary references this
+//! module: `mp-collector` (and every other bin) drives the single-symbol
+//! `Collector` path only. Spec 032 (MSC-1..10) is PENDING — nothing here runs
+//! in production, and its presence must NOT be read as "multi-symbol
+//! collection is implemented". Kept as an explicit, unit-tested scaffold for
+//! the future spec-032 slice; wire it through a binary before relying on it.
+//!
 //! Deployment grouping: ONE `mp-collector` process may own N symbols of one
 //! venue while every existing consumer keeps its per-symbol contract — one
 //! daily log `{yyyymmdd}_{venue}_{symbol}.log`, one exclusive
@@ -57,7 +64,9 @@ pub fn resolve_symbols(
                 }
             }
             if out.is_empty() {
-                return Err("symbols list must contain at least one non-empty symbol (MSC-1)".into());
+                return Err(
+                    "symbols list must contain at least one non-empty symbol (MSC-1)".into(),
+                );
             }
             Ok(out)
         }
@@ -133,6 +142,11 @@ pub fn bybit_frames_for_symbols(symbols: &[String], swing_only: bool) -> Vec<Str
 /// One owned symbol's log slot: its own writer, rotation date, symbol-table
 /// count and recv clock (MSC-3/MSC-4) — one symbol's date roll or recv
 /// regression can never disturb another's.
+/// `symbol` is retained as part of the designed per-symbol slot contract but
+/// is not read yet — the module itself is an UNWIRED scaffold (A-4, audit
+/// 2026-09-02), so the dead-code deny is consciously waived here, scoped to
+/// this struct only.
+#[allow(dead_code)]
 struct SymbolLog {
     symbol: String,
     current_date: String,
@@ -235,7 +249,7 @@ impl WriterTable {
             Coinalyze => "coinalyze",
         }
     }
-/// Route one symbol's batch to its own log: rotate if the date changed,
+    /// Route one symbol's batch to its own log: rotate if the date changed,
     /// persist the symbol metas when they grew (MSC-7), clamp recv order per
     /// log (MSC-4), append, flush. Returns the new running recv for the
     /// caller's reference (unused by the binary; kept for tests).
@@ -244,7 +258,7 @@ impl WriterTable {
         symbol: &str,
         date: &str,
         metas: &[SymbolMeta],
-        events: &mut Vec<EventEnvelope>,
+        events: &mut [EventEnvelope],
     ) -> Result<(), LogError> {
         self.open_writer(symbol, date)?;
         let log = self
@@ -308,9 +322,9 @@ impl WriterTable {
 mod tests {
     use super::*;
     use mp_core::event::Side;
-    use mp_core::SymbolTable;
     use mp_core::log::LogReader;
-    use mp_core::{InstrumentKind, StatusKind, SymbolId};
+    use mp_core::SymbolTable;
+    use mp_core::{StatusKind, SymbolId};
     use std::path::PathBuf;
 
     fn tmp_dir(tag: &str) -> PathBuf {
@@ -322,20 +336,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).expect("create temp dir");
         d
-    }
-
-    fn meta(id: SymbolId, venue: Venue, sym: &str) -> SymbolMeta {
-        SymbolMeta::new(
-            id,
-            venue,
-            sym,
-            "",
-            "",
-            InstrumentKind::Perp,
-            f64::NAN,
-            f64::NAN,
-            f64::NAN,
-        )
     }
 
     fn trade(venue: Venue, sym: SymbolId, recv: i64, seq: u64) -> EventEnvelope {
@@ -369,7 +369,11 @@ mod tests {
     }
 
     fn read_events(path: &std::path::Path) -> Vec<EventEnvelope> {
-        LogReader::open(path).expect("open log").by_ref().filter_map(|r| r.ok()).collect()
+        LogReader::open(path)
+            .expect("open log")
+            .by_ref()
+            .filter_map(|r| r.ok())
+            .collect()
     }
 
     #[test]
@@ -407,7 +411,7 @@ mod tests {
         // All-empty list rejected.
         assert!(resolve_symbols(None, Some(vec!["  ".into()])).is_err());
     }
-#[test]
+    #[test]
     fn msc_1_fan_out_writes_per_symbol_logs() {
         let dir = tmp_dir("logs");
         let mut table = WriterTable::new(
@@ -550,7 +554,10 @@ mod tests {
             .unwrap();
         let btc_events = read_events(&dir.join("20260814_bybit_BTCUSDT.log"));
         let recvs: Vec<i64> = btc_events.iter().map(|e| e.recv_ts_ns).collect();
-        assert!(recvs.windows(2).all(|w| w[0] <= w[1]), "clamped per log: {recvs:?}");
+        assert!(
+            recvs.windows(2).all(|w| w[0] <= w[1]),
+            "clamped per log: {recvs:?}"
+        );
 
         // ETHUSDT's first event at recv 1 stays 1 — its own clock is untouched
         // by BTCUSDT's clamp (independent last_written_recv_ns, MSC-4).
@@ -576,28 +583,41 @@ mod tests {
 
         // 5 symbols × 4 topics = 20 args > the 10-arg per-frame cap → 3 frames
         // (2+2+1 symbols), none over the cap.
-        let syms: Vec<String> = ["A", "B", "C", "D", "E"].iter().map(|s| s.to_string()).collect();
+        let syms: Vec<String> = ["A", "B", "C", "D", "E"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let frames = bybit_frames_for_symbols(&syms, false);
         assert_eq!(frames.len(), 3, "expected 2+2+1 symbol chunks");
         for f in &frames {
-            assert!(f.starts_with(r#"{"op":"subscribe","args":"#), "frame shape: {f}");
+            assert!(
+                f.starts_with(r#"{"op":"subscribe","args":"#),
+                "frame shape: {f}"
+            );
             let args = f
                 .trim_start_matches(r#"{"op":"subscribe","args":"#)
                 .trim_end_matches('}');
             // Count topics by counting topic separators + 1.
             let n_topics = args.matches(",\"").count() + 1;
-            assert!(n_topics <= 10, "frame exceeds bybit per-frame topic cap: {f}");
+            assert!(
+                n_topics <= 10,
+                "frame exceeds bybit per-frame topic cap: {f}"
+            );
         }
         // All 20 topics present across the frames, in order.
         let joined = frames.join("\n");
         for s in &syms {
             for t in ["publicTrade", "orderbook.50", "tickers", "allLiquidation"] {
-                assert!(joined.contains(&format!("\"{t}.{s}\"")), "missing {t}.{s}: {joined}");
+                assert!(
+                    joined.contains(&format!("\"{t}.{s}\"")),
+                    "missing {t}.{s}: {joined}"
+                );
             }
         }
 
         // Swing-only: 3 topics/symbol → 3 symbols per frame; 4 symbols → 2 frames.
-        let swing = bybit_frames_for_symbols(&["A".into(), "B".into(), "C".into(), "D".into()], true);
+        let swing =
+            bybit_frames_for_symbols(&["A".into(), "B".into(), "C".into(), "D".into()], true);
         assert_eq!(swing.len(), 2);
         assert!(
             !swing.iter().any(|f| f.contains("orderbook.50")),
@@ -616,7 +636,7 @@ mod tests {
         );
         let mut st = SymbolTable::new();
         let btc = st.intern_default(Venue::Bybit, "BTCUSDT");
-        let eth = st.intern_default(Venue::Bybit, "ETHUSDT");
+        let _eth = st.intern_default(Venue::Bybit, "ETHUSDT");
         let metas = st.metas().to_vec();
 
         let disconnected = status(Venue::Bybit, btc, 50, StatusKind::Disconnected);
@@ -631,14 +651,20 @@ mod tests {
         assert!(
             matches!(
                 btc_events[0].body,
-                MarketEvent::Status { kind: StatusKind::Disconnected, .. }
+                MarketEvent::Status {
+                    kind: StatusKind::Disconnected,
+                    ..
+                }
             ),
             "status must land in every owned log (MSC-10)"
         );
         assert!(
             matches!(
                 eth_events[0].body,
-                MarketEvent::Status { kind: StatusKind::Disconnected, .. }
+                MarketEvent::Status {
+                    kind: StatusKind::Disconnected,
+                    ..
+                }
             ),
             "status must land in every owned log (MSC-10)"
         );
@@ -672,7 +698,12 @@ mod tests {
         // The fan-out process opens the SAME file name (same day) — W-6
         // append-only: old frames stay, new frames land after, nothing is
         // overwritten and no torn-tail is forced.
-        let mut table = WriterTable::new(dir.clone(), Venue::Bybit, &["BTCUSDT".into()], FsyncPolicy::default());
+        let mut table = WriterTable::new(
+            dir.clone(),
+            Venue::Bybit,
+            &["BTCUSDT".into()],
+            FsyncPolicy::default(),
+        );
         let mut st = SymbolTable::new();
         let btc = st.intern_default(Venue::Bybit, "BTCUSDT");
         let metas = st.metas().to_vec();
@@ -682,7 +713,11 @@ mod tests {
             .unwrap();
 
         let after = read_events(&legacy_path);
-        assert_eq!(after.len(), 2, "legacy frame preserved + new frame appended");
+        assert_eq!(
+            after.len(),
+            2,
+            "legacy frame preserved + new frame appended"
+        );
         assert_eq!(after[0].recv_ts_ns, 10);
         assert_eq!(after[1].recv_ts_ns, 20);
         let _ = std::fs::remove_dir_all(&dir);
@@ -697,6 +732,7 @@ mod tests {
             status(Venue::Bybit, btc, 2, StatusKind::GapDetected),
         ];
         let statuses = WriterTable::status_events(&events);
-        assert_eq!(statuses.len(), 1);        assert!(matches!(statuses[0].body, MarketEvent::Status { .. }));
+        assert_eq!(statuses.len(), 1);
+        assert!(matches!(statuses[0].body, MarketEvent::Status { .. }));
     }
 }

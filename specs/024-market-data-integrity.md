@@ -285,15 +285,21 @@ authenticated trading, strategy changes, and long-running hosting policy.
   (`docs/ZERO_COST_MODE.md`), the Phase-0 gate is relaxed:
   - Required streams: `trade funding mark_price open_interest` (no `book`)
   - Coverage threshold: >= 0.95 (down from 0.995)
-  - Stale bursts: warnings only, not a promotion blocker
+  - Stale bursts: warnings at the DAY level (`stale_stream` stays a
+    non-blocking finding); the promotion window still requires a burst-free
+    run — unchanged from full mode (aligned 2026-09-02, A-7 audit: the docs
+    previously claimed the window was skipped, which the code never did)
   - Full book absence: expected, not a dirty finding
   - Promotion streak: 14 consecutive clean days (up from 7)
   - Determinism check: still required on the decision path
   Rationale: with $0 budget and free-tier constraints, the system must be
   able to promote without full book data. The longer streak compensates for
-  the lower per-day bar. Zero-Cost Mode is activated by
-  `--zero-cost-mode` flag on `mp-ops scorecard`/`promote`, or by setting
-  `mode = "zero-cost"` in the ops config.
+  the lower per-day bar. Zero-Cost Mode is activated by the `--zero-cost`
+  or `--zero-cost-mode` flag (both accepted, A-11 audit 2026-09-02) on
+  `mp-ops scorecard`/`promote`/`compact`; the daily pipeline passes it
+  automatically when `ZERO_COST=1`. (The previously documented
+  `mode = "zero-cost"` ops-config path is NOT implemented — do not rely
+  on it.)
 - 2026-08-25 (proactive WS connection rotation — Hyperliquid venue-TTL
   mitigation): the Phase-0 promotion amendment requires **zero
   `stale_bursts`** across the qualifying window, and every burst since

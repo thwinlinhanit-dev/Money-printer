@@ -117,7 +117,7 @@ Under Zero-Cost Mode:
 |---|---|---|
 | Required streams | trade, book, funding, mark_price, open_interest | trade, funding, open_interest, mark_price |
 | Coverage threshold | >= 0.995 | >= 0.95 |
-| Stale bursts | Blocking (must be 0 for promotion) | Warning only |
+| Stale bursts | Blocking (must be 0 for promotion) | Warning at the day level; the promotion window still requires a burst-free run (aligned 2026-09-02, A-7) |
 | Full book absence | DIRTY | Expected, not a finding |
 | Promotion streak | 7 consecutive clean days | 14 consecutive clean days |
 | Determinism check | Required | Required (on decision path) |

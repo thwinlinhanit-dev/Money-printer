@@ -26,9 +26,11 @@ pub mod fred;
 pub mod hyperliquid;
 pub mod hyperliquid_positions;
 pub mod ibit;
-pub mod multisym;
+// A-4 (audit 2026-09-02): UNWIRED — spec 032 scaffold, referenced by no
+// binary. Do not treat its presence as implemented multi-symbol collection.
 pub mod json;
 pub mod kraken;
+pub mod multisym;
 pub mod netflow;
 pub mod normalize;
 pub mod okx;
