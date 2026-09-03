@@ -21,12 +21,9 @@ fn zero_cost_btc_config_parses() {
 
     assert_eq!(config["venue"].as_str().unwrap(), "hyperliquid");
     assert_eq!(config["symbol"].as_str().unwrap(), "BTC");
-    assert_eq!(config["swing_only"].as_bool().unwrap(), true);
+    assert!(config["swing_only"].as_bool().unwrap());
     assert_eq!(config["backpressure"].as_str().unwrap(), "drop_oldest");
-    assert_eq!(
-        config["channel_capacity"].as_integer().unwrap(),
-        10_000
-    );
+    assert_eq!(config["channel_capacity"].as_integer().unwrap(), 10_000);
 }
 
 #[test]
@@ -36,12 +33,9 @@ fn zero_cost_eth_config_parses() {
 
     assert_eq!(config["venue"].as_str().unwrap(), "hyperliquid");
     assert_eq!(config["symbol"].as_str().unwrap(), "ETH");
-    assert_eq!(config["swing_only"].as_bool().unwrap(), true);
+    assert!(config["swing_only"].as_bool().unwrap());
     assert_eq!(config["backpressure"].as_str().unwrap(), "drop_oldest");
-    assert_eq!(
-        config["channel_capacity"].as_integer().unwrap(),
-        10_000
-    );
+    assert_eq!(config["channel_capacity"].as_integer().unwrap(), 10_000);
 }
 
 #[test]
@@ -118,9 +112,8 @@ fn zero_cost_configs_drop_book_via_swing_only() {
 
     for name in &["hyperliquid-btc.toml", "hyperliquid-eth.toml"] {
         let config = parse_collector_config(&dir.join(name));
-        assert_eq!(
+        assert!(
             config["swing_only"].as_bool().unwrap(),
-            true,
             "{name}: swing_only must be true to drop l2Book under Zero-Cost"
         );
     }
