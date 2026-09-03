@@ -3048,7 +3048,6 @@ fn pap_7_telegram_daily_paper_payload_shape() {
     // - id=daily-paper
     // - detail string with strategy, seed, latched, faults, expectancy, trades
     // - severity: p2 for faults>0, p3 for faults==0
-    use mp_ops::Severity;
 
     // Fault-free case (severity p3).
     let detail_no_faults = "paper 2026-08-30: strategy=swing-range-reclaim-v1 seed=42 \

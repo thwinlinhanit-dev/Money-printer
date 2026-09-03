@@ -77,12 +77,14 @@ fi
 # (the Binance bootstrap downloader's rate-limit/backoff clock — a network
 # edge like a collector, not a decision path).
 # Match actual calls (`::now(`) so doc-comment mentions don't false-positive.
+# (A-10, audit 2026-09-02: storage/src/audit.rs was whitelisted here although
+# it contains no clock call — an exemption that would silently pass future
+# clock usage. Removed; audit.rs is a decision path.)
 clock_hits=$(tracked 'core/**/*.rs' 'features/**/*.rs' 'strategies/**/*.rs' \
                      'sim/**/*.rs' 'risk/**/*.rs' 'funnel/**/*.rs' 'storage/**/*.rs' 2>/dev/null \
   | grep -vE '(^|/)(tests|benches)/' \
   | grep -v 'core/src/wall_clock.rs' \
   | grep -v 'storage/src/historical_download.rs' \
-  | grep -v 'storage/src/audit.rs' \
   | xargs -r grep -nE '(SystemTime|Instant|Utc|Local)::now\(' 2>/dev/null || true)
 if [ -n "$clock_hits" ]; then
   echo "$clock_hits" >&2

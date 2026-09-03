@@ -152,12 +152,14 @@ if ($liveHits.Count -gt 0) {
 # Same allowlist as the bash version: tests/benches, the ONE sanctioned
 # wall-clock reader core/src/wall_clock.rs, and the live historical-download
 # edge storage/src/historical_download.rs. Match actual calls (`::now(`) so
-# doc-comment mentions don't false-positive.
+# doc-comment mentions don't false-positive. (A-10, audit 2026-09-02: the
+# needless storage/src/audit.rs exemption was removed — the file has no clock
+# call and must not silently gain one.)
 $clockRe = '(SystemTime|Instant|Utc|Local)::now\('
 $clockHits = @()
 foreach ($f in @(Get-TrackedPat @('core/**/*.rs', 'features/**/*.rs', 'strategies/**/*.rs', 'sim/**/*.rs', 'risk/**/*.rs', 'funnel/**/*.rs', 'storage/**/*.rs'))) {
     if ($f -match '(^|/)(tests|benches)/') { continue }
-    if ($f -eq 'core/src/wall_clock.rs' -or $f -eq 'storage/src/historical_download.rs' -or $f -eq 'storage/src/audit.rs') { continue }
+    if ($f -eq 'core/src/wall_clock.rs' -or $f -eq 'storage/src/historical_download.rs') { continue }
     $full = Join-Path $root $f
     if (-not (Test-Path -LiteralPath $full)) { continue }
     $m = Select-String -LiteralPath $full -Pattern $clockRe -AllMatches -CaseSensitive

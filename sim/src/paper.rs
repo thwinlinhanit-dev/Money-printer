@@ -309,8 +309,8 @@ mod tests {
         assert!(hash != 0, "PAP-6: paper must produce a decision-log hash");
         assert_eq!(consumed, 20, "PAP-6: must consume all events");
         assert!(
-            summary.trades >= 0,
-            "PAP-6: summary must have trade count for journal"
+            summary.trades <= consumed,
+            "PAP-6: closed trades cannot exceed events consumed (journal field sanity)"
         );
 
         // Simulate the PS1 script's journal entry format.
@@ -444,9 +444,9 @@ mod tests {
         }
         assert_eq!(streak, 1, "PAP-9: streak must be 1 after one fault-free session");
 
-        // After a fault, streak resets to 0.
-        let mut streak_after_fault = streak;
-        streak_after_fault = 0; // fault resets
+        // After a fault, streak resets to 0 (the reset path ignores the prior
+        // count entirely — that is the reset contract).
+        let streak_after_fault = 0u32;
         assert_eq!(streak_after_fault, 0, "PAP-9: fault must reset streak to 0");
     }
 }
