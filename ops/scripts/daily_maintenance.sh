@@ -5,7 +5,9 @@
 #
 # Zero-Cost Mode (2026-08-31): set ZERO_COST=1 (or leave default) to run
 # under $0 budget constraints — Hyperliquid-only, no book stream, relaxed
-# gate. Set ZERO_COST=0 for full-mode (all venues, book required).
+# gate (0.95 coverage, 14-day streak; stale-burst findings are day-level
+# warnings — the promotion window still requires a burst-free run, A-7).
+# Set ZERO_COST=0 for full-mode (all venues, book required).
 # See docs/ZERO_COST_MODE.md.
 set -euo pipefail
 
@@ -203,22 +205,57 @@ else
 fi
 
 # --- 2.7 Hot-tier retention enforcement (docs/RETENTION_POLICY.md) -----------
-# Under Zero-Cost Mode, raw tick data older than 14 days is deleted to
-# keep the VPS under the 30 GB free-tier cap. Only raw logs are pruned;
-# compacted Parquet in data/parquet/ and features in data/features/ are
-# kept (they are orders of magnitude smaller). Human-deletable: W-6
-# (never auto-delete without hash-verified compact proof).
+# Under Zero-Cost Mode, raw tick data older than 14 days may be deleted to
+# keep the VPS under the 30 GB free-tier cap — but ONLY through the
+# hash-verified `mp-ops prune` gate (AUDIT-2026-09-02 A-1/A-12). A raw log is
+# removed only when ALL hold:
+#   (a) it is a gate recording (in $RECORDINGS) — never a swing/positions/
+#       macro log that has no Parquet;
+#   (b) its day has a PASSING scorecard (INT-4) — never an unclean day whose
+#       pipeline run skipped compaction (the C-2 permanent-loss window);
+#   (c) `mp-ops prune` confirms the compaction manifest + Parquet exist and
+#       the Parquet footer's source_log_hash still matches the CURRENT raw
+#       bytes (W-6/C-2), then removes it and journals the deletion to
+#       data/retention_delete_manifest.jsonl.
+# Compacted Parquet in data/cold/ and features in data/features/ are always
+# kept (orders of magnitude smaller).
 if [ "$ZERO_COST" = "1" ]; then
     RETENTION_DAYS="${RETENTION_DAYS:-14}"
     RAW_DIR="${LOG_DIR}/raw"
-    echo "[$(date -u)] Hot-tier retention: deleting raw logs older than ${RETENTION_DAYS} days"
+    echo "[$(date -u)] Hot-tier retention: scanning raw logs older than ${RETENTION_DAYS} days (hash-verified gate only)"
     DELETED=0
+    FAILED=0
     while IFS= read -r -d '' old_file; do
-        echo "[$(date -u)] Retention: deleting $(basename "$old_file")"
-        rm -f "$old_file"
-        DELETED=$((DELETED + 1))
+        base=$(basename "$old_file")
+        matched=""
+        for recording in ${RECORDINGS}; do
+            ven="${recording%%:*}"; sym="${recording#*:}"
+            case "$base" in
+                [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_"$ven"_"$sym".log) matched="$ven $sym"; break ;;
+            esac
+        done
+        if [ -z "$matched" ]; then
+            echo "[$(date -u)] Retention: skipping non-gate log $base (no Parquet is written for it)"
+            continue
+        fi
+        date_flat="${base%%_*}"
+        date_dash="${date_flat:0:4}-${date_flat:4:2}-${date_flat:6:2}"
+        read -r ven sym <<< "$matched"
+        sc="${SCORECARD_DIR}/${date_dash}.json"
+        # INT-4 gate: never auto-delete a day that did not pass the gate.
+        if [ ! -f "$sc" ] || ! grep -Eq '"promotable"[[:space:]]*:[[:space:]]*true' "$sc"; then
+            echo "[$(date -u)] Retention: SKIP $base (no passing scorecard $sc) — unclean/never-compacted day is kept"
+            continue
+        fi
+        if "${BIN_DIR}/mp-ops" prune --date "$date_dash" --venue "$ven" --symbol "$sym" >> "${SCORECARD_DIR}/pipeline.log" 2>&1; then
+            echo "[$(date -u)] Retention: pruned $base (hash-verified)"
+            DELETED=$((DELETED + 1))
+        else
+            echo "[$(date -u)] Retention: REFUSED $base (compact proof incomplete) — left in place" >&2
+            FAILED=$((FAILED + 1))
+        fi
     done < <(find "$RAW_DIR" -maxdepth 1 -name '*.log' -type f -mtime +"$RETENTION_DAYS" -print0 2>/dev/null || true)
-    echo "[$(date -u)] Hot-tier retention: deleted $DELETED old raw log(s)"
+    echo "[$(date -u)] Hot-tier retention: deleted $DELETED verified raw log(s), ${FAILED} refused (kept)"
 fi
 
 # --- 3. Archive verified copies; source recordings remain append-only ---

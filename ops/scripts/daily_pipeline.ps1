@@ -33,9 +33,16 @@
 #   .\ops\scripts\daily_pipeline.ps1 -SkipCompact   # scorecard + verdict only
 #
 # Zero-Cost Mode (docs/ZERO_COST_MODE.md):
-#   Set $env:ZERO_COST=0 for full-mode (all venues, book stream).
-#   Default is 1 (free-tier VPS): Hyperliquid-only, no book, relaxed gate.
+#   Set $env:ZERO_COST=1 to arm Zero-Cost Mode (Hyperliquid-only, no book,
+#   relaxed gate) AND enable hot-tier raw deletion.
+#   Default is 0 (full-mode): an UNSET ZERO_COST must NOT arm destructive
+#   semantics on this host. A Windows Scheduled Task does not inherit the
+#   shell environment, so unset was silently becoming 1 (A-2, audit
+#   2026-09-02) — narrowing recordings and arming deletion on the desktop
+#   cold-storage host. Zero-Cost is now an explicit opt-in.
 #   $env:RETENTION_DAYS controls hot-tier pruning (default: 14).
+#   Use .\ops\scripts\deploy_zero_cost_pipeline.sh / set ZERO_COST=1 in the
+#   task env to run the VPS under Zero-Cost.
 
 param(
     [string]$Date,                 # YYYY-MM-DD or YYYYMMDD (default: yesterday UTC)
@@ -145,11 +152,12 @@ if ($gr[1] -ne 0) {
 Log "guardrails: all checks passed" "INFO"
 
 # ---- Zero-Cost Mode switch (docs/ZERO_COST_MODE.md) ------------------------
-# ZERO_COST defaults to 1 for the VPS (free-tier is the primary target).
-# Set $env:ZERO_COST=0 on the Windows host for full-mode recording.
-# Override $env:RECORDINGS, $env:REQUIRED_STREAMS before invoking this
-# script to customise the recording/stream sets.
-if (-not $env:ZERO_COST) { $env:ZERO_COST = "1" }
+# A-2 (audit 2026-09-02): ZERO_COST must be an EXPLICIT opt-in. Unset now
+# defaults to 0 (full mode). A Windows Scheduled Task does not inherit the
+# shell env, so silently defaulting to 1 would narrow the required recordings
+# AND arm raw deletion on this host. Set ZERO_COST=1 in the task/env (the VPS
+# path via deploy_zero_cost_pipeline.sh) to arm Zero-Cost.
+if (-not $env:ZERO_COST) { $env:ZERO_COST = "0" }
 if ($env:ZERO_COST -eq "1") {
     # Override recordings to Hyperliquid-only (permissionless, no geo-blocks),
     # BTC + ETH only (storage bounded). No book stream.
@@ -158,9 +166,9 @@ if ($env:ZERO_COST -eq "1") {
     }
     # Drop 'book' from required streams — Zero-Cost does not record L2 book.
     $RequiredStreams = @("trade", "funding", "mark_price", "open_interest")
-    Log "Zero-Cost Mode: recordings=$($Recordings -join ',') streams=$($RequiredStreams -join ',')"
+    Log "Zero-Cost Mode ARMED: recordings=$($Recordings -join ',') streams=$($RequiredStreams -join ',') - hot-tier raw deletion is ENABLED (A-2)" "WARN"
 } else {
-    Log "Full-mode: recordings=$($Recordings -join ',') streams=$($RequiredStreams -join ',')"
+    Log "Full-mode: recordings=$($Recordings -join ',') streams=$($RequiredStreams -join ',') (ZERO_COST unset -> 0, raw deletion OFF)"
 }
 
 # ---- task registration ------------------------------------------------------
@@ -751,25 +759,66 @@ if (-not $SkipMaterialize) {
 }
 
 # ---- 2.7 Hot-tier retention enforcement (docs/RETENTION_POLICY.md) ---------
-# Under Zero-Cost Mode, raw tick data older than 14 days is deleted to
-# keep the VPS under the 30 GB free-tier cap. Only raw logs are pruned;
-# compacted Parquet in data/parquet/ and features in data/features/ are
-# kept (they are orders of magnitude smaller). Human-deletable: W-6.
+# Under ZERO_COST=1, raw tick data older than 14 days MAY be deleted — but
+# ONLY through the hash-verified `mp-ops prune` gate (AUDIT-2026-09-02
+# A-1/A-12): removed only when (a) it is a gate recording, (b) its day had a
+# PASSING scorecard (INT-4), and (c) `mp-ops prune` confirms compaction
+# manifest + Parquet whose source_log_hash still matches the CURRENT raw bytes
+# (W-6/C-2). Deletions are journaled to data\retention_delete_manifest.jsonl.
+# A day that never compacted is NEVER auto-deleted. Compacted Parquet + features always kept.
 if ($env:ZERO_COST -eq "1") {
     if (-not $env:RETENTION_DAYS) { $env:RETENTION_DAYS = "14" }
     $retentionDays = [int]$env:RETENTION_DAYS
     $rawDir = Join-Path $root "data\raw"
     $cutoff = (Get-Date).ToUniversalTime().AddDays(-$retentionDays)
-    Log "Hot-tier retention: deleting raw logs older than $retentionDays days (before $($cutoff.ToString('yyyy-MM-dd')) UTC)"
-    $deleted = 0
-    Get-ChildItem -Path $rawDir -Filter "*.log" -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.LastWriteTime.ToUniversalTime() -lt $cutoff } |
-        ForEach-Object {
-            Log "Retention: deleting $($_.Name)"
-            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+    Log "Hot-tier retention: scanning raw logs older than $retentionDays days (before $($cutoff.ToString('yyyy-MM-dd')) UTC) - hash-verified gate only (A-1)"
+    $deleted = 0; $refused = 0; $skipped = 0
+    $candidates = @()
+    foreach ($rec in $Recordings) {
+        $p = $rec -split ':'
+        $v = $p[0]; $s = $p[1]
+        Get-ChildItem -Path $rawDir -Filter "*_${v}_${s}.log" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d{8}_' -and $_.LastWriteTime.ToUniversalTime() -lt $cutoff } |
+            ForEach-Object { $candidates += ,@{ File = $_; Rec = $rec } }
+    }
+    foreach ($c in $candidates) {
+        $base = $c.File.Name
+        $dateFlat = $base.Substring(0,8)
+        $dash = "{0}-{1}-{2}" -f $dateFlat.Substring(0,4), $dateFlat.Substring(4,2), $dateFlat.Substring(6,2)
+        $p = $c.Rec -split ':'
+        $cardFile = Join-Path $scoreDir "$dash.json"
+        # INT-4 gate: never auto-delete a day that did not pass the gate.
+
+        if (-not (Test-Path -LiteralPath $cardFile)) {
+
+            Log "Retention: SKIP $base (no scorecard $dash.json - unclean/never-compacted day is kept)" "WARN"
+            $skipped++; continue
+        }
+        $card = Get-Content -LiteralPath $cardFile -Raw | ConvertFrom-Json
+        if (-not [bool]$card.promotable) {
+
+            Log "Retention: SKIP $base (day $dash did not pass the gate)" "WARN"
+            $skipped++; continue
+        }
+        $pruneArgs = @("prune", "--date", $dash, "--venue", $p[0], "--symbol", $p[1])
+        $env:RUST_LOG = "off"
+        Push-Location $root
+        try {
+            $pruneRes = Invoke-Native -FilePath $mpOps -Arguments $pruneArgs
+        } finally {
+            Pop-Location
+            Remove-Item Env:RUST_LOG -ErrorAction SilentlyContinue
+        }
+        $pruneOut = ($pruneRes[0] | Out-String).Trim()
+        if ($pruneRes[1] -ne 0) {
+            Log "Retention: REFUSED $base (compact proof incomplete): $pruneOut" "WARN"
+            $refused++
+        } else {
+            Log "Retention: pruned $base (hash-verified): $pruneOut"
             $deleted++
         }
-    Log "Hot-tier retention: deleted $deleted old raw log(s)"
+    }
+    Log "Hot-tier retention: deleted $deleted verified raw log(s), $refused refused (kept), $skipped skipped (ungated)"
 }
 
 # ---- 3. compact through the INT-4 verified gate -----------------------------
@@ -811,7 +860,7 @@ if (Test-Path $paperScript) {
         Log "Paper rehearsal completed for $dateDashed"
     }
 } else {
-    Log "Paper script not found at $paperScript — skipping paper rehearsal" "WARN"
+    Log "Paper script not found at $paperScript - skipping paper rehearsal" "WARN"
 }
 
 Log "Daily pipeline complete: $dateDashed"
