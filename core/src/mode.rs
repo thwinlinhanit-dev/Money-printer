@@ -107,6 +107,11 @@ struct ModeConfig {
 mod tests {
     use super::*;
 
+    /// Serializes tests that mutate MONEY_PRINTER_MODE. Rust runs tests in
+    /// parallel threads by default; set_var/remove_var are process-global and
+    /// racy across them (same flake class as ops: ENV_MUTEX, dcabc56).
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn mod_1_mode_logged_on_startup() {
         // Verify default mode is Sleep.
@@ -146,6 +151,7 @@ mod tests {
         // MOD-12: an env var ALONE must never select Live (PD-1) — the env
         // override is a development path; live requires the operator-owned
         // mode.toml (outside the repo) plus the funnel's human gate.
+        let _env = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("MONEY_PRINTER_MODE", "live");
         assert_eq!(
             TradingMode::from_config(),
@@ -163,6 +169,7 @@ mod tests {
     #[test]
     fn pap_10_live_env_during_paper_refuses() {
         // PAP-10: MONEY_PRINTER_MODE=live during paper task => Sleep + P1, no session.
+        let _env = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("MONEY_PRINTER_MODE", "live");
         assert_eq!(
             TradingMode::from_config(),
