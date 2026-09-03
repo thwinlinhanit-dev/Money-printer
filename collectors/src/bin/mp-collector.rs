@@ -183,6 +183,8 @@ mod inner {
                     .collect()
             }),
             swing_only: binutil::flag(args, "--swing-only").map(|v| v == "true" || v == "1"),
+            backoff_base_ms: None,
+            backoff_cap_ms: None,
         })
     }
 
@@ -931,8 +933,8 @@ mod inner {
         } else {
             None
         };
-        let backoff_base = config.backoff_base_ms.unwrap_or(250);
-        let backoff_cap = config.backoff_cap_ms.unwrap_or(30_000);
+        let backoff_base_ms = config.backoff_base_ms.unwrap_or(250);
+        let backoff_cap_ms = config.backoff_cap_ms.unwrap_or(30_000);
         let mut streams = vec![Stream::new(
             "primary".into(),
             &venue,
