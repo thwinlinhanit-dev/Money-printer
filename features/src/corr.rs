@@ -512,8 +512,13 @@ impl TickFeature for CorrRegimeFeature {
 /// Price observations available to the correlation engine: recorded trade
 /// prices for the own-data legs, or MacroPoint values for FRED-like legs.
 fn event_value(ev: &EventEnvelope) -> Option<f64> {
+    // trade_view (WAL-6) unifies schema-3 `Trade` and schema-4 `TradeWithAddr`
+    // (hyperliquid's variant since 2026-08-18) — a Trade-only arm made the
+    // own-data correlation legs silent for hyperliquid days.
+    if let Some((price, _, _, _, _)) = ev.body.trade_view() {
+        return Some(price);
+    }
     match &ev.body {
-        MarketEvent::Trade { price, .. } => Some(*price),
         MarketEvent::MacroPoint { value, .. } => Some(*value),
         _ => None,
     }

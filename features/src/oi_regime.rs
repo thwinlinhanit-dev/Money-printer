@@ -178,8 +178,12 @@ impl TickFeature for OiQuadrant {
             MarketEvent::OpenInterest { oi_contracts, .. } => {
                 self.series.push_oi(ev.recv_ts_ns, *oi_contracts);
             }
-            MarketEvent::Trade { price, .. } => {
-                self.series.push_price(ev.recv_ts_ns, *price);
+            // trade_view (WAL-6): schema-4 hyperliquid trades decode as
+            // TradeWithAddr — a Trade-only arm starved the price leg.
+            MarketEvent::Trade { .. } | MarketEvent::TradeWithAddr { .. } => {
+                if let Some((price, _, _, _, _)) = ev.body.trade_view() {
+                    self.series.push_price(ev.recv_ts_ns, price);
+                }
             }
             MarketEvent::MarkPrice { mark, .. } => {
                 self.series.push_price(ev.recv_ts_ns, *mark);

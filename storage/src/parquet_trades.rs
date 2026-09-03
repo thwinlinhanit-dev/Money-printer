@@ -92,14 +92,16 @@ pub fn write_trades(
         Vec::new(),
         Vec::new(),
     );
+    // Schema-4 (2026-08-18, specs 033/034): Hyperliquid trades carry the
+    // aggressor wallet address and decode as `MarketEvent::TradeWithAddr`,
+    // not `MarketEvent::Trade`. Matching only `Trade` silently dropped every
+    // hyperliquid row from the cold tier (empty 1,126-byte shells, audit
+    // 2026-09-02 A-1 lineage + 2026-09-03 VPS finding) while the manifest
+    // still claimed the events. `trade_view` (WAL-6) unifies both variants;
+    // the wallet address itself stays in the raw log (the parquet trades
+    // schema has no address column).
     for e in events {
-        if let MarketEvent::Trade {
-            price,
-            qty,
-            side,
-            trade_id,
-        } = e.body
-        {
+        if let Some((price, qty, side, trade_id, _addr)) = e.body.trade_view() {
             sym.push(e.symbol.0);
             ven.push(crate::layout::venue_code(e.venue));
             ex.push(e.exch_ts_ns);
@@ -227,3 +229,63 @@ col!(col_u64, UInt64Array);
 col!(col_u8, UInt8Array);
 col!(col_i64, Int64Array);
 col!(col_f64, Float64Array);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mp_core::{Side, Venue};
+    use std::fs;
+
+    /// Regression (2026-09-03): schema-4 `TradeWithAddr` (hyperliquid's
+    /// variant since 2026-08-18) must land in the trades Parquet like
+    /// schema-3 `Trade`. A Trade-only arm wrote 1,126-byte empty shells for
+    /// every post-08-18 hyperliquid day while the manifest claimed the rows.
+    #[test]
+    fn trade_with_addr_rows_are_written() {
+        let mut events = Vec::new();
+        for (i, body) in [
+            MarketEvent::Trade {
+                price: 100.0,
+                qty: 1.0,
+                side: Side::Buy,
+                trade_id: 1,
+            },
+            MarketEvent::TradeWithAddr {
+                price: 101.5,
+                qty: 0.5,
+                side: Side::Sell,
+                trade_id: 2,
+                taker_addr: "0xabc".to_owned(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            events.push(EventEnvelope::new(
+                Venue::Hyperliquid,
+                SymbolId(0),
+                1000 + i as i64,
+                1000 + i as i64,
+                i as u64,
+                body,
+            ));
+        }
+
+        let dir = std::env::temp_dir().join(format!("mp-trades-reg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("part-000.parquet");
+
+        let rows = write_trades(&path, &events, "test", "crc-123").expect("write");
+        assert_eq!(rows, 2, "both trade variants must produce parquet rows");
+
+        // Row-count sanity on read-back (the C-2 check that caught the hollows).
+        let file = File::open(&path).expect("open");
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("read");
+        let mut reader = builder.build().expect("build");
+        let n: usize = reader.map(|b| b.expect("batch").num_rows()).sum();
+        assert_eq!(n, 2);
+        assert_eq!(read_source_hash(&path).expect("hash").as_deref(), Some("crc-123"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
