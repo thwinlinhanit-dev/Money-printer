@@ -311,6 +311,23 @@ fn clean_audit(path: &Path, config: &AuditConfig) -> Result<RawLogAudit, String>
 /// proof is incomplete — nothing is ever deleted without it.
 fn cmd_prune(args: &[String]) -> Result<String, String> {
     let date_raw = need(args, "--date")?;
+    let venue_str = need(args, "--venue")?;
+    let symbol = need(args, "--symbol")?;
+    let venue = parse_venue(&venue_str)?;
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    prune_day(Path::new("data"), venue, &venue_str, &symbol, &date_raw, dry_run)
+}
+
+/// The actual retention gate, parameterised on the data root so the unit
+/// tests can drive it against a temp tree (the CLI wrapper pins `data/`).
+fn prune_day(
+    root: &Path,
+    venue: Venue,
+    venue_str: &str,
+    symbol: &str,
+    date_raw: &str,
+    dry_run: bool,
+) -> Result<String, String> {
     let date_flat = date_raw.replace('-', "");
     if date_flat.len() != 8 {
         return Err("date must be YYYYMMDD or YYYY-MM-DD".into());
@@ -321,12 +338,7 @@ fn cmd_prune(args: &[String]) -> Result<String, String> {
         &date_flat[4..6],
         &date_flat[6..8]
     );
-    let venue_str = need(args, "--venue")?;
-    let symbol = need(args, "--symbol")?;
-    let venue = parse_venue(&venue_str)?;
-    let dry_run = args.iter().any(|a| a == "--dry-run");
 
-    let root = Path::new("data");
     let raw_path = root
         .join("raw")
         .join(format!("{date_flat}_{venue_str}_{symbol}.log"));
@@ -337,7 +349,14 @@ fn cmd_prune(args: &[String]) -> Result<String, String> {
         ));
     }
 
-    match prune::verify_prunable(root, venue, &date_dashed) {
+    // The compaction proof lives under the COLD root (`data/cold/manifests`,
+    // `data/cold/trades`) — `verify_prunable`'s root parameter is the cold
+    // root, not the data root (storage/tests/storage.rs:502 pins this
+    // contract). Passing `data` here would resolve `data/manifests/...` and
+    // refuse every properly compacted day (observed live 2026-09-03 on the
+    // 08-13/08-22/08-24 hyperliquid days).
+    let cold_root = root.join("cold");
+    match prune::verify_prunable(&cold_root, venue, &date_dashed) {
         Ok(()) => {}
         Err(why) => {
             return Err(format!(
@@ -2511,7 +2530,7 @@ mod tests {
     use mp_core::log::EventLogWriter;
     use mp_core::{
         EventEnvelope, EventProvenance, InstrumentKind, MarketEvent, Side, SnapshotSource,
-        SymbolId, SymbolMeta,
+        SymbolId, SymbolMeta, SymbolTable,
     };
 
     /// Serializes tests that mutate the process environment (`std::env::set_var`
@@ -3675,5 +3694,165 @@ mod tests {
             drain.to_lowercase().contains("held") || drain.to_lowercase().contains("hold"),
             "LAB-4: drain script must reference held/hold for ssh_failed files"
         );
+    }
+
+    // ---- prune regression tests (cold-root contract, audit 2026-09-03) ----
+    //
+    // cmd_prune delegates to prune_day(root, ..) so the retention gate can be
+    // driven against a temp tree. These pin the observed live bug: passing the
+    // DATA root (data/) to verify_prunable instead of the COLD root (data/cold)
+    // made every properly compacted day refuse with ManifestMissing, because
+    // manifests live at data/cold/manifests/.. (compactor root), not
+    // data/manifests/.. (storage/tests/storage.rs:502 pins the cold-root
+    // contract).
+
+    /// Minimal raw day-file fixture, same recipe as storage/tests/storage.rs:
+    /// `raw/{YYYYMMDD}_{venue}_{symbol}.log` via the real EventLogWriter.
+    fn prune_fixture(tag: &str) -> (PathBuf, SymbolTable, SymbolId, Vec<EventEnvelope>) {
+        let data = std::env::temp_dir().join(format!("mp-prune-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let mut syms = SymbolTable::new();
+        let btc = syms.intern_default(Venue::Bybit, "BTCUSDT");
+        let evs = vec![
+            EventEnvelope::new(
+                Venue::Bybit,
+                btc,
+                10,
+                10,
+                1,
+                MarketEvent::Trade {
+                    price: 100.0,
+                    qty: 1.0,
+                    side: Side::Buy,
+                    trade_id: 1,
+                },
+            ),
+            EventEnvelope::new(
+                Venue::Bybit,
+                btc,
+                20,
+                20,
+                2,
+                MarketEvent::Trade {
+                    price: 101.0,
+                    qty: 1.0,
+                    side: Side::Buy,
+                    trade_id: 2,
+                },
+            ),
+        ];
+        let raw_dir = data.join("raw");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        let path = raw_dir.join("20260710_bybit_BTCUSDT.log");
+        let (mut w, truncated) = EventLogWriter::open(&path).unwrap();
+        assert!(!truncated);
+        w.write_symbols(&syms.metas()).unwrap();
+        for e in &evs {
+            w.append(e).unwrap();
+        }
+        drop(w);
+        (data, syms, btc, evs)
+    }
+
+    /// The observed bug: a freshly compacted day must be prunable via the cold
+    /// root (data/cold). Regression for the data-root mismatch that refused
+    /// every live day with ManifestMissing.
+    #[test]
+    fn prune_dry_run_passes_on_freshly_compacted_day() {
+        let (data, syms, _btc, evs) = prune_fixture("ok");
+        let hash = compute_source_hash(&data.join("raw/20260710_bybit_BTCUSDT.log")).unwrap();
+        compactor::compact_day(
+            &data.join("cold"),
+            Venue::Bybit,
+            "2026-07-10",
+            0,
+            86_400_000_000_000,
+            evs,
+            &syms,
+            &hash,
+            "g",
+            0,
+        )
+        .unwrap();
+        let out = prune_day(
+            &data,
+            Venue::Bybit,
+            "bybit",
+            "BTCUSDT",
+            "2026-07-10",
+            true,
+        )
+        .expect("freshly compacted day must verify prunable (cold-root contract)");
+        assert!(
+            out.contains("[dry-run] would prune"),
+            "expected dry-run success, got: {out}"
+        );
+        assert!(
+            data.join("raw/20260710_bybit_BTCUSDT.log").exists(),
+            "dry-run must not delete the raw log"
+        );
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// No compaction manifest -> refuse with the W-6 reason, keep the log.
+    #[test]
+    fn prune_refuses_without_compaction_manifest() {
+        let (data, _syms, _btc, _evs) = prune_fixture("nomanifest");
+        let err = prune_day(&data, Venue::Bybit, "bybit", "BTCUSDT", "2026-07-10", true)
+            .expect_err("uncompacted day must refuse");
+        assert!(
+            err.contains("no compaction manifest"),
+            "unexpected refusal text: {err}"
+        );
+        assert!(
+            data.join("raw/20260710_bybit_BTCUSDT.log").exists(),
+            "refusal must leave the raw log in place"
+        );
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Missing raw log -> clean error before any proof work.
+    #[test]
+    fn prune_refuses_missing_raw_log() {
+        let data = std::env::temp_dir().join(format!("mp-prune-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let err = prune_day(&data, Venue::Bybit, "bybit", "BTCUSDT", "2026-07-10", true)
+            .expect_err("missing raw log must refuse");
+        assert!(err.contains("raw log not found"), "unexpected text: {err}");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Real delete path: removes the raw log AND journals the deletion.
+    #[test]
+    fn prune_deletes_and_journals() {
+        let (data, syms, _btc, evs) = prune_fixture("delete");
+        let hash = compute_source_hash(&data.join("raw/20260710_bybit_BTCUSDT.log")).unwrap();
+        compactor::compact_day(
+            &data.join("cold"),
+            Venue::Bybit,
+            "2026-07-10",
+            0,
+            86_400_000_000_000,
+            evs,
+            &syms,
+            &hash,
+            "g",
+            0,
+        )
+        .unwrap();
+        let out = prune_day(&data, Venue::Bybit, "bybit", "BTCUSDT", "2026-07-10", false)
+            .expect("verified day must prune");
+        assert!(out.contains("pruned"), "unexpected output: {out}");
+        assert!(
+            !data.join("raw/20260710_bybit_BTCUSDT.log").exists(),
+            "real prune must delete the raw log"
+        );
+        let journal = std::fs::read_to_string(data.join("retention_delete_manifest.jsonl"))
+            .expect("journal must exist after a real prune (A-12)");
+        assert!(journal.contains("2026-07-10"), "journal entry missing date: {journal}");
+        assert!(journal.contains("source_hash"), "journal entry missing hash: {journal}");
+        let _ = std::fs::remove_dir_all(&data);
     }
 }
