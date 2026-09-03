@@ -43,8 +43,13 @@ For each bar in window:
 ```
 
 - Window: configurable (default 50 bars)
-- Bucket size: ATR-based (default 0.5 ATR)
+- Bucket size: absolute price width (default 0.5 price units; amended
+  2026-09-02, A-6 audit — the implementation uses the configured value
+  directly as the bucket's price width and never computes an ATR, so the
+  config key is `market_profile_bucket_width`)
 - Output: POC, VAH, VAL as separate features
+- POC tie-break: deterministic (PD-3) — on equal bucket volumes the lowest
+  bucket wins (A-5 audit 2026-09-02)
 
 **Tests**
 - fp_1: volume.bubble emits correct percentile rank

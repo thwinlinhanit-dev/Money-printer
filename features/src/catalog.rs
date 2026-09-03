@@ -918,15 +918,15 @@ pub struct MarketProfilePoc {
     tf: String,
     window: usize,
     bars: VecDeque<Bar>,
-    bucket_atr: f64,
+    bucket_width: f64,
 }
 impl MarketProfilePoc {
-    pub fn new(tf: &str, window: usize, bucket_atr: f64) -> Self {
+    pub fn new(tf: &str, window: usize, bucket_width: f64) -> Self {
         Self {
             tf: tf.to_owned(),
             window,
             bars: VecDeque::new(),
-            bucket_atr,
+            bucket_width,
         }
     }
 }
@@ -947,17 +947,28 @@ impl BarFeature for MarketProfilePoc {
         }
         // Build volume profile: distribute volume across price buckets
         let mut profile: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
-        let bucket_size = self.bucket_atr;
+        let bucket_size = self.bucket_width;
         for b in self.bars.iter() {
             let mid = (b.high + b.low) / 2.0;
             let bucket = (mid / bucket_size).floor() as i64;
             *profile.entry(bucket).or_insert(0.0) += b.vol;
         }
-        // Find POC (bucket with highest volume)
-        profile
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(&bucket, _)| bucket as f64 * bucket_size + bucket_size / 2.0)
+        // Find POC (bucket with highest volume). DETERMINISTIC tie-break
+        // (PD-3, A-5 audit 2026-09-02): a HashMap iteration order is
+        // per-process randomized, so `.max_by` on ties picked a different POC
+        // price run-to-run for identical input. Sort buckets ascending and
+        // scan with a strict `>` so an equal-volume tie always resolves to
+        // the LOWEST bucket — stable across runs, matching the VAH/VAL path
+        // (which sorts into a Vec first).
+        let mut buckets: Vec<(i64, f64)> = profile.into_iter().collect();
+        buckets.sort_unstable_by_key(|&(bucket, _)| bucket);
+        let mut poc = buckets[0];
+        for &(bucket, vol) in buckets.iter().skip(1) {
+            if vol > poc.1 {
+                poc = (bucket, vol);
+            }
+        }
+        Some(poc.0 as f64 * bucket_size + bucket_size / 2.0)
     }
 }
 
@@ -967,15 +978,15 @@ pub struct MarketProfileVah {
     tf: String,
     window: usize,
     bars: VecDeque<Bar>,
-    bucket_atr: f64,
+    bucket_width: f64,
 }
 impl MarketProfileVah {
-    pub fn new(tf: &str, window: usize, bucket_atr: f64) -> Self {
+    pub fn new(tf: &str, window: usize, bucket_width: f64) -> Self {
         Self {
             tf: tf.to_owned(),
             window,
             bars: VecDeque::new(),
-            bucket_atr,
+            bucket_width,
         }
     }
 }
@@ -996,7 +1007,7 @@ impl BarFeature for MarketProfileVah {
         }
         // Build volume profile
         let mut profile: Vec<(f64, f64)> = Vec::new();
-        let bucket_size = self.bucket_atr;
+        let bucket_size = self.bucket_width;
         for b in self.bars.iter() {
             let mid = (b.high + b.low) / 2.0;
             let bucket = (mid / bucket_size).floor() as f64 * bucket_size + bucket_size / 2.0;
@@ -1038,15 +1049,15 @@ pub struct MarketProfileVal {
     tf: String,
     window: usize,
     bars: VecDeque<Bar>,
-    bucket_atr: f64,
+    bucket_width: f64,
 }
 impl MarketProfileVal {
-    pub fn new(tf: &str, window: usize, bucket_atr: f64) -> Self {
+    pub fn new(tf: &str, window: usize, bucket_width: f64) -> Self {
         Self {
             tf: tf.to_owned(),
             window,
             bars: VecDeque::new(),
-            bucket_atr,
+            bucket_width,
         }
     }
 }
@@ -1067,7 +1078,7 @@ impl BarFeature for MarketProfileVal {
         }
         // Build volume profile
         let mut profile: Vec<(f64, f64)> = Vec::new();
-        let bucket_size = self.bucket_atr;
+        let bucket_size = self.bucket_width;
         for b in self.bars.iter() {
             let mid = (b.high + b.low) / 2.0;
             let bucket = (mid / bucket_size).floor() as f64 * bucket_size + bucket_size / 2.0;

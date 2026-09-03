@@ -312,5 +312,6 @@ enabled = false
 volume_bubble_window = 100
 # Rolling window (bars) for market profile POC/VAH/VAL.
 market_profile_window = 50
-# Bucket size as multiple of ATR for market profile.
-market_profile_bucket_atr = 0.5
+# Bucket size as an ABSOLUTE price width for market profile buckets
+# (not ATR-derived — see spec 049 amendment, A-6 audit 2026-09-02).
+market_profile_bucket_width = 0.5

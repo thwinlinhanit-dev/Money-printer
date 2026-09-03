@@ -1221,7 +1221,7 @@ fn fp_1_volume_bubble_emits_correct_percentile_rank() {
 #[test]
 fn fp_2_market_profile_poc_matches_highest_volume_price() {
     let mut e = FeatureEngine::new(SEC);
-    // Window=3, bucket_atr=10 (for simplicity)
+    // Window=3, bucket_width=10 (for simplicity; absolute price width)
     e.register_bar(|| Box::new(MarketProfilePoc::new("1s", 3, 10.0)));
     // Feed 4 bars so 3 close: prices centered around 100.
     let mut all = Vec::new();
@@ -1241,6 +1241,35 @@ fn fp_2_market_profile_poc_matches_highest_volume_price() {
     assert!(poc.is_some(), "POC should emit after warmup");
     let poc_val = poc.unwrap();
     assert!((poc_val - 100.0).abs() < 15.0, "POC should be near 100, got {poc_val}");
+}
+
+#[test]
+fn fp_2b_market_profile_poc_tie_breaks_to_lowest_bucket_deterministically() {
+    // A-5 (audit 2026-09-02): equal-volume buckets must resolve the POC to
+    // the LOWEST bucket, deterministically across fresh engine instances —
+    // never a HashMap-iteration-order artifact (PD-3).
+    let run = || {
+        let mut e = FeatureEngine::new(SEC);
+        e.register_bar(|| Box::new(MarketProfilePoc::new("1s", 2, 10.0)));
+        let mut all = Vec::new();
+        // Bar 0: mid 100, vol 10 -> bucket 10 (center 105).
+        all.extend(e.on_event(&trade(1, 100.0, 10.0, Side::Buy)));
+        // Bar 1: mid 120, vol 10 -> bucket 12 (center 125). Equal volume: tie.
+        all.extend(e.on_event(&trade(SEC + 1, 120.0, 10.0, Side::Buy)));
+        // Open bar 2 to close bar 1 -> window [bar0, bar1] is warm -> emit.
+        all.extend(e.on_event(&trade(2 * SEC + 1, 100.0, 1.0, Side::Buy)));
+        value(&e, &all, "footprint.market.profile.poc.1s")
+    };
+    let first = run().expect("POC must emit after warmup");
+    assert!(
+        (first - 105.0).abs() < 1e-9,
+        "tie must break to the LOWEST bucket (105.0), got {first}"
+    );
+    // Determinism across fresh engines: identical input -> identical POC.
+    for _ in 0..8 {
+        let again = run().expect("POC must emit on every fresh engine");
+        assert_eq!(again, first, "POC tie-break must be deterministic (PD-3)");
+    }
 }
 
 #[test]

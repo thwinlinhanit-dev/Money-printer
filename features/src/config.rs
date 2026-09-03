@@ -780,9 +780,13 @@ pub struct FootprintSignalParams {
     /// Rolling window (bars) for market profile POC/VAH/VAL.
     #[serde(default = "default_market_profile_window")]
     pub market_profile_window: usize,
-    /// Bucket size as multiple of ATR for market profile.
-    #[serde(default = "default_market_profile_bucket_atr")]
-    pub market_profile_bucket_atr: f64,
+    /// Bucket size as an ABSOLUTE price width for market profile buckets
+    /// (A-6, audit 2026-09-02: the field is not ATR-derived — no ATR is
+    /// computed in the bar-feature path; the value is used directly as the
+    /// price width of one volume-profile bucket). Named `..._width` so the
+    /// config cannot be mistaken for an ATR multiple.
+    #[serde(default = "default_market_profile_bucket_width")]
+    pub market_profile_bucket_width: f64,
 }
 
 fn default_volume_bubble_window() -> usize {
@@ -791,7 +795,7 @@ fn default_volume_bubble_window() -> usize {
 fn default_market_profile_window() -> usize {
     50
 }
-fn default_market_profile_bucket_atr() -> f64 {
+fn default_market_profile_bucket_width() -> f64 {
     0.5
 }
 
@@ -801,7 +805,7 @@ impl Default for FootprintSignalParams {
             enabled: false,
             volume_bubble_window: default_volume_bubble_window(),
             market_profile_window: default_market_profile_window(),
-            market_profile_bucket_atr: default_market_profile_bucket_atr(),
+            market_profile_bucket_width: default_market_profile_bucket_width(),
         }
     }
 }

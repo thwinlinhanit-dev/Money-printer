@@ -505,12 +505,12 @@ pub fn engine_from_config(cfg: &FeaturesConfig) -> Result<FeatureEngine, ConfigE
         e.register_bar(move || Box::new(crate::catalog::VolumeBubble::new(&bubble_tf, bubble_window)));
         let profile_window = cfg.footprint_signals.market_profile_window;
         let profile_tf = tf.clone();
-        let profile_bucket_atr = cfg.footprint_signals.market_profile_bucket_atr;
-        e.register_bar(move || Box::new(crate::catalog::MarketProfilePoc::new(&profile_tf, profile_window, profile_bucket_atr)));
+        let profile_bucket_width = cfg.footprint_signals.market_profile_bucket_width;
+        e.register_bar(move || Box::new(crate::catalog::MarketProfilePoc::new(&profile_tf, profile_window, profile_bucket_width)));
         let profile_tf = tf.clone();
-        e.register_bar(move || Box::new(crate::catalog::MarketProfileVah::new(&profile_tf, profile_window, profile_bucket_atr)));
+        e.register_bar(move || Box::new(crate::catalog::MarketProfileVah::new(&profile_tf, profile_window, profile_bucket_width)));
         let profile_tf = tf.clone();
-        e.register_bar(move || Box::new(crate::catalog::MarketProfileVal::new(&profile_tf, profile_window, profile_bucket_atr)));
+        e.register_bar(move || Box::new(crate::catalog::MarketProfileVal::new(&profile_tf, profile_window, profile_bucket_width)));
     }
     Ok(e)
 }
