@@ -49,7 +49,7 @@ $logFile = Join-Path $scoreDir "paper.log"
 $envMode = $env:MONEY_PRINTER_MODE
 if ($envMode -eq "live") {
     $ts = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-    $msg = "[$ts][ERROR] PAP-10: MONEY_PRINTER_MODE=live during paper task — refusing to run, firing P1"
+    $msg = "[$ts][ERROR] PAP-10: MONEY_PRINTER_MODE=live during paper task - refusing to run, firing P1"
     New-Item -ItemType Directory -Path $scoreDir -Force | Out-Null
     Add-Content -Path $logFile -Value $msg -Encoding UTF8
     Write-Host $msg -ForegroundColor Red
@@ -123,37 +123,46 @@ if (Test-Path $latchPath) {
         $latch = ConvertFrom-Json $latchText
         if ($latch.scopes -and $latch.scopes.Count -gt 0) {
             $latched = $true
-            Log "PAP-4: kill-latch tripped ($($latch.scopes.Count) scope(s)): $($latch.reason) — paper will run with zero intents" "WARN"
+            Log "PAP-4: kill-latch tripped ($($latch.scopes.Count) scope(s)): $($latch.reason) - paper will run with zero intents" "WARN"
         }
     } catch {
-        Log "PAP-4: kill-latch file corrupt at $latchPath — treating as latched (fail-closed)" "ERROR"
+        Log "PAP-4: kill-latch file corrupt at $latchPath - treating as latched (fail-closed)" "ERROR"
         $latched = $true
     }
 }
 
 # ---- find the raw log for the day --------------------------------------------
-# Paper runs on the drained/complete HL log (PAP-1). The log must exist.
-$rawLog = Join-Path $root "data\raw\${dateFlat}_hyperliquid_BTC.log"
-if (-not (Test-Path -LiteralPath $rawLog)) {
-    Log "PAP-1: raw log not found for $dateDashed at $rawLog — skipping paper session" "WARN"
-    Exit 0
+# Paper runs on the drained/complete HL log (PAP-1). Primary symbol is BTC
+# (spec 051 rehearsal symbol); fall back to ETH — the other Zero-Cost gate
+# recording — so a symbol-specific recording gap does not silently skip the
+# day (A-12, audit 2026-09-02: a missing log must not masquerade as success).
+$rawLog = $null
+foreach ($sym in @("BTC", "ETH")) {
+    $candidate = Join-Path $root "data\raw\${dateFlat}_hyperliquid_$sym.log"
+    if (Test-Path -LiteralPath $candidate) { $rawLog = $candidate; $paperSymbol = $sym; break }
 }
-Log "PAP-1: found raw log for $dateDashed: $rawLog"
+if ($null -eq $rawLog) {
+    Log "PAP-1: no hyperliquid BTC or ETH raw log found for $dateDashed in $($root)\data\raw - config/data error, FAILING (exit 2; a closed day without a recording is a data hole, not a skip)" "ERROR"
+    Exit 2
+}
+Log "PAP-1: found raw log for ${dateDashed}: $rawLog"
 
 # ---- PAP-3: risk gate configuration ------------------------------------------
-# Paper uses the risk gate with finite RG budgets from risk.example.toml
-# copied to off-repo paper-risk.toml. reconciler_clean is true with a
-# documented comment: paper has no broker, nothing to reconcile (M-5 pin).
+# Paper runs on sim fills with the sim's BUILT-IN risk gate (check_funding on
+# close, finite RG budgets). No external risk config is wired into
+# `mp-sim paper` — do not pretend one is copied or loaded (A-12, audit
+# 2026-09-02: the previous comment described a paper-risk.toml copy that
+# never happened).
 $riskCfg = Join-Path $root "risk\risk.example.toml"
 if (-not (Test-Path $riskCfg)) {
-    Log "PAP-3: risk config not found at $riskCfg — using defaults" "WARN"
+    Log "PAP-3: note - $riskCfg not present; sim built-in risk gate defaults apply (no external risk config is wired into paper)" "WARN"
 }
 
 # ---- strategy resolution (default: swing-range-reclaim-v1) -------------------
 $papStrategy = if ($Strategy) { $Strategy } else { "swing-range-reclaim-v1" }
 # PAP-10: never use liq-fade-v1 (SWG-8 frozen).
 if ($papStrategy -eq "liq-fade-v1") {
-    Log "PAP-10: liq-fade-v1 is frozen (SWG-8) — refusing to use as paper strategy" "ERROR"
+    Log "PAP-10: liq-fade-v1 is frozen (SWG-8) - refusing to use as paper strategy" "ERROR"
     Exit 2
 }
 # Explicit paper.strategy = "null" is allowed for plumbing; null strategy
@@ -198,6 +207,8 @@ $journalEntry = [ordered]@{
     run_id    = $runId
     kind      = "paper"
     date      = $dateDashed
+    venue     = "hyperliquid"
+    symbol    = $paperSymbol
     strategy  = $papStrategy
     seed      = $Seed
     latched   = $latched
@@ -243,7 +254,7 @@ if ($faults -eq 0) {
     Set-Content -Path $streakFile -Value ($streakData | ConvertTo-Json -Compress) -Encoding UTF8
     Log "PAP-9: fault-free streak: $currentStreak (target: 14)"
     if ($currentStreak -ge 14) {
-        Log "PAP-9: ROADMAP Phase 4 evidence row may be checked — $currentStreak consecutive fault-free sessions" "WARN"
+        Log "PAP-9: ROADMAP Phase 4 evidence row may be checked - $currentStreak consecutive fault-free sessions" "WARN"
     }
 } else {
     # One fault resets the count (PAP-9).
@@ -259,7 +270,7 @@ if ($faults -eq 0) {
 
 # ---- PAP-7: Telegram summary -------------------------------------------------
 $severity = if ($faults -gt 0) { "p2" } else { "p3" }
-$tgDetail = "paper $dateDashed: strategy=$papStrategy seed=$Seed latched=$latched faults=$faults"
+$tgDetail = "paper ${dateDashed}: strategy=$papStrategy seed=$Seed latched=$latched faults=$faults"
 if ($journalEntry.ContainsKey("expectancy")) {
     $tgDetail += " expectancy=$($journalEntry['expectancy'])"
 }
