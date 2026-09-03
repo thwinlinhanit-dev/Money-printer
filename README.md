@@ -1,7 +1,9 @@
 # Money Printer — Trading Research & Intelligence System
 
 **To finish the usable product:** [`docs/COMPLETION-MASTER-PLAN.md`](docs/COMPLETION-MASTER-PLAN.md)
-(specs 050–053). Ideas: [`docs/IDEAS-2026-08-31.md`](docs/IDEAS-2026-08-31.md).
+(specs 050–053). Live status: [`docs/STATUS.md`](docs/STATUS.md) — regenerated
+from `mp-ops status`. Frozen planning docs: [`docs/archive/`](docs/archive/)
+(docs moratorium: CLAUDE.md §Docs moratorium).
 “Implement every remaining spec” is not the definition of done.
 
 This repo is the home for a personal trading **research and intelligence platform**:

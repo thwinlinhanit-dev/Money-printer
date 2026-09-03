@@ -1,3 +1,5 @@
+**STATUS: FROZEN — docs moratorium (2026-09-03), see CLAUDE.md §Docs moratorium.** Superseded by `docs/COMPLETION-MASTER-PLAN.md` (D1–D6) and `docs/STATUS.md`. Read-only history: do not update, extend, or act on this file until D1–D6 land.
+
 # Phase 0 Integrity Milestone: Status Audit & Implementation Plan
 
 Your stated milestone: **repair collector provenance and run a seven-day, two-symbol Binance recording audit.** Below is a detailed assessment of every idea you listed, mapped against the actual codebase, followed by an actionable plan.

@@ -37,6 +37,7 @@ stderr.txt
 collector_stdout.log
 collector_stderr.log
 .omx/
+.ruff_cache/
 .pytest_cache/
 __pycache__/
 *.pyc

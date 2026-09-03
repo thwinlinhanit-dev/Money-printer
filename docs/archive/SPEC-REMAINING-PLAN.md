@@ -1,3 +1,5 @@
+**STATUS: FROZEN — docs moratorium (2026-09-03), see CLAUDE.md §Docs moratorium.** Superseded by `docs/COMPLETION-MASTER-PLAN.md` (D1–D6) and `docs/STATUS.md`. Read-only history: do not update, extend, or act on this file until D1–D6 land.
+
 # Remaining Spec Work — Assessment & Execution Plan (2026-08-28)
 
 Status of the "implement all remaining specs" initiative. The sub-agent fleet

@@ -79,6 +79,7 @@ Default section order:
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md
 
 - Owner trading policy (capital, benchmark, max-loss) lives in `docs/OWNER_POLICY.md` — BINDING since 2026-08-25 (owner confirmed the agent-drafted values in writing). Agents still never change its limits (PD-1): any amendment goes through the owner via §6. Weekly reviews ground their benchmark on §3 and fail closed to `unset` if the file or fields go missing.
+- Docs moratorium (2026-09-03, until D1–D6): `docs/COMPLETION-MASTER-PLAN.md` is the only active plan — no new specs/plans/AGENTS.md layers while it holds. Frozen planning docs live read-only under `docs/archive/` (FROZEN banners); operational state comes from `docs/STATUS.md`, regenerated from `mp-ops status`. Full rules: CLAUDE.md §Docs moratorium.
 
 ## Child DOX Index
 

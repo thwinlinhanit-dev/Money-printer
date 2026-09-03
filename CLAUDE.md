@@ -21,6 +21,26 @@ local details, but no child doc may weaken DOX.
 3. The specific spec you are implementing. The *exactly what*.
 4. `.claude/skills/` — step-by-step workflows for recurring tasks. The *how*.
 
+## Docs moratorium (declared 2026-09-03 — until D1–D6 land)
+
+`docs/COMPLETION-MASTER-PLAN.md` (D1–D6, P0–P5) is the **single active plan**.
+The funnel has never produced a promoted strategy; documentation effort now
+counts against that, not for it. Until D1–D6 are met:
+
+- **No new planning docs.** Do not create specs, plans, roadmaps, ideas files,
+  progress logs, or status notes outside the master plan. If sequencing must
+  change, edit `COMPLETION-MASTER-PLAN.md` in place.
+- **No AGENTS.md refactors.** No new child DOX layers, restructures, or
+  rulebook rewrites while the moratorium holds. DOX applies as-is; fix doc
+  contradictions by deletion, not by adding prose.
+- **Frozen planning docs live in `docs/archive/`** (each carries a FROZEN
+  banner): read-only history. Do not update, extend, or act on them.
+- **One status page.** Operational truth is `docs/STATUS.md`, regenerated from
+  `cargo run -p mp-ops -- status` (read-only). Never hand-edit it to diverge
+  from the JSON it embeds.
+- Exempt (observe, don't extend): `docs/AUDIT-*.md` (record observed state),
+  `docs/OWNER_POLICY.md` (owner-owned, binding).
+
 ## The Prime Directives (non-negotiable, no exceptions)
 
 - **PD-1 — Never enable live trading.** Do not set `mode = live`, wire real
