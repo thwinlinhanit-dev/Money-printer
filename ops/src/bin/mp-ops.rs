@@ -4,6 +4,10 @@
 //!   compact --date YYYY-MM-DD --venue bybit --symbol BTCUSDT
 //!           Compacts a raw event log into partitioned Parquet files.
 //!           Date also accepts YYYYMMDD (backward compatible).
+//!   prune --date YYYY-MM-DD --venue bybit --symbol BTCUSDT [--dry-run]
+//!           Hash-verified hot-tier retention: refuses to delete a raw log
+//!           unless compaction proof exists (W-6/C-2), then removes it and
+//!           journals the deletion to data/retention_delete_manifest.jsonl.
 //!   band-accuracy-decay --trend PATH [--runs-dir DIR] [--dedupe-ns N] [--telegram]
 //!           OPS-13 drift/decay watch over the RES-4 band-accuracy trend
 //!           journal (research/band_accuracy/band_accuracy.jsonl): prints a
@@ -117,12 +121,14 @@ use mp_ops::{
     RouteOutcome, Severity, TelegramConfig,
 };
 use mp_storage::promotion::check_promotion_determinism;
+use mp_storage::prune::{self, PruneRefusal};
 use mp_storage::{
     audit_raw_log, compactor, load_determinism, AuditConfig, DailyScorecard, DeterminismArtifact,
     RawLogAudit, RecordingBursts,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -144,6 +150,15 @@ fn flags(args: &[String], name: &str) -> Vec<String> {
         .filter(|pair| pair[0] == name)
         .map(|pair| pair[1].clone())
         .collect()
+}
+
+/// Zero-Cost Mode flag check (docs/ZERO_COST_MODE.md). Both spellings are
+/// accepted so an operator following spec 024 (`--zero-cost-mode`) and the
+/// historical code (`--zero-cost`) get the same behaviour (A-11 audit
+/// 2026-09-02 — a spec-following operator passing `--zero-cost-mode` must NOT
+/// silently fall back to the full-mode 0.995 gate).
+fn is_zero_cost(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--zero-cost" || a == "--zero-cost-mode")
 }
 
 fn parse_venue(s: &str) -> Result<Venue, String> {
@@ -238,7 +253,7 @@ fn audit_config(args: &[String], venue: Venue, symbol: &str) -> Result<AuditConf
     }
     // Zero-Cost Mode (docs/ZERO_COST_MODE.md): lowered coverage threshold,
     // book stream absence expected, stale bursts are warnings only.
-    if args.iter().any(|a| a == "--zero-cost") {
+    if is_zero_cost(args) {
         config.zero_cost_mode = true;
     }
     // `--require-stream` accepts either a bare stream name (required for
@@ -279,6 +294,138 @@ fn clean_audit(path: &Path, config: &AuditConfig) -> Result<RawLogAudit, String>
             .collect::<Vec<_>>()
             .join("; ");
         Err(format!("quarantined raw log {}: {reasons}", path.display()))
+    }
+}
+
+/// `mp-ops prune --date YYYY-MM-DD --venue V --symbol S [--dry-run]`
+///
+/// Hot-tier retention gate (AUDIT-2026-09-02 A-1/A-12). Deletes a raw day-file
+/// ONLY after hash-verified compact proof: it wraps
+/// [`mp_storage::prune::verify_prunable`] (the W-6 guard — compaction manifest
+/// exists, Parquet exists, row counts match, and the Parquet footer's
+/// `source_log_hash` still equals a CRC-32 of the CURRENT raw bytes, which must
+/// not be newer than the Parquet). On success it removes the raw log and
+/// journals the deletion to `data/retention_delete_manifest.jsonl` (A-12:
+/// deletions are auditable, not a bare `rm`). `--dry-run` verifies and reports
+/// without deleting. Returns non-zero (with the refusal reason) when the compact
+/// proof is incomplete — nothing is ever deleted without it.
+fn cmd_prune(args: &[String]) -> Result<String, String> {
+    let date_raw = need(args, "--date")?;
+    let date_flat = date_raw.replace('-', "");
+    if date_flat.len() != 8 {
+        return Err("date must be YYYYMMDD or YYYY-MM-DD".into());
+    }
+    let date_dashed = format!(
+        "{}-{}-{}",
+        &date_flat[0..4],
+        &date_flat[4..6],
+        &date_flat[6..8]
+    );
+    let venue_str = need(args, "--venue")?;
+    let symbol = need(args, "--symbol")?;
+    let venue = parse_venue(&venue_str)?;
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+
+    let root = Path::new("data");
+    let raw_path = root
+        .join("raw")
+        .join(format!("{date_flat}_{venue_str}_{symbol}.log"));
+    if !raw_path.exists() {
+        return Err(format!(
+            "raw log not found (nothing to prune): {}",
+            raw_path.display()
+        ));
+    }
+
+    match prune::verify_prunable(root, venue, &date_dashed) {
+        Ok(()) => {}
+        Err(why) => {
+            return Err(format!(
+                "prune REFUSED for {} {}/{}: {}",
+                date_dashed,
+                venue_str,
+                symbol,
+                prunable_refusal(&why)
+            ))
+        }
+    }
+
+    if dry_run {
+        return Ok(format!(
+            "[dry-run] would prune {} {}/{} (compact proof verified)",
+            date_dashed, venue_str, symbol
+        ));
+    }
+
+    let size = std::fs::metadata(&raw_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let source_hash = compute_source_hash(&raw_path)?;
+
+    std::fs::remove_file(&raw_path)
+        .map_err(|e| format!("prune failed to delete {}: {e}", raw_path.display()))?;
+
+    // Journal the deletion (A-12): what was deleted, when, and the verified
+    // source hash (the same value the removed Parquet footer carried).
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let entry = serde_json::json!({
+        "ts_unix_secs": now_secs,
+        "venue": venue_str,
+        "symbol": symbol,
+        "date": date_dashed,
+        "file": raw_path.display().to_string(),
+        "size": size,
+        "source_hash": source_hash,
+    });
+    let manifest_path = root.join("retention_delete_manifest.jsonl");
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&manifest_path)
+        .map_err(|e| format!("open retention manifest {}: {e}", manifest_path.display()))?;
+    f.write_all(entry.to_string().as_bytes())
+        .and_then(|_| f.write_all(b"\n"))
+        .map_err(|e| format!("write retention manifest: {e}"))?;
+
+    Ok(format!(
+        "pruned {} {}/{} (verified source_hash {}) journaled -> {}",
+        date_dashed,
+        venue_str,
+        symbol,
+        source_hash,
+        manifest_path.display()
+    ))
+}
+
+/// Human-readable reason a day cannot be safely pruned (W-6 / C-2).
+fn prunable_refusal(r: &PruneRefusal) -> String {
+    match r {
+        PruneRefusal::ManifestMissing => {
+            "no compaction manifest (day never compacted — skipping)".to_string()
+        }
+        PruneRefusal::ParquetFileMissing { stream, symbol } => {
+            format!("Parquet missing for stream `{stream}` symbol `{symbol}`")
+        }
+        PruneRefusal::RowCountMismatch {
+            stream,
+            symbol,
+            manifest,
+            parquet,
+        } => format!(
+            "`{stream}/{symbol}` row-count mismatch: manifest {manifest} vs parquet {parquet}"
+        ),
+        PruneRefusal::SourceLogHashMismatch { stream, symbol } => format!(
+            "`{stream}/{symbol}` raw bytes no longer hash to the Parquet source_log_hash"
+        ),
+        PruneRefusal::RawLogNewerThanParquet { stream, symbol } => format!(
+            "`{stream}/{symbol}` raw log is newer than its Parquet (must re-compact first)"
+        ),
+        PruneRefusal::FooterMissingSourceLogHash { stream, symbol } => format!(
+            "`{stream}/{symbol}` Parquet footer has no source_log_hash (unknown provenance)"
+        ),
     }
 }
 
@@ -608,8 +755,12 @@ fn promotion_verdict(
 }
 
 /// Zero-Cost Mode promotion verdict (docs/ZERO_COST_MODE.md): uses 14-day
-/// streak (down from 7) and relaxed coverage (0.95 vs 0.995). Stale bursts
-/// are warnings only — the burst-free window condition is skipped.
+/// streak (down from 7) and relaxed coverage (0.95 vs 0.995). The burst-free
+/// promotion WINDOW condition still applies (it proves the host's network is
+/// clean — the same gate as full mode); what Zero-Cost relaxes is the per-day
+/// coverage bar and the non-`book` stream set. This is *stricter than the docs
+/// once claimed* ("stale bursts are warning-only") — aligned here so operators
+/// chasing the docs read the real gate (A-7, audit 2026-09-02).
 fn promotion_verdict_zero_cost(
     files: &[ScorecardFile],
     required: &BTreeSet<String>,
@@ -693,7 +844,7 @@ fn cmd_promote(args: &[String]) -> Result<String, String> {
         return Err(format!("no scorecards found in {dir}"));
     }
     let artifacts = load_determinism_artifacts(&dir, &files)?;
-    let zero_cost = args.iter().any(|a| a == "--zero-cost");
+    let zero_cost = is_zero_cost(args);
     let (verdict, scorecards) = if zero_cost {
         promotion_verdict_zero_cost(&files, &required, &artifacts)
     } else {
@@ -1475,7 +1626,7 @@ fn scorecard_from_root(data_root: &Path, args: &[String]) -> Result<String, Stri
     }
     // Lightweight file: verdict + per-recording counts only, never the full
     // findings Vec (legacy days balloon to GB otherwise — 2026-08-04).
-    let zero_cost = args.iter().any(|a| a == "--zero-cost");
+    let zero_cost = is_zero_cost(args);
     let promotable = if zero_cost {
         !entries.is_empty() && entries.iter().all(|(_, _, a)| a.is_clean_zero_cost())
     } else {
@@ -2298,13 +2449,14 @@ fn main() -> ExitCode {
     if args.len() < 2 {
         eprintln!("Usage: mp-ops <subcommand> [options]");
         eprintln!(
-            "Subcommands: compact, audit, scorecard, promote, status, zero-cost-status, check-config, pipeline-stale, band-accuracy-decay, telegram-flush, telegram-stale, storage-budget, telegram-send, p1-webhook"
+            "Subcommands: compact, prune, audit, scorecard, promote, status, zero-cost-status, check-config, pipeline-stale, band-accuracy-decay, telegram-flush, telegram-stale, storage-budget, telegram-send, p1-webhook"
         );
         return ExitCode::FAILURE;
     }
 
     let result = match args[1].as_str() {
         "compact" => cmd_compact(&args[2..]),
+        "prune" => cmd_prune(&args[2..]),
         "audit" => cmd_audit(&args[2..]),
         "scorecard" => cmd_scorecard(&args[2..]),
         "promote" => cmd_promote(&args[2..]),
