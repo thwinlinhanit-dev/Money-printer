@@ -58,3 +58,44 @@ Single venue (hyperliquid), single band (0.5%), market intents only (IOC),
 no position scaling, no venue arbitrage. The book/tape features are new
 (spec 004, 2026-08-13); this hypothesis is the first consumer of
 `book.depth.*` / `tape.*` in the funnel.
+
+## Edge results
+### 2026-09-01 — hyperliquid BTC, 4-day merged log (Aug 22–25, 2.8M events)
+**STATUS: HYPOTHESIS FALSIFIED. KILLED.**
+
+Backtest (gauge sweep on 4-day merged corpus):
+| Gauge | Trades | Exp | Stress 2× | Max DD |
+|---|---|---|---|---|
+| 0.2 | 27,067 | -3.67 | -6.66 | 252,467 |
+| 0.3 (default) | 27,134 | -3.64 | -6.56 | 251,434 |
+| 0.4 | 25,336 | -3.90 | -6.91 | 250,930 |
+| 0.5 | 22,821 | -4.28 | -7.38 | 248,016 |
+
+Every entry threshold produces negative expectancy. Stress 2× nearly
+doubles losses. ~6,000 trades/day confirms over-trading on transient depth
+fluctuations.
+
+Walk-forward (12h train / 12h test, 27-combo grid, 5 windows):
+| Window | OOS Exp | Deflated Sharpe | Best Params |
+|---|---|---|---|
+| 1 | -4.59 | -2,675 | gauge=0.4, tape=0.5 |
+| 2 | -10.39 | -2,659 | gauge=0.4, tape=2.0 |
+| 3 | -5.28 | -2,638 | gauge=0.4, tape=2.0 |
+| 4 | -3.53 | -2,657 | gauge=0.3, tape=0.5 |
+| 5 | -4.50 | -2,670 | gauge=0.4, tape=1.0 |
+
+All 5 OOS windows negative. Deflated Sharpes ~-2,660 (catastrophic).
+No parameter region produces a positive edge.
+
+Monte Carlo (1,000 resamples, 1-day blocks): p50=p95=worst=98,771 max DD.
+
+Falsification checklist:
+- ✅ KILL: expectancy ≤ 0 in 2×-cost column at G1 (stress2x -6.56 to -9.36)
+- Determinism: ✅ hash stable per-param (same inputs → same hash)
+
+Diagnosis: Hyperliquid BTC book is extremely deep; gauge readings are
+noise-driven even within the 0.5% band. 25k+ trades in4 days means the
+strategy enters on every transient depth fluctuation aligned with a trade
+print. Costs dominate at this trade frequency.
+
+Full output: `runs/orderflow-v1-test/`.
