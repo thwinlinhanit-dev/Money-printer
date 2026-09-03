@@ -18,6 +18,11 @@
 #     The active day's log grows while we copy, so a small size delta is a NOTE;
 #     source files missing from the destination are a failure (exit 2).
 #   - Self-describing: appends JSONL to <dest>\vps-data\backup_manifest.jsonl.
+#   - Fail-safe ordering (2026-09-04): the marker is written ONLY after the
+#     integrity pass verifies every delta file landed, and a transfer that lands
+#     nothing is retried then failed. The old order (marker before integrity)
+#     advanced the marker past files that never landed - 173 files were skipped
+#     forever on 2026-09-03 before the -Force resync.
 #   - Live .lock_* files are excluded (held open by the running collectors;
 #     transient coordination state, recreated on restore).
 #
@@ -42,7 +47,9 @@ param(
     [switch]$Register,              # register the MoneyPrinterVpsBackup daily task
     [switch]$SkipIntegrity,         # skip the count/size comparison pass
     [switch]$Force,                 # full copy even if a marker exists
-    [switch]$WhatIf                 # dry run: print plan, do not transfer
+    [switch]$WhatIf,                # dry run: print plan, do not transfer
+    [int]$MaxTransferAttempts = 3,  # retry failed/empty transfers before failing (2026-09-04)
+    [int]$RetryDelaySec = 30        # pause between transfer attempts
 )
 
 $ErrorActionPreference = "Stop"
@@ -162,41 +169,66 @@ if ($WhatIf) {
 Log ("Backup start: delta={0} files, {1:N2} MiB (full={2}) -> {3}" -f $srcCount, ($srcBytes / 1MB), $full, $destRoot)
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-# ---- transfer (binary-safe pipe via cmd /c) -----------------------------------
 # Outer quotes wrap the whole /c command; ssh's remote command keeps ONE pair of
 # double quotes with only single quotes inside (the mtime has a space). No path
 # in the command contains spaces, so no further quoting is needed.
 $remote = "bash ~/vps_pull.sh '$mtime'"
 $cmdLine = '""{0}" -i {1} -o BatchMode=yes -o StrictHostKeyChecking=accept-new {2}@{3} "{4}" | "{5}" -xf - -C {6}"' -f `
     $ssh, $SshKey, $SshUser, $VpsHost, $remote, $tar, $destRoot
-$proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmdLine -NoNewWindow -Wait -PassThru
-$sw.Stop()
-if ($proc.ExitCode -ne 0) {
-    Log "transfer failed (cmd exit $($proc.ExitCode))" "ERROR"
-    Exit 1
+# ---- transfer (binary-safe pipe via cmd /c), with retry -----------------------
+# The ssh link is flaky (drain ssh_failed backlog; 2026-08-25 retry fix). Retry
+# BOTH non-zero cmd exits AND zero-landed "successes": Windows bsdtar exits 0 on
+# an empty stream, so a link drop at stream start otherwise parses as a clean
+# copy (the 2026-09-03 "transfer done in 0.4m" no-op that skipped 173 files).
+$missing = [System.Collections.Generic.List[string]]::new()
+$dstBytes = [int64]0
+$attempt = 0
+$ok = $false
+while (-not $ok) {
+    $attempt++
+    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmdLine -NoNewWindow -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        Log "transfer attempt $attempt/$MaxTransferAttempts failed (cmd exit $($proc.ExitCode))" "ERROR"
+    } else {
+        # Count what actually landed; the integrity pass reuses this exact list.
+        $missing.Clear()
+        $dstBytes = [int64]0
+        foreach ($rel in $srcFiles) {
+            $dstPath = Join-Path $destRoot ($rel.Replace("/", "\"))
+            if (Test-Path $dstPath) {
+                $dstBytes += (Get-Item $dstPath).Length
+            } else {
+                $missing.Add($rel)
+            }
+        }
+        if ($missing.Count -eq $srcCount) {
+            Log ("transfer attempt {0}/{1} landed 0 of {2} delta file(s) - empty/no-op stream (bsdtar exit-0 on empty input)" -f `
+                $attempt, $MaxTransferAttempts, $srcCount) "ERROR"
+        } else {
+            $ok = $true
+        }
+    }
+    if (-not $ok) {
+        if ($attempt -ge $MaxTransferAttempts) {
+            Log "transfer failed after $MaxTransferAttempts attempt(s) - marker NOT advanced" "ERROR"
+            Exit 1
+        }
+        Start-Sleep -Seconds $RetryDelaySec
+    }
 }
-Log "transfer done in $($sw.Elapsed.TotalMinutes.ToString('F1'))m"
+$sw.Stop()
+Log "transfer done in $($sw.Elapsed.TotalMinutes.ToString('F1'))m (attempt $attempt)"
 
-# ---- marker + manifest (write marker = run START so nothing between start and
-#      end is ever missed: files changed mid-run are re-copied next run) --------
-Set-Content -Path $markerF -Value "$runStartEpoch" -Encoding ASCII -NoNewline
-Log "marker written: $runStartEpoch ($([DateTimeOffset]::FromUnixTimeSeconds($runStartEpoch).UtcDateTime.ToString('u')) UTC)"
-
-# ---- integrity pass (exact: every source delta file must exist in the backup)
+# ---- landed/integrity BEFORE the marker (2026-09-04 fix) ----------------------
+# The old order wrote .last_backup_ts before the integrity pass, so any failed
+# run (exit 1/2) left the marker past files that never landed and no incremental
+# could ever re-pull them (2026-09-03 incident). The marker now advances ONLY
+# after the delta is verified complete; it still carries the run-START epoch, so
+# files modified mid-run are re-copied next run.
 $dest = $null
 if ($SkipIntegrity) {
     Log "Integrity check skipped (-SkipIntegrity)"
 } else {
-    $missing = @()
-    $dstBytes = [int64]0
-    foreach ($rel in $srcFiles) {
-        $dstPath = Join-Path $destRoot ($rel.Replace("/", "\"))
-        if (Test-Path $dstPath) {
-            $dstBytes += (Get-Item $dstPath).Length
-        } else {
-            $missing += $rel
-        }
-    }
     $sizeRatio = if ($srcBytes -gt 0) { [math]::Round(($dstBytes - $srcBytes) / $srcBytes, 4) } else { 0 }
     Log ("Integrity: src_delta={0:N0} files/{1:N2} MiB  present_in_backup={2:N0} files/{3:N2} MiB  missing={4:N0}  size_delta={5:P1}" -f
         $srcCount, ($srcBytes / 1MB), ($srcCount - $missing.Count), ($dstBytes / 1MB), $missing.Count, $sizeRatio)
@@ -209,6 +241,10 @@ if ($SkipIntegrity) {
     }
     $dest = [PSCustomObject]@{ Files = $srcCount - $missing.Count; Bytes = $dstBytes }
 }
+
+# ---- marker: ONLY after transfer + integrity are green ------------------------
+Set-Content -Path $markerF -Value "$runStartEpoch" -Encoding ASCII -NoNewline
+Log "marker written: $runStartEpoch ($([DateTimeOffset]::FromUnixTimeSeconds($runStartEpoch).UtcDateTime.ToString('u')) UTC)"
 
 $entry = [ordered]@{
     ts_utc          = (Get-Date).ToUniversalTime().ToString("o")
