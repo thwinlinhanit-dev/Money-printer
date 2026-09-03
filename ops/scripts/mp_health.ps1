@@ -130,6 +130,65 @@ foreach ($tt in @("MoneyPrinterVpsBackup","MoneyPrinterOffhostBackup","MoneyPrin
     }
 }
 
+# ---- 5b. VPS backup corpus (C:\mp-backup) --------------------------------------------
+# The nightly VPS backup mirrors /opt/money-printer/data into
+# C:\mp-backup\vps-data. Since the 2026-09-04 hardening, .last_backup_ts only
+# advances after a verified-complete run, so its age IS the staleness of the
+# last good backup; the manifest's last entry records that run's integrity.
+$bkRoot     = Join-Path "C:\mp-backup" "vps-data"
+$bkMarker   = Join-Path $bkRoot ".last_backup_ts"
+$bkManifest = Join-Path $bkRoot "backup_manifest.jsonl"
+if (-not (Test-Path $bkRoot)) {
+    Out-Line "[CRIT]" "backup corpus missing: $bkRoot"
+    $crit += "backup corpus missing"
+} else {
+    $nowUtc = [DateTime]::UtcNow
+    if (Test-Path $bkMarker) {
+        $markerEpoch = [int64](Get-Content -LiteralPath $bkMarker -Raw).Trim()
+        $markerUtc = [DateTimeOffset]::FromUnixTimeSeconds($markerEpoch).UtcDateTime
+        $ageH = ($nowUtc - $markerUtc).TotalHours
+        if ($ageH -gt 50) {
+            Out-Line "[CRIT]" ("backup marker {0}Z is {1:N1}h old - backup STALE (> 2 days)" -f $markerUtc.ToString("yyyy-MM-dd HH:mm"), $ageH)
+            $crit += "backup stale"
+        } elseif ($ageH -gt 26) {
+            Out-Line "[WARN]" ("backup marker {0}Z is {1:N1}h old - missed a night?" -f $markerUtc.ToString("yyyy-MM-dd HH:mm"), $ageH)
+            $warn += "backup missed a night"
+        } else {
+            Out-Line "[ OK ]" ("backup marker {0}Z ({1:N1}h old)" -f $markerUtc.ToString("yyyy-MM-dd HH:mm"), $ageH)
+        }
+    } else {
+        Out-Line "[CRIT]" "backup marker missing: $bkMarker"
+        $crit += "backup marker missing"
+    }
+    if (Test-Path $bkManifest) {
+        $last = Get-Content -LiteralPath $bkManifest -Tail 1 -ErrorAction SilentlyContinue | ConvertFrom-Json
+        if ($null -ne $last) {
+            $mUtc = [DateTimeOffset]::Parse($last.ts_utc).UtcDateTime
+            $mAge = ($nowUtc - $mUtc).TotalHours
+            $skipIt = $false
+            if ($null -ne $last.skip_integrity) { $skipIt = [bool]$last.skip_integrity }
+            if ($skipIt) {
+                Out-Line "[WARN]" ("last backup ran with -SkipIntegrity (ts_utc={0}) - integrity not verified" -f $last.ts_utc)
+                $warn += "backup skipped integrity"
+            } elseif ($null -eq $last.dst_delta_files -or $last.dst_delta_files -ne $last.src_delta_files) {
+                Out-Line "[CRIT]" ("last manifest entry (ts_utc={0}) dst_delta_files={1} vs src_delta_files={2} - integrity NOT green" -f $last.ts_utc, $last.dst_delta_files, $last.src_delta_files)
+                $crit += "backup manifest integrity not green"
+            } elseif ($mAge -gt 50) {
+                Out-Line "[CRIT]" ("last verified-good backup {0}Z is {1:N1}h old" -f $mUtc.ToString("yyyy-MM-dd HH:mm"), $mAge)
+                $crit += "backup manifest stale"
+            } else {
+                Out-Line "[ OK ]" ("last verified-good backup {0}Z: {1} files / {2:N1} MiB (delta), elapsed {3}s" -f $last.ts_utc.Substring(0, 19), $last.dst_delta_files, ($last.dst_delta_bytes / 1MB), $last.elapsed_sec)
+            }
+        }
+    } else {
+        Out-Line "[WARN]" "backup manifest missing: $bkManifest"
+        $warn += "backup manifest missing"
+    }
+    $bkFiles = @(Get-ChildItem -LiteralPath $bkRoot -Recurse -File -ErrorAction SilentlyContinue)
+    $bkBytes = ($bkFiles | Measure-Object Length -Sum).Sum
+    Out-Line "  ..." ("corpus: {0} files / {1:N2} GiB under {2}" -f $bkFiles.Count, ($bkBytes / 1GB), $bkRoot)
+}
+
 # ---- 6. Disk --------------------------------------------------------------------------
 $drive = Get-PSDrive C
 $freeGB = $drive.Free / 1GB
