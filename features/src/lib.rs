@@ -17,24 +17,38 @@ pub mod climax_variants;
 pub mod cohort;
 pub mod config;
 pub mod corr;
+pub mod data_quality;
 pub mod engine;
+pub mod evaluation;
 pub mod hit_journal;
 pub mod ibit_cross;
 pub mod leverage;
 pub mod liquidation;
 pub mod netflow_flow;
+pub mod observation;
 pub mod oi_regime;
 pub mod options_flow;
 pub mod options_greeks;
 pub mod options_iv;
+pub mod outcome;
 pub mod screener;
 pub mod signal_catalog;
+pub mod signal_identity;
 pub mod swing;
 pub mod whale;
 
 use mp_core::Venue;
 
 pub use accumulation::{AccumulationConfig, AccumulationDetector, SubSignal};
+pub use data_quality::{DataQualityState, QualityTracker};
+pub use evaluation::{
+    decide, distribution, evaluate, grade_from_report, PromotionDecision, DEFAULT_MIN_N,
+    EvaluationReport,
+};
+pub use observation::{
+    observation_id, Direction, ObservationEngine, ObservationOutcome, SignalObservation,
+};
+pub use outcome::{attach_outcomes, outcomes_for};
 pub use bar::{Bar, BarBuilder};
 pub use catalog::{
     BookDepth, BookDepthKind, LiqDist, LiqRate, LiqVol, Microprice, SpreadBp, SpreadRegime,
@@ -75,6 +89,7 @@ pub use options_iv::{
     vrp, IvAtm, IvIndex, IvPercentileFeature, IvSkew, IvSurfaceAggregator, IvTerm, VolRegime,
 };
 pub use screener::{Cond, Op, Rule, Screener, ScreenerHit};
+pub use signal_identity::{cost_model_hash, SignalResearchIdentity};
 pub use swing::{
     atr, compressed_range, realized_vol, sweep_of, trend_strength, value_area, volume_levels,
     AdKind, AdState, LevelKind, LevelSide, PocFlipField, PocSide, RangeField, RollingVwap,

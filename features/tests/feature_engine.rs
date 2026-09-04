@@ -1296,6 +1296,33 @@ fn fp_3_market_profile_vah_val_contain_70_percent_volume() {
 }
 
 #[test]
+fn rel_21_vah_val_tie_break_is_deterministic_across_engines() {
+    // spec 054 REL-21: VAH/VAL POC selection on an equal-volume tie must
+    // resolve identically across FRESH engine instances (total_cmp + sorted
+    // profile ⇒ lowest bucket wins, no NaN-silent `Equal` fallback).
+    let run = || {
+        let mut e = FeatureEngine::new(SEC);
+        e.register_bar(|| Box::new(MarketProfileVah::new("1s", 2, 10.0)));
+        e.register_bar(|| Box::new(MarketProfileVal::new("1s", 2, 10.0)));
+        let mut all = Vec::new();
+        // Bar 0: mid 100 vol 10 (bucket center 105). Bar 1: mid 120 vol 10
+        // (bucket center 125). Equal volume: POC tie ⇒ lowest bucket (105).
+        all.extend(e.on_event(&trade(1, 100.0, 10.0, Side::Buy)));
+        all.extend(e.on_event(&trade(SEC + 1, 120.0, 10.0, Side::Buy)));
+        all.extend(e.on_event(&trade(2 * SEC + 1, 100.0, 1.0, Side::Buy)));
+        let vah = value(&e, &all, "footprint.market.profile.vah.1s");
+        let val = value(&e, &all, "footprint.market.profile.val.1s");
+        (vah, val)
+    };
+    let (vah0, val0) = run();
+    assert_eq!(vah0, Some(125.0), "VAH expands upward from the lowest-bucket POC");
+    assert_eq!(val0, Some(105.0), "VAL is the POC bucket itself");
+    for _ in 0..8 {
+        assert_eq!(run(), (vah0, val0), "VAH/VAL tie-break must be deterministic");
+    }
+}
+
+#[test]
 fn fp_4_engine_from_config_registers_footprint_signals() {
     use mp_features::FeaturesConfig;
     let cfg = FeaturesConfig::from_toml(

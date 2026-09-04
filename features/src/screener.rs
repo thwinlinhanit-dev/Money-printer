@@ -4,8 +4,10 @@
 //! (spec 010 turns hits into P&L research). OR / time-windowed persistence are
 //! deferred (spec 004 Decisions).
 
+use crate::data_quality::DataQualityState;
 use crate::engine::FeatureUpdate;
 use mp_core::SymbolId;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Comparison operator.
@@ -45,12 +47,16 @@ pub struct Rule {
 }
 
 /// A rule firing, with the feature snapshot at fire time.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScreenerHit {
     pub rule_id: String,
     pub symbol: SymbolId,
     pub ts_ns: i64,
     pub snapshot: BTreeMap<String, f64>,
+    /// Data quality at fire time (spec 054 REL-3). `#[serde(default)]` keeps
+    /// pre-hardening journal lines parseable: they decode as `Healthy`.
+    #[serde(default)]
+    pub quality: DataQualityState,
 }
 
 /// Kind of screener hit (entry vs exit).
@@ -162,6 +168,7 @@ impl Screener {
                     symbol: u.symbol,
                     ts_ns: u.ts_ns,
                     snapshot: snap.clone(),
+                    quality: DataQualityState::Healthy,
                 });
             } else if !satisfied && was {
                 // Exit transition (active → inactive) — spec 022 exit hits
@@ -170,6 +177,7 @@ impl Screener {
                     symbol: u.symbol,
                     ts_ns: u.ts_ns,
                     snapshot: snap.clone(),
+                    quality: DataQualityState::Healthy,
                 });
             }
             self.active.insert(key, satisfied);
@@ -177,6 +185,33 @@ impl Screener {
 
         self.has_evaluated = true;
         hits
+    }
+
+    /// Explicit rule state per (symbol, rule) (spec 054 REL-3): whether the
+    /// rule CAN fire given what the screener has seen so far. A condition
+    /// whose feature was never observed makes the rule's state
+    /// `InsufficientHistory` — visible to callers instead of the legacy
+    /// silent "condition never satisfied" — and blocks the rule until the
+    /// feature arrives. Staleness/invalidity are the QualityTracker's domain
+    /// (the screener has no time window of its own); callers combining both
+    /// take the worse state.
+    pub fn state(&self, symbol: SymbolId, rule_id: &str) -> DataQualityState {
+        let Some(rule) = self.rules.iter().find(|r| r.id == rule_id) else {
+            return DataQualityState::InsufficientHistory;
+        };
+        let snap = match self.snapshots.get(&symbol) {
+            Some(s) => s,
+            None => return DataQualityState::InsufficientHistory,
+        };
+        if rule
+            .conds
+            .iter()
+            .any(|c| !snap.contains_key(&c.feature))
+        {
+            DataQualityState::InsufficientHistory
+        } else {
+            DataQualityState::Healthy
+        }
     }
 }
 
@@ -209,5 +244,43 @@ mod tests {
             "cvd.binance".to_string(),
         ]);
         assert!(s.validate_features(&ok_known).is_ok());
+    }
+
+    #[test]
+    fn rel_3_unseen_feature_is_explicit_insufficient_history() {
+        // Spec 054 REL-3: a rule whose condition feature has never been
+        // observed must expose InsufficientHistory — the legacy behavior was
+        // a silent "condition never satisfied" with no way to tell a dead
+        // feed from a legitimately-false rule.
+        let mut s = Screener::new(vec![Rule {
+            id: "r1".into(),
+            conds: vec![Cond {
+                feature: "funding.rate".into(),
+                op: Op::Gt,
+                threshold: 0.0,
+            }],
+        }]);
+        assert_eq!(
+            s.state(SymbolId(7), "r1"),
+            DataQualityState::InsufficientHistory
+        );
+        // Feed the feature (with the engine-style name map, as production
+        // wires it): the rule can now fire ⇒ Healthy.
+        s.set_name_map(BTreeMap::from([(SymbolId(9), "funding.rate".to_string())]));
+        s.on_update(&FeatureUpdate {
+            feature: SymbolId(9),
+            name: "funding.rate".into(),
+            venue: mp_core::Venue::Bybit,
+            symbol: SymbolId(7),
+            ts_ns: 1_000_000_000,
+            value: 0.0002,
+            ver: 1,
+        });
+        assert_eq!(s.state(SymbolId(7), "r1"), DataQualityState::Healthy);
+        // Unknown rule id is also InsufficientHistory (cannot fire).
+        assert_eq!(
+            s.state(SymbolId(7), "nope"),
+            DataQualityState::InsufficientHistory
+        );
     }
 }

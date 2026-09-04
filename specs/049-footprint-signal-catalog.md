@@ -49,7 +49,15 @@ For each bar in window:
   config key is `market_profile_bucket_width`)
 - Output: POC, VAH, VAL as separate features
 - POC tie-break: deterministic (PD-3) — on equal bucket volumes the lowest
-  bucket wins (A-5 audit 2026-09-02)
+  bucket wins (A-5 audit 2026-09-02; hardened 2026-09-04, spec 054 REL-21,
+  to `total_cmp` so non-finite values can never resolve as a silent `Equal`;
+  VAH/VAL use the same deterministic rule)
+- **Approximation (spec 054 REL-20):** this is a BAR-BASED market profile.
+  Each bar's entire volume is placed in ONE bucket at the bar midpoint
+  `(high+low)/2`; intra-bar volume distribution is invisible and wide bars
+  distort the profile. It is an approximation of the true POC/VAH/VAL and
+  must never be treated as an L2-equivalent footprint. Trade-level footprint
+  requires full L2 data and is out of scope.
 
 **Tests**
 - fp_1: volume.bubble emits correct percentile rank

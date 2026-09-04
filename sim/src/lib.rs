@@ -22,6 +22,7 @@ pub mod fills;
 pub mod gates;
 pub mod harness;
 pub mod metrics;
+pub mod observations;
 pub mod paper;
 pub mod strategy_resolve;
 pub mod tracker;
@@ -41,6 +42,7 @@ pub use harness::{
     McResult, MetricsSummary, WalkForwardParams, WindowResult,
 };
 pub use metrics::{bars_per_year, Metrics};
+pub use observations::ObservationRecorder;
 pub use paper::PaperSession;
 pub use strategy_resolve::{strategy_named, universe_from_events};
 pub use tracker::{content_hash, RunRecord};

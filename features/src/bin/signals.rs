@@ -110,6 +110,14 @@ fn run() -> Result<ExitCode, String> {
         "grade" => {
             let id = need(&args, "--id")?;
             let now = now_ns(&args)?;
+            let min_n: u64 =
+                flag(&args, "--min-n").map_or(Ok(30), |v| v.parse().map_err(|_| "bad --min-n"))?;
+            let human = args.iter().any(|a| a == "--human");
+            let rec = catalog
+                .get_mut(&id)
+                .ok_or_else(|| format!("unknown signal {id}"))?;
+            // REL-4: the grade is stamped with the record's CURRENT identity
+            // fingerprint — a later identity change invalidates it.
             let g = GradeSnapshot {
                 run_id: need(&args, "--run-id")?,
                 created_ts_ns: now,
@@ -125,13 +133,8 @@ fn run() -> Result<ExitCode, String> {
                 avg_excess: need(&args, "--avg-excess")?
                     .parse()
                     .map_err(|_| "bad --avg-excess".to_string())?,
+                identity: rec.identity().fingerprint(),
             };
-            let min_n: u64 =
-                flag(&args, "--min-n").map_or(Ok(30), |v| v.parse().map_err(|_| "bad --min-n"))?;
-            let human = args.iter().any(|a| a == "--human");
-            let rec = catalog
-                .get_mut(&id)
-                .ok_or_else(|| format!("unknown signal {id}"))?;
             match rec.apply_grade(g, min_n, human, now) {
                 Ok(()) => {
                     let stage = format!("{:?}", rec.stage);

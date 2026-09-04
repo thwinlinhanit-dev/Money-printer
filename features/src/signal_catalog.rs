@@ -11,6 +11,7 @@
 //! `decay_flag` so Rust and Python arms cannot disagree on what "decayed"
 //! means (RES-3).
 
+use crate::signal_identity::SignalResearchIdentity;
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle stages, ordered by rank. `Decayed` is a transient marker used by
@@ -49,6 +50,14 @@ impl SignalStage {
 }
 
 /// One grading batch (a research run over the hit journal, spec 017/025).
+///
+/// REL-4/REL-5 (spec 054): the grade carries the [`SignalResearchIdentity`]
+/// fingerprint of the run that produced it; `apply_grade` refuses any grade
+/// whose identity does not match the record's CURRENT identity. A params /
+/// feature-version / data-schema / cost-model change therefore invalidates
+/// all older grades — they can never silently promote. `#[serde(default)]`
+/// keeps pre-hardening catalog files parseable: their grades decode with
+/// `identity = ""`, which matches nothing and is refused loudly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GradeSnapshot {
     pub run_id: String,
@@ -57,6 +66,9 @@ pub struct GradeSnapshot {
     pub n: u64,
     pub win_rate: f64,
     pub avg_excess: f64,
+    /// Identity fingerprint of the run that produced this grade (REL-4).
+    #[serde(default)]
+    pub identity: String,
 }
 
 impl GradeSnapshot {
@@ -92,6 +104,8 @@ pub enum SignalError {
     EmptyId,
     #[error("signal id already registered (SIG-1)")]
     DuplicateId,
+    #[error("grade identity does not match the record's current identity — params, feature version, data schema, or cost model changed since this grade was produced (REL-5); re-run the experiment")]
+    IdentityMismatch,
 }
 
 /// Default re-test interval: evidence older than 30 days is stale (mirrors
@@ -108,6 +122,18 @@ pub struct SignalRecord {
     /// `features.toml` params hash of the feature config the signal runs on
     /// (FEA-7) — a params change means the graded history no longer applies.
     pub params_hash: String,
+    /// Feature version the graded evidence was produced under (REL-4). A bump
+    /// invalidates old grades. Default 1; `#[serde(default)]` for old files.
+    #[serde(default = "default_feature_version")]
+    pub feature_version: u16,
+    /// Data-schema version of the raw corpus the evidence ran on (REL-4).
+    /// Default `mp_core::SCHEMA_VER`; `#[serde(default)]` for old files.
+    #[serde(default = "default_data_schema_version")]
+    pub data_schema_version: u16,
+    /// Cost-model hash the evidence assumed (REL-7). Default empty
+    /// (cost-free research view). Any non-empty cost model differs.
+    #[serde(default)]
+    pub cost_model_hash: String,
     pub grades: Vec<GradeSnapshot>,
     /// Weekly mean excess per grading week (the decay re-test series, RES-3).
     pub weekly_avg_excess: Vec<f64>,
@@ -117,6 +143,13 @@ pub struct SignalRecord {
     /// Default true; set false for signals requiring L2 depth data.
     #[serde(default = "default_zero_cost_compatible")]
     pub zero_cost_compatible: bool,
+}
+
+fn default_feature_version() -> u16 {
+    1
+}
+fn default_data_schema_version() -> u16 {
+    mp_core::SCHEMA_VER
 }
 
 fn default_zero_cost_compatible() -> bool {
@@ -144,12 +177,41 @@ impl SignalRecord {
             stage: SignalStage::Hypothesis,
             hypothesis,
             params_hash: params_hash.into(),
+            feature_version: default_feature_version(),
+            data_schema_version: default_data_schema_version(),
+            cost_model_hash: String::new(),
             grades: Vec::new(),
             weekly_avg_excess: Vec::new(),
             last_grade_ts_ns: 0,
             re_test_interval_ns: RE_TEST_INTERVAL_NS,
             zero_cost_compatible: true,
         })
+    }
+
+    /// Override the identity dimensions (REL-4) — call before grading. A
+    /// feature-version bump, a schema migration, or a cost-model change here
+    /// invalidates all previously recorded grades (they can no longer match).
+    pub fn with_identity(
+        mut self,
+        feature_version: u16,
+        data_schema_version: u16,
+        cost_model_hash: impl Into<String>,
+    ) -> Self {
+        self.feature_version = feature_version;
+        self.data_schema_version = data_schema_version;
+        self.cost_model_hash = cost_model_hash.into();
+        self
+    }
+
+    /// The canonical research identity of this record's evidence (REL-4).
+    pub fn identity(&self) -> SignalResearchIdentity {
+        SignalResearchIdentity {
+            signal_id: self.id.clone(),
+            feature_version: self.feature_version,
+            data_schema_version: self.data_schema_version,
+            params_hash: self.params_hash.clone(),
+            cost_model_hash: self.cost_model_hash.clone(),
+        }
     }
 
     /// SIG-5: is a re-test due? (last grade older than the interval, or never
@@ -173,6 +235,12 @@ impl SignalRecord {
     ) -> Result<(), SignalError> {
         if self.stage == SignalStage::Killed {
             return Err(SignalError::Terminal);
+        }
+        // REL-5: evidence is only valid under the identity that produced it.
+        // A grade with a different (or missing — pre-hardening) identity is
+        // refused before any promotion logic runs.
+        if g.identity != self.identity().fingerprint() {
+            return Err(SignalError::IdentityMismatch);
         }
         if !g.has_min_samples(min_n) {
             return Err(SignalError::TooFewSamples(min_n));
@@ -336,7 +404,7 @@ mod tests {
 
     const NOW: i64 = 1_784_505_600_000_000_000; // 2026-07-19T00:00:00Z, deterministic
 
-    fn grade(run_id: &str, n: u64, avg_excess: f64, ts: i64) -> GradeSnapshot {
+    fn grade(rec: &SignalRecord, run_id: &str, n: u64, avg_excess: f64, ts: i64) -> GradeSnapshot {
         GradeSnapshot {
             run_id: run_id.into(),
             created_ts_ns: ts,
@@ -344,6 +412,7 @@ mod tests {
             n,
             win_rate: 0.6,
             avg_excess,
+            identity: rec.identity().fingerprint(),
         }
     }
 
@@ -360,51 +429,125 @@ mod tests {
         let mut r = SignalRecord::register("sig", "hyp", "h").unwrap();
         // Too few samples: refused (small samples are noise, not edge).
         assert!(r
-            .apply_grade(grade("r1", 5, 0.001, NOW), 30, false, NOW)
+            .apply_grade(grade(&r, "r1", 5, 0.001, NOW), 30, false, NOW)
             .is_err());
         assert_eq!(r.stage, SignalStage::Hypothesis);
         // No positive edge: refused.
         assert!(r
-            .apply_grade(grade("r2", 30, -0.001, NOW), 30, false, NOW)
+            .apply_grade(grade(&r, "r2", 30, -0.001, NOW), 30, false, NOW)
             .is_err());
         // Good batch: Hypothesis → Tested.
-        r.apply_grade(grade("r3", 30, 0.002, NOW), 30, false, NOW)
+        r.apply_grade(grade(&r, "r3", 30, 0.002, NOW), 30, false, NOW)
             .unwrap();
         assert_eq!(r.stage, SignalStage::Tested);
         // Tested → Graded.
-        r.apply_grade(grade("r4", 40, 0.002, NOW), 30, false, NOW)
+        r.apply_grade(grade(&r, "r4", 40, 0.002, NOW), 30, false, NOW)
             .unwrap();
         assert_eq!(r.stage, SignalStage::Graded);
         // Graded → Deployed needs a human (agents can never pass it).
         assert!(r
-            .apply_grade(grade("r5", 50, 0.002, NOW), 30, false, NOW)
+            .apply_grade(grade(&r, "r5", 50, 0.002, NOW), 30, false, NOW)
             .is_err());
-        r.apply_grade(grade("r6", 50, 0.002, NOW), 30, true, NOW)
+        r.apply_grade(grade(&r, "r6", 50, 0.002, NOW), 30, true, NOW)
             .unwrap();
         assert_eq!(r.stage, SignalStage::Deployed);
         // Deployed has no next stage.
         assert!(r
-            .apply_grade(grade("r7", 50, 0.002, NOW), 30, true, NOW)
+            .apply_grade(grade(&r, "r7", 50, 0.002, NOW), 30, true, NOW)
             .is_err());
     }
 
     #[test]
     fn sig_5_stale_grade_refuses_promotion_until_retest() {
         let mut r = SignalRecord::register("sig", "hyp", "h").unwrap();
-        r.apply_grade(grade("r1", 30, 0.002, NOW), 30, false, NOW)
+        r.apply_grade(grade(&r, "r1", 30, 0.002, NOW), 30, false, NOW)
             .unwrap();
         // A grade 40 days later is stale (interval = 30d): refused until re-test.
         let late = NOW + 40 * 86_400_000_000_000;
         assert!(matches!(
-            r.apply_grade(grade("r2", 30, 0.002, late), 30, false, late),
+            r.apply_grade(grade(&r, "r2", 30, 0.002, late), 30, false, late),
             Err(SignalError::StaleGrade(_))
         ));
         // A re-test within the interval is accepted.
         let on_time = NOW + 10 * 86_400_000_000_000;
         assert!(r
-            .apply_grade(grade("r2", 30, 0.002, on_time), 30, false, on_time)
+            .apply_grade(grade(&r, "r2", 30, 0.002, on_time), 30, false, on_time)
             .is_ok());
         assert!(!r.re_test_due(on_time));
+    }
+
+    #[test]
+    fn rel_5_identity_change_invalidates_old_evidence() {
+        // REL-5: evidence produced under one identity must be refused after
+        // ANY identity dimension changes (params / feature version / data
+        // schema / cost model).
+        // Helper: a grade carrying the OLD identity fingerprint (evidence
+        // produced before a mutation) — this is what invalidation must refuse.
+        let old_grade = |rec: &SignalRecord, old_fp: String| GradeSnapshot {
+            identity: old_fp,
+            ..grade(rec, "r_old", 40, 0.002, NOW + 1000)
+        };
+
+        // 1) params change: evidence under the old fingerprint is refused.
+        let mut r = SignalRecord::register("sig", "hyp", "h").unwrap();
+        r.apply_grade(grade(&r, "r1", 30, 0.002, NOW), 30, false, NOW)
+            .unwrap();
+        assert_eq!(r.stage, SignalStage::Tested);
+        let fp_before = r.identity().fingerprint();
+        r.params_hash = "h2".into();
+        assert_ne!(r.identity().fingerprint(), fp_before);
+        assert!(matches!(
+            r.apply_grade(old_grade(&r, fp_before.clone()), 30, false, NOW + 1000),
+            Err(SignalError::IdentityMismatch)
+        ));
+
+        // 2) feature-version bump invalidates too.
+        let mut r2 = SignalRecord::register("sig2", "hyp", "h").unwrap();
+        r2.apply_grade(grade(&r2, "r1", 30, 0.002, NOW), 30, false, NOW)
+            .unwrap();
+        let fp2 = r2.identity().fingerprint();
+        r2.feature_version = 2;
+        assert!(matches!(
+            r2.apply_grade(old_grade(&r2, fp2), 30, false, NOW + 1000),
+            Err(SignalError::IdentityMismatch)
+        ));
+
+        // 3) cost-model change invalidates (REL-7).
+        let mut r3 = SignalRecord::register("sig3", "hyp", "h").unwrap();
+        r3.apply_grade(grade(&r3, "r1", 30, 0.002, NOW), 30, false, NOW)
+            .unwrap();
+        let fp3 = r3.identity().fingerprint();
+        r3.cost_model_hash = crate::signal_identity::cost_model_hash(0.00055, 0.0002, 0.0001);
+        assert!(matches!(
+            r3.apply_grade(old_grade(&r3, fp3), 30, false, NOW + 1000),
+            Err(SignalError::IdentityMismatch)
+        ));
+
+        // 4) a CURRENT-identity grade still promotes (sanity).
+        let mut r4 = SignalRecord::register("sig4", "hyp", "h").unwrap();
+        r4.apply_grade(grade(&r4, "r1", 30, 0.002, NOW), 30, false, NOW)
+            .unwrap();
+        assert_eq!(r4.stage, SignalStage::Tested);
+    }
+
+    #[test]
+    fn rel_5_pre_hardening_grades_without_identity_are_refused() {
+        // A legacy catalog file's grades decode with identity="" — they must
+        // be refused loudly, not silently accepted under the new identity.
+        let mut r = SignalRecord::register("sig", "hyp", "h").unwrap();
+        let legacy = GradeSnapshot {
+            run_id: "legacy".into(),
+            created_ts_ns: NOW,
+            horizon_ns: 3_600_000_000_000,
+            n: 50,
+            win_rate: 0.6,
+            avg_excess: 0.01,
+            identity: String::new(), // absent in old files
+        };
+        assert!(matches!(
+            r.apply_grade(legacy, 30, false, NOW),
+            Err(SignalError::IdentityMismatch)
+        ));
     }
 
     #[test]
@@ -442,7 +585,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.stage, SignalStage::Killed);
         assert!(r
-            .apply_grade(grade("r", 30, 0.002, NOW), 30, true, NOW)
+            .apply_grade(grade(&r, "r", 30, 0.002, NOW), 30, true, NOW)
             .is_err());
         assert!(r.kill("again").is_err());
     }

@@ -7,6 +7,7 @@ use crate::decision_log::DecisionLog;
 use crate::error::SimError;
 use crate::fills::{FillModel, FillParams, Pending, PendingBook, PendingKind, ProducedFill};
 use crate::metrics::{bars_per_year, Metrics};
+use crate::observations::ObservationRecorder;
 use mp_core::{
     BookMirror, Clock, EventEnvelope, Fill, IntentId, MarketEvent, OrderIntent, OrderKind, Side,
     SimClock, SizeUnit, SplitMix64, SymbolId, Venue,
@@ -21,7 +22,7 @@ use mp_strategies::Strategy;
 use std::collections::BTreeMap;
 
 /// Backtester configuration.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SimConfig {
     pub fill_model: FillModel,
     pub latency_ns: i64,
@@ -43,16 +44,21 @@ pub struct SimConfig {
     pub min_coverage: f64,
     pub funding_check_interval_ns: i64,
     pub limits: RiskLimits,
+    /// Hash of the cost model (fees/slippage) — part of the signal research
+    /// identity (spec 054 REL-7): evidence computed under a different cost
+    /// model is invalidated. Defaults from `taker_fee`/`maker_fee`/`slip_frac`.
+    pub cost_model_hash: String,
 }
 
 impl Default for SimConfig {
     fn default() -> Self {
+        let (taker_fee, maker_fee, slip_frac) = (0.00055, 0.0002, 0.0001);
         Self {
             fill_model: FillModel::default(),
             latency_ns: 150_000_000,
-            taker_fee: 0.00055,
-            maker_fee: 0.0002,
-            slip_frac: 0.0001,
+            taker_fee,
+            maker_fee,
+            slip_frac,
             participation: 0.5,
             queue_share: 0.25,
             bar_tf_ns: 60_000_000_000,
@@ -64,6 +70,11 @@ impl Default for SimConfig {
             min_notional: 5.0,
             min_coverage: 0.995,
             funding_check_interval_ns: 28_800_000_000_000,
+            cost_model_hash: mp_features::signal_identity::cost_model_hash(
+                taker_fee,
+                maker_fee,
+                slip_frac,
+            ),
             limits: RiskLimits {
                 max_order_notional: 1_000_000.0,
                 max_position_notional: 5_000_000.0,
@@ -173,6 +184,11 @@ pub struct Backtester {
     /// sampled for bar-return Sharpe once per bar boundary (the first event
     /// seeds the baseline without contributing a return).
     last_bar_epoch: i64,
+    /// Research-lab observation recorder (Phase 3/4, spec 054). Write-only
+    /// side state: records observations when strategies fire and attaches
+    /// forward outcomes post-run; NEVER feeds back into dispatch, so the
+    /// decision log is byte-identical with or without it.
+    recorder: Option<ObservationRecorder>,
 }
 
 impl Backtester {
@@ -228,6 +244,52 @@ impl Backtester {
             hold_start: BTreeMap::new(),
             intent_strategy: BTreeMap::new(),
             last_bar_epoch: i64::MIN,
+            recorder: None,
+        }
+    }
+
+    /// Enable research observation recording (spec 054 REL-8/REL-9).
+    /// `params_hash` is the FEA-6 feature-config params hash; `feature_version`
+    /// the feature version; `created_at_ns` a fixed injected creation time
+    /// (replay passes a constant — PD-3). The cost-model hash comes from
+    /// [`SimConfig::cost_model_hash`]; round-trip cost for net returns is
+    /// `taker_fee + maker_fee`.
+    pub fn enable_observations(
+        &mut self,
+        params_hash: String,
+        feature_version: u16,
+        created_at_ns: i64,
+    ) {
+        let ids: Vec<String> = self.strats.iter().map(|s| s.id().0.clone()).collect();
+        self.recorder = Some(ObservationRecorder::new(
+            &ids,
+            params_hash,
+            feature_version,
+            mp_core::SCHEMA_VER,
+            self.cfg.cost_model_hash.clone(),
+            created_at_ns,
+            self.cfg.taker_fee + self.cfg.maker_fee,
+        ));
+    }
+
+    /// Recorded observations (fire order) — empty when recording is disabled.
+    pub fn observations(&self) -> &[mp_features::observation::SignalObservation] {
+        self.recorder
+            .as_ref()
+            .map_or(&[], |r| r.observations())
+    }
+
+    /// Fires blocked by the data-quality gate (REL-2 observability).
+    pub fn blocked_observations(&self) -> u64 {
+        self.recorder.as_ref().map_or(0, ObservationRecorder::blocked_count)
+    }
+
+    /// Attach forward outcomes post-run (Phase 4, REL-12..14): computes each
+    /// observation's gross/net/MFE/MAE at every horizon from the RECORDED
+    /// mark series only — no lookahead possible. No-op when recording is off.
+    pub fn attach_outcomes(&mut self, horizons: &[i64]) {
+        if let Some(r) = &mut self.recorder {
+            r.attach_outcomes(horizons);
         }
     }
 
@@ -389,11 +451,13 @@ impl Backtester {
             } => {
                 self.latest_mark.insert(ev.symbol, *price);
                 self.acct.mark(ev.symbol, *price);
+                self.record_mark(ev.symbol, *price, ev.recv_ts_ns);
                 self.on_trade(ev.symbol, *price, *qty, *side, ev.recv_ts_ns);
             }
             MarketEvent::MarkPrice { mark, .. } => {
                 self.latest_mark.insert(ev.symbol, *mark);
                 self.acct.mark(ev.symbol, *mark);
+                self.record_mark(ev.symbol, *mark, ev.recv_ts_ns);
             }
             MarketEvent::Funding {
                 rate, interval_s, ..
@@ -411,6 +475,7 @@ impl Backtester {
         if let Some(mid) = self.books.get(&ev.symbol).and_then(BookMirror::mid) {
             self.latest_mark.insert(ev.symbol, mid);
             self.acct.mark(ev.symbol, mid);
+            self.record_mark(ev.symbol, mid, ev.recv_ts_ns);
         }
 
         if !matches!(
@@ -443,6 +508,9 @@ impl Backtester {
         for u in ups {
             self.seq += 1;
             self.log.record_feature(self.seq, &u);
+            if let Some(r) = &mut self.recorder {
+                r.on_feature_update(&u);
+            }
             let feat_name = self.fe.resolve_name(u.feature).to_owned();
             if feat_name.starts_with("vol.rv") {
                 self.latest_vol.insert(u.symbol, u.value);
@@ -451,6 +519,10 @@ impl Backtester {
             // subscription set matches it (each strategy also self-checks its
             // feature name). Iteration order is registration order — deterministic
             // under an injected clock (PD-3).
+            //
+            // The observation snapshot for intents fired by this update is the
+            // update itself (REL-8: only the features that caused the fire).
+            let fire_snapshot = std::collections::BTreeMap::from([(u.name.clone(), u.value)]);
             for i in 0..self.strats.len() {
                 if self.strats[i].rebalance_cadence().is_bar_close() && !at_bar_boundary {
                     // SWG-7: a swing strategy evaluates on bar close ONLY.
@@ -460,14 +532,30 @@ impl Backtester {
                     continue;
                 }
                 let (mut intents, logs) = self.dispatch_one(now, i, |s, ctx| s.on_feature(&u, ctx));
-                self.record_dispatch(now, &mut intents, &logs);
+                self.record_dispatch(now, &mut intents, &logs, Some(&fire_snapshot));
             }
         }
     }
 
+    /// Record a mark sample for the observation recorder (no-op when off).
+    fn record_mark(&mut self, symbol: SymbolId, price: f64, ts_ns: i64) {
+        if let Some(r) = &mut self.recorder {
+            r.record_mark(symbol, price, ts_ns);
+        }
+    }
+
     /// Validate + record a dispatch result, threading strategy rationale lines
-    /// into the decision log ahead of the intents they explain.
-    fn record_dispatch(&mut self, now: i64, intents: &mut [OrderIntent], logs: &[String]) {
+    /// into the decision log ahead of the intents they explain. When the
+    /// observation recorder is enabled, each intent is ALSO recorded as an
+    /// immutable observation (snapshot = the feature update that caused the
+    /// fire, when known).
+    fn record_dispatch(
+        &mut self,
+        now: i64,
+        intents: &mut [OrderIntent],
+        logs: &[String],
+        fire_snapshot: Option<&std::collections::BTreeMap<String, f64>>,
+    ) {
         for msg in logs {
             self.seq += 1;
             self.log.record_log(self.seq, msg);
@@ -486,6 +574,10 @@ impl Backtester {
                 .insert(intent.intent_id.0, intent.strategy.0.clone());
             self.seq += 1;
             self.log.record_intent(self.seq, intent);
+            if let Some(r) = &mut self.recorder {
+                let snap = fire_snapshot.cloned().unwrap_or_default();
+                r.record_intent(intent, now, &snap);
+            }
             self.enqueue(intent, now);
         }
     }
@@ -519,7 +611,7 @@ impl Backtester {
             // Dispatch the fired timer to every strategy; each only reacts to
             // its own opaque TimerIds, so there is no cross-strategy coupling.
             let (mut intents, logs) = self.dispatch_all(now, |s, ctx| s.on_timer(id, ctx));
-            self.record_dispatch(now, &mut intents, &logs);
+            self.record_dispatch(now, &mut intents, &logs, None);
         }
         self.pending_timers.extend(deferred);
     }
@@ -807,7 +899,7 @@ impl Backtester {
             .record_fill_tagged(self.seq, &fill, p.optimism, strategy, p.venue);
 
         let (mut follow, logs) = self.dispatch_all(now, |s, ctx| s.on_fill(&fill, ctx));
-        self.record_dispatch(now, &mut follow, &logs);
+        self.record_dispatch(now, &mut follow, &logs, None);
     }
 }
 
@@ -876,7 +968,7 @@ mod tests {
             intent("carry-v1", Side::Buy),
             intent("liq-fade", Side::Sell),
         ];
-        bt.record_dispatch(0, &mut intents, &[]);
+        bt.record_dispatch(0, &mut intents, &[], None);
 
         // Both local id-7 intents were re-stamped with unique global ids.
         assert_ne!(intents[0].intent_id, intents[1].intent_id);

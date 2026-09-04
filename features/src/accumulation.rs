@@ -10,6 +10,7 @@
 //! per asset (ACC-4). Produces [`ScreenerHit`] events consumable by the
 //! research pipeline (RES-4 event study, spec 025 signal catalog).
 
+use crate::data_quality::DataQualityState;
 use crate::engine::FeatureUpdate;
 use crate::screener::ScreenerHit;
 use mp_core::SymbolId;
@@ -178,6 +179,10 @@ impl ValueBuffer {
     }
 
     /// Midrank percentile of the LATEST value within the trailing window (ACC-3).
+    /// `None` = fewer than 5 in-window observations — insufficient history,
+    /// which must BLOCK the sub-signal, never become a neutral 0.5 (spec 054
+    /// REL-2; the pre-hardening caller used `unwrap_or(0.5)` here, silently
+    /// fabricating a median for short history).
     fn percentile_in_window(&self, now_ns: i64, window_ns: i64) -> Option<f64> {
         let cutoff = now_ns.saturating_sub(window_ns);
         let in_window: Vec<f64> = self
@@ -189,7 +194,7 @@ impl ValueBuffer {
         let n = in_window.len();
         if n < 5 {
             return None;
-        } // need enough observations
+        } // need enough observations (REL-2)
         let cur = *in_window.last()?;
         let mut below = 0usize;
         let mut equal = 0usize;
@@ -201,6 +206,14 @@ impl ValueBuffer {
             }
         }
         Some((below as f64 + 0.5 * equal as f64) / n as f64)
+    }
+
+    /// Number of observations within the trailing window (evidence for the
+    /// hit snapshot, spec 054 REL-6: sample counts make the percentile's
+    /// support explicit).
+    fn window_samples(&self, now_ns: i64, window_ns: i64) -> u64 {
+        let cutoff = now_ns.saturating_sub(window_ns);
+        self.values.iter().filter(|&&(t, _)| t >= cutoff).count() as u64
     }
 
     /// Latest value.
@@ -314,27 +327,27 @@ impl AccumulationDetector {
         let velocity = state.netflow_velocity.latest()?;
         let netflow_regime = state.features.get(&nr_feat).copied()?;
 
-        // Sub-signal 1: OI rising.
-        let oi_active =
-            trend_vals.contains(&regime_trend) && oi_quads.contains(&(oi_quadrant as i64)) && {
-                let pctl = state
-                    .oi_delta
-                    .percentile_in_window(now_ns, pw_ns)
-                    .unwrap_or(0.5);
-                pctl >= oi_pctile && oi_delta > 0.0
-            };
+        // Sub-signal 1: OI rising. Spec 054 REL-2: an `None` percentile
+        // (fewer than 5 in-window samples) BLOCKS the sub-signal — it is
+        // never neutralized to 0.5 (the pre-hardening `unwrap_or(0.5)`
+        // silently scored short history as a median).
+        let oi_pctl = state.oi_delta.percentile_in_window(now_ns, pw_ns);
+        let oi_active = oi_pctl.is_some()
+            && trend_vals.contains(&regime_trend)
+            && oi_quads.contains(&(oi_quadrant as i64))
+            && oi_pctl.unwrap_or(f64::NAN) >= oi_pctile
+            && oi_delta > 0.0;
         if !oi_active {
             return None;
         }
 
-        // Sub-signal 2: Smart money buying.
-        let sm_active = whale_ratio >= wr_floor && smart_flow > 0.0 && smart_delta > 0.0 && {
-            let pctl = state
-                .smart_flow
-                .percentile_in_window(now_ns, pw_ns)
-                .unwrap_or(0.5);
-            pctl >= sf_pctile
-        };
+        // Sub-signal 2: Smart money buying (same REL-2 blocking rule).
+        let sf_pctl = state.smart_flow.percentile_in_window(now_ns, pw_ns);
+        let sm_active = sf_pctl.is_some()
+            && whale_ratio >= wr_floor
+            && smart_flow > 0.0
+            && smart_delta > 0.0
+            && sf_pctl.unwrap_or(f64::NAN) >= sf_pctile;
         if !sm_active {
             return None;
         }
@@ -345,13 +358,31 @@ impl AccumulationDetector {
             return None;
         }
 
-        // All three active — fire.
+        // All three active — fire. Evidence representation (spec 054 REL-6):
+        // the snapshot carries the per-leg percentile + in-window sample
+        // counts that PRODUCED the decision, so a consumer can see how much
+        // history supported each leg instead of only the raw feature values.
         state.last_hit_ns = now_ns;
         let mut snapshot = BTreeMap::new();
         snapshot.insert("sub_signal.oi_rising".into(), 1.0);
         snapshot.insert("sub_signal.smart_money_buying".into(), 1.0);
         snapshot.insert("sub_signal.exchange_outflow".into(), 1.0);
         snapshot.insert("accumulation_score".into(), 3.0);
+        if let Some(p) = oi_pctl {
+            snapshot.insert("evidence.oi_delta.percentile".into(), p);
+        }
+        snapshot.insert(
+            "evidence.oi_delta.samples".into(),
+            state.oi_delta.window_samples(now_ns, pw_ns) as f64,
+        );
+        if let Some(p) = sf_pctl {
+            snapshot.insert("evidence.smart_flow.percentile".into(), p);
+        }
+        snapshot.insert(
+            "evidence.smart_flow.samples".into(),
+            state.smart_flow.window_samples(now_ns, pw_ns) as f64,
+        );
+        snapshot.insert("evidence.insufficient_history".into(), 0.0);
         for (k, v) in &state.features {
             snapshot.insert(format!("raw.{k}"), *v);
         }
@@ -360,7 +391,26 @@ impl AccumulationDetector {
             symbol: update.symbol,
             ts_ns: now_ns,
             snapshot,
+            quality: crate::data_quality::DataQualityState::Healthy,
         })
+    }
+
+    /// Explicit quality per symbol (spec 054 REL-2): `InsufficientHistory`
+    /// while either percentile window has fewer than 5 in-window samples,
+    /// else `Healthy`. The detector never fires while this is not `Healthy`,
+    /// and this accessor makes the blocked state OBSERVABLE instead of
+    /// silent — a user can now see *why* a symbol is not producing hits.
+    pub fn quality(&self, symbol: SymbolId, now_ns: i64) -> DataQualityState {
+        let Some(state) = self.states.get(&symbol) else {
+            return DataQualityState::InsufficientHistory;
+        };
+        let oi = state.oi_delta.percentile_in_window(now_ns, self.cfg.percentile_window_ns);
+        let sf = state.smart_flow.percentile_in_window(now_ns, self.cfg.percentile_window_ns);
+        if oi.is_some() && sf.is_some() {
+            DataQualityState::Healthy
+        } else {
+            DataQualityState::InsufficientHistory
+        }
     }
 }
 
@@ -665,6 +715,64 @@ mod tests {
             a.contains("accumulation_detector"),
             "stream must produce the hit"
         );
+    }
+
+    #[test]
+    fn rel_2_insufficient_history_blocks_and_is_observable() {
+        // Spec 054 REL-2: with fewer than 5 in-window samples the percentile
+        // is None and the sub-signal BLOCKS (never a neutral 0.5), and the
+        // `quality()` accessor makes the blocked state explicit.
+        let mut det = AccumulationDetector::new(cfg());
+        // 2 samples only — below the 5-sample minimum.
+        for i in 0..2i64 {
+            seed_all(
+                &mut det, BTC, i * 3_600_000_000_000, 100.0, 0.0, 1.0, 50.0, 200.0, 0.15,
+                -500.0, 2.0,
+            );
+        }
+        assert_eq!(
+            det.quality(BTC, 2 * 3_600_000_000_000),
+            DataQualityState::InsufficientHistory
+        );
+        // Even an extreme trigger must NOT fire: insufficient history blocks.
+        let hit = seed_and_check(
+            &mut det, BTC, 2 * 3_600_000_000_000, 1_000_000.0, 0.0, 1.0, 100.0, 400.0, 0.20,
+            -1000.0, 2.0,
+        );
+        assert!(hit.is_none(), "REL-2: insufficient history must block");
+        // Once seeded to 10 samples, quality is Healthy and it fires.
+        for i in 2..10i64 {
+            let ts = i * 3_600_000_000_000;
+            seed_all(
+                &mut det, BTC, ts, 100.0, 0.0, 1.0, 50.0, 200.0, 0.15, -500.0, 2.0,
+            );
+        }
+        assert_eq!(det.quality(BTC, 10 * 3_600_000_000_000), DataQualityState::Healthy);
+    }
+
+    #[test]
+    fn rel_6_hit_snapshot_carries_per_leg_evidence() {
+        let mut det = AccumulationDetector::new(cfg());
+        for i in 0..10i64 {
+            let ts = i * 3_600_000_000_000;
+            seed_all(
+                &mut det, BTC, ts, 100.0, 0.0, 1.0, 50.0, 200.0, 0.15, -500.0, 2.0,
+            );
+        }
+        let ts = 10 * 3_600_000_000_000;
+        let hit = seed_and_check(
+            &mut det, BTC, ts, 500.0, 0.0, 1.0, 100.0, 400.0, 0.20, -1000.0, 2.0,
+        )
+        .expect("fire");
+        assert!(hit.snapshot.contains_key("evidence.oi_delta.percentile"));
+        assert!(hit.snapshot.contains_key("evidence.oi_delta.samples"));
+        assert!(hit.snapshot.contains_key("evidence.smart_flow.percentile"));
+        assert!(hit.snapshot.contains_key("evidence.smart_flow.samples"));
+        assert_eq!(hit.snapshot.get("evidence.insufficient_history"), Some(&0.0));
+        // Sample counts reflect the seeded history (10 hourly) + the trigger
+        // update itself (11 in-window at fire time).
+        assert_eq!(hit.snapshot.get("evidence.oi_delta.samples"), Some(&11.0));
+        assert_eq!(hit.snapshot.get("evidence.smart_flow.samples"), Some(&11.0));
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod layout;
 pub mod manifest;
 pub mod materialize;
 pub mod migrate;
+pub mod observation_store;
 pub mod parquet_macro;
 pub mod parquet_options;
 pub mod parquet_positions;

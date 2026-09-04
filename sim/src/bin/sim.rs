@@ -105,6 +105,7 @@ fn run_backtest(
     carry_entry: Option<f64>,
     carry_exit: Option<f64>,
     bar_tf_ns: i64,
+    obs_params_hash: Option<&str>,
 ) -> Result<Backtester, String> {
     let cfg = SimConfig {
         min_coverage: coverage,
@@ -117,9 +118,53 @@ fn run_backtest(
         cfg,
         seed,
     );
+    // Research-lab observation recording (spec 054 REL-8): enabled BEFORE the
+    // run when --params-hash is given; created_at is the run's first event
+    // time (deterministic per replay — PD-3).
+    if let Some(ph) = obs_params_hash {
+        let created_at = events.first().map(|e| e.recv_ts_ns).unwrap_or(0);
+        bt.enable_observations(ph.to_string(), 1, created_at);
+    }
     bt.run_checked(events, coverage)
         .map_err(|e| format!("run refused: {e}"))?;
     Ok(bt)
+}
+
+/// Default outcome horizons (spec 054 REL-12): 15m, 1h, 4h, 1d.
+fn default_horizons() -> Vec<i64> {
+    vec![
+        900_000_000_000,
+        3_600_000_000_000,
+        14_400_000_000_000,
+        86_400_000_000_000,
+    ]
+}
+
+/// Parse a comma-separated horizon list; each entry is ns or a unit suffix
+/// (`15m`, `1h`, `4h`, `1d`).
+fn parse_horizons(s: &str) -> Result<Vec<i64>, String> {
+    let mut out = Vec::new();
+    for part in s.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (mult, num) = if let Some(n) = part.strip_suffix('m') {
+            (60_000_000_000i64, n)
+        } else if let Some(n) = part.strip_suffix('h') {
+            (3_600_000_000_000, n)
+        } else if let Some(n) = part.strip_suffix('d') {
+            (86_400_000_000_000, n)
+        } else {
+            (1, part)
+        };
+        let v: i64 = num.parse().map_err(|_| format!("bad horizon '{part}'"))?;
+        out.push(v.saturating_mul(mult));
+    }
+    if out.is_empty() {
+        return Err("--horizons: empty list".into());
+    }
+    Ok(out)
 }
 
 /// Write a tracker run record + print the summary line (SIM-10).
@@ -222,7 +267,16 @@ fn run() -> Result<ExitCode, String> {
             let bar_tf_ns: i64 = flag(rest, "--bar-tf-ns")
                 .map_or(Ok(1_000_000), |v| v.parse())
                 .map_err(|_| "bad --bar-tf-ns")?;
-            let bt = run_backtest(
+            // Research-lab observation recording (spec 054): pass --params-hash
+            // to record observations; --horizons (default 15m,1h,4h,1d) and
+            // --obs-dir (Parquet output) configure the post-run evaluation.
+            let obs_params_hash = flag(rest, "--params-hash");
+            let obs_dir = flag(rest, "--obs-dir");
+            let horizons = flag(rest, "--horizons")
+                .map(|s| parse_horizons(&s))
+                .transpose()?
+                .unwrap_or_else(default_horizons);
+            let mut bt = run_backtest(
                 &events,
                 &strategy,
                 seed,
@@ -230,6 +284,7 @@ fn run() -> Result<ExitCode, String> {
                 carry_entry,
                 carry_exit,
                 bar_tf_ns,
+                obs_params_hash.as_deref(),
             )?;
 
             // Tracker record (SIM-10): reproducible from the index alone.
@@ -237,9 +292,55 @@ fn run() -> Result<ExitCode, String> {
             let runs_dir = need(rest, "--runs-dir")?;
             let git_sha = flag(rest, "--git-sha").unwrap_or_else(|| "unknown".into());
             let config_text = format!(
-                "strategy={strategy};seed={seed};cfg=default;coverage={coverage};carry_entry={carry_entry:?};carry_exit={carry_exit:?}"
+                "strategy={strategy};seed={seed};cfg=default;coverage={coverage};carry_entry={carry_entry:?};carry_exit={carry_exit:?};observations={}",
+                obs_params_hash.is_some()
             );
             record_run(&runs_dir, &run_id, &git_sha, &config_text, &bt, &events)?;
+
+            // Research evaluation (spec 054 REL-12..19): attach outcomes,
+            // optionally persist to Parquet, and print per-horizon reports.
+            if obs_params_hash.is_some() {
+                bt.attach_outcomes(&horizons);
+                if let Some(dir) = &obs_dir {
+                    let paths = mp_storage::observation_store::partitioned_write(
+                        std::path::Path::new(dir),
+                        bt.observations(),
+                    )
+                    .map_err(|e| format!("observation write: {e}"))?;
+                    println!(
+                        "observations: {} recorded, {} blocked (quality gate), {} parquet file(s) in {dir}",
+                        bt.observations().len(),
+                        bt.blocked_observations(),
+                        paths.len()
+                    );
+                } else {
+                    println!(
+                        "observations: {} recorded, {} blocked (quality gate)",
+                        bt.observations().len(),
+                        bt.blocked_observations()
+                    );
+                }
+                for &h in &horizons {
+                    let rep = mp_features::evaluate(bt.observations(), h, mp_features::DEFAULT_MIN_N);
+                    let dec = mp_features::decide(&rep);
+                    println!(
+                        "horizon {:>6}s: n={} gross_exp={:+.6} net_exp={:+.6} win={:.3} p25={:.4} p50={:.4} p75={:.4} | {}",
+                        h / 1_000_000_000,
+                        rep.n,
+                        rep.gross_expectancy,
+                        rep.net_expectancy,
+                        rep.win_rate,
+                        rep.p25,
+                        rep.p50,
+                        rep.p75,
+                        if rep.gate_passed {
+                            format!("GATE PASS — {}", dec.reasons.join("; "))
+                        } else {
+                            format!("GATE REFUSED — {}", dec.reasons.join("; "))
+                        }
+                    );
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
         "paper" => {
@@ -436,7 +537,7 @@ fn run() -> Result<ExitCode, String> {
                     let (best_params, best_exp) =
                         mp_sim::pick_best_eligible(&combos, min_trades, |combo| {
                             let strat = default_strat.with_params(combo);
-                            let mut bt = Backtester::new(engine(), strat, base_cfg, seed);
+                            let mut bt = Backtester::new(engine(), strat, base_cfg.clone(), seed);
                             if bt.run_checked(train, 1.0).is_err() {
                                 return None;
                             }
@@ -449,7 +550,7 @@ fn run() -> Result<ExitCode, String> {
                     // eligible on train — no selection, OOS meaningless).
                     let (oos, vacuous, error) = if let Some(ref bp) = best_params {
                         let strat = default_strat.with_params(bp);
-                        let mut bt = Backtester::new(engine(), strat, base_cfg, seed);
+                        let mut bt = Backtester::new(engine(), strat, base_cfg.clone(), seed);
                         match bt.run_checked(test, 1.0) {
                             Ok(()) => (bt.summary(), false, false),
                             Err(e) => {
@@ -558,6 +659,7 @@ fn run() -> Result<ExitCode, String> {
                 carry_entry,
                 carry_exit,
                 bar_tf_ns,
+                None,
             )?;
             let mc = monte_carlo(bt.trade_pnls(), resamples, seed, block_ns);
             println!(
@@ -571,8 +673,8 @@ fn run() -> Result<ExitCode, String> {
             let replay = read_log(&need(rest, "--log-b")?)?;
             let strategy = need(rest, "--strategy")?;
             let seed: u64 = need(rest, "--seed")?.parse().map_err(|_| "bad --seed")?;
-            let a = run_backtest(&live, &strategy, seed, 1.0, None, None, 1_000_000)?;
-            let b = run_backtest(&replay, &strategy, seed, 1.0, None, None, 1_000_000)?;
+            let a = run_backtest(&live, &strategy, seed, 1.0, None, None, 1_000_000, None)?;
+            let b = run_backtest(&replay, &strategy, seed, 1.0, None, None, 1_000_000, None)?;
             match a.decision_log().first_divergence(b.decision_log()) {
                 None => {
                     println!(

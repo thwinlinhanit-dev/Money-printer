@@ -32,6 +32,21 @@ cooldown_ns = 14400000000000
 7. Per-symbol state maintained via ValueBuffer (ACC-7).
 8. Config uses deny_unknown_fields (ACC-8).
 
+**Amendment 2026-09-04 (spec 054, REL-2/REL-6/REL-22)**
+- Insufficient history now BLOCKS: a percentile window with fewer than 5
+  in-window samples returns `None` and the sub-signal does not fire — the
+  legacy `unwrap_or(0.5)` neutral fallback is removed (missing data is never
+  scored as median).
+- Evidence representation: hits now carry per-leg support in the snapshot
+  (`evidence.oi_delta.percentile`, `evidence.oi_delta.samples`,
+  `evidence.smart_flow.percentile`, `evidence.smart_flow.samples`,
+  `evidence.insufficient_history`) plus the existing `sub_signal.*` and
+  `raw.*` fields.
+- `AccumulationDetector::quality(symbol, now_ns)` exposes the blocked state
+  explicitly (`InsufficientHistory` until both percentile windows have ≥ 5
+  samples) so a silent non-firing symbol is diagnosable.
+- Strict AND logic (ACC-6) and the cooldown (ACC-4) are unchanged.
+
 **Zero-Cost Mode Behavior**
 
 Under Zero-Cost Mode (`docs/ZERO_COST_MODE.md`), the accumulation detector

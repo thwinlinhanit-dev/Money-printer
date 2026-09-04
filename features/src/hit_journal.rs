@@ -254,6 +254,7 @@ mod tests {
             symbol: SymbolId(1),
             ts_ns: 1784456653319497000,
             snapshot: [("funding_rate".into(), 0.00015)].into(),
+            quality: crate::DataQualityState::Healthy,
         };
         j.record(hit).unwrap();
         let date = HitJournal::date_str_for_ns(FIXED_NS);
@@ -275,6 +276,7 @@ mod tests {
                 symbol: SymbolId(1),
                 ts_ns: 1784456653319497000 + i * 1_000_000_000,
                 snapshot: Default::default(),
+                quality: crate::DataQualityState::Healthy,
             })
             .unwrap();
         }
@@ -296,6 +298,7 @@ mod tests {
             symbol: SymbolId(1),
             ts_ns: 1784456653319497000,
             snapshot: Default::default(),
+            quality: crate::DataQualityState::Healthy,
         })
         .unwrap();
         drop(j);

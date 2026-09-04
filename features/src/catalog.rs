@@ -914,6 +914,13 @@ impl BarFeature for VolumeBubble {
 
 /// `footprint.market.profile.poc.{tf}` — Point of Control: price level with
 /// highest volume over a rolling window. Emits on bar close.
+///
+/// APPROXIMATION (spec 054 REL-20): this is a BAR-BASED market profile, not a
+/// trade-by-trade (footprint) profile. Each bar's whole volume is placed in
+/// ONE bucket at the bar's midpoint `(high+low)/2`, so intra-bar volume
+/// distribution is invisible and wide bars distort the profile. It is an
+/// approximation of the true POC and must be treated as such in research
+/// (never as an L2-equivalent footprint).
 pub struct MarketProfilePoc {
     tf: String,
     window: usize,
@@ -974,6 +981,10 @@ impl BarFeature for MarketProfilePoc {
 
 /// `footprint.market.profile.vah.{tf}` — Value Area High: upper boundary of
 /// 70% volume concentration. Emits on bar close.
+///
+/// APPROXIMATION (spec 054 REL-20): same bar-based limitation as POC — each
+/// bar's volume lands in a single bucket at its midpoint, so this is an
+/// approximation of the true value-area high.
 pub struct MarketProfileVah {
     tf: String,
     window: usize,
@@ -1022,7 +1033,17 @@ impl BarFeature for MarketProfileVah {
         // Find POC and expand to 70% volume
         let total_vol: f64 = profile.iter().map(|(_, v)| v).sum();
         let target_vol = total_vol * 0.7;
-        let poc_idx = profile.iter().enumerate().max_by(|a, b| a.1.1.partial_cmp(&b.1.1).unwrap_or(std::cmp::Ordering::Equal)).map(|(i, _)| i).unwrap_or(0);
+        // DETERMINISTIC POC (REL-21): `total_cmp` gives a total order even in
+        // the presence of non-finite values (never a silent `Equal`), and on
+        // an equal-volume tie `max_by` keeps the FIRST maximum — the lowest
+        // price bucket, since `profile` is sorted ascending. Stable across
+        // runs for identical input.
+        let poc_idx = profile
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.1.total_cmp(&b.1.1))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
         let mut vol_sum = profile[poc_idx].1;
         let mut high_idx = poc_idx;
         let mut low_idx = poc_idx;
@@ -1045,6 +1066,10 @@ impl BarFeature for MarketProfileVah {
 
 /// `footprint.market.profile.val.{tf}` — Value Area Low: lower boundary of
 /// 70% volume concentration. Emits on bar close.
+///
+/// APPROXIMATION (spec 054 REL-20): same bar-based limitation as POC — each
+/// bar's volume lands in a single bucket at its midpoint, so this is an
+/// approximation of the true value-area low.
 pub struct MarketProfileVal {
     tf: String,
     window: usize,
@@ -1093,7 +1118,14 @@ impl BarFeature for MarketProfileVal {
         // Find POC and expand to 70% volume
         let total_vol: f64 = profile.iter().map(|(_, v)| v).sum();
         let target_vol = total_vol * 0.7;
-        let poc_idx = profile.iter().enumerate().max_by(|a, b| a.1.1.partial_cmp(&b.1.1).unwrap_or(std::cmp::Ordering::Equal)).map(|(i, _)| i).unwrap_or(0);
+        // DETERMINISTIC POC (REL-21): see VAH — `total_cmp` + sorted Vec ⇒
+        // ties resolve to the lowest bucket, stable across runs.
+        let poc_idx = profile
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.1.total_cmp(&b.1.1))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
         let mut vol_sum = profile[poc_idx].1;
         let mut high_idx = poc_idx;
         let mut low_idx = poc_idx;
