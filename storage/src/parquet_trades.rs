@@ -281,7 +281,7 @@ mod tests {
         // Row-count sanity on read-back (the C-2 check that caught the hollows).
         let file = File::open(&path).expect("open");
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("read");
-        let mut reader = builder.build().expect("build");
+        let reader = builder.build().expect("build");
         let n: usize = reader.map(|b| b.expect("batch").num_rows()).sum();
         assert_eq!(n, 2);
         assert_eq!(read_source_hash(&path).expect("hash").as_deref(), Some("crc-123"));

@@ -11,6 +11,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Rulebook guardrails (PD-1..4, W-7, CONV-21)
         run: bash ops/ci/guardrails.sh
+      # The Windows-native port (B-3, audit 2026-09-03): the bash gate cannot
+      # run on the Windows host that launches the collectors, and the ps1
+      # crashed at ALP-2 since 4588f0c without CI noticing — CI ran only the
+      # sh. pwsh is preinstalled on ubuntu-latest runners; the ps1 is 5.1-
+      # compatible and runs under pwsh unchanged.
+      - name: Rulebook guardrails (Windows port)
+        shell: pwsh
+        run: ./ops/ci/guardrails.ps1
       - name: Requirement-coverage matrix (artifact; informational)
         run: bash ops/ci/coverage_report.sh
 

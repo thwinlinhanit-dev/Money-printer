@@ -157,15 +157,23 @@ if [ -f Cargo.toml ]; then
 fi
 
 # ---- ALP-2: new strategy crate must have registry row + hypothesis.md ------
-# Every strategies/{id}/ src/*.rs must have strategies/{id}/hypothesis.md
-# (spec 053 ALP-2).
+# Every strategies/src/*.rs strategy module must have a matching
+# strategies/{id}/hypothesis.md and a row in research/registry.jsonl
+# (spec 053 ALP-2). Strategy ids are hyphenated; module filenames use
+# underscores (carry_v1.rs -> carry-v1), so the id is normalized before
+# the dir lookup (B-3, audit 2026-09-03 — the pre-fix glob
+# strategies/*/src/*.rs matched nothing, so the check was vacuous).
 if [ -d strategies ]; then
-  for f in strategies/*/src/*.rs; do
+  for f in strategies/src/*.rs; do
     [ -e "$f" ] || continue
-    id=$(basename "$(dirname "$(dirname "$f")")")
-    # Skip lib.rs (the trait module) and mod.rs
-    case "$(basename "$f")" in lib.rs|mod.rs) continue ;; esac
-    [ -f "strategies/$id/hypothesis.md" ] || err "ALP-2: strategy crate $id has no hypothesis.md"
+    id=$(basename "$f" .rs)
+    # Skip support modules (the trait module, funnel, fixtures).
+    case "$id" in lib|mod|strategy|funnel|examples) continue ;; esac
+    hyp_id=$(printf '%s' "$id" | tr '_' '-')
+    [ -f "strategies/$hyp_id/hypothesis.md" ] \
+      || err "ALP-2: strategy module $id has no strategies/$hyp_id/hypothesis.md"
+    grep -q "\"id\": \"$hyp_id\"" research/registry.jsonl 2>/dev/null \
+      || err "ALP-2: strategy $hyp_id has no row in research/registry.jsonl"
   done
 fi
 

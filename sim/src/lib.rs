@@ -23,6 +23,7 @@ pub mod gates;
 pub mod harness;
 pub mod metrics;
 pub mod paper;
+pub mod strategy_resolve;
 pub mod tracker;
 
 pub use account::Accountant;
@@ -41,4 +42,5 @@ pub use harness::{
 };
 pub use metrics::{bars_per_year, Metrics};
 pub use paper::PaperSession;
+pub use strategy_resolve::{strategy_named, universe_from_events};
 pub use tracker::{content_hash, RunRecord};

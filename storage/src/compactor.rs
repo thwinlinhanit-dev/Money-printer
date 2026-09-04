@@ -9,9 +9,21 @@ use crate::manifest::{self, QualityManifest};
 use crate::{
     layout, parquet_macro, parquet_options, parquet_positions, parquet_trades, StorageError,
 };
-use mp_core::{EventEnvelope, MarketEvent, SymbolTable, Venue};
+use mp_core::{EventEnvelope, SymbolTable, Venue};
 use std::collections::BTreeMap;
 use std::path::Path;
+
+/// Options controlling a compaction run.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompactOptions {
+    /// Rewrite Parquet files even when the existing footer's
+    /// `source_log_hash` already matches the current raw log. The default
+    /// (false) keeps the STO-8 idempotency skip; `force: true` is the repair
+    /// path (B-5, audit 2026-09-03) — rebuilds hollow/stale files written by
+    /// a buggy writer without deleting them first, and is safe because the
+    /// writer is a pure function of (events, version, hash).
+    pub force: bool,
+}
 
 /// Outcome of a compaction run. `trades_*` are legacy field names (spec 003
 /// v1); specs 028/030/031 streams carry their own per-stream counters.
@@ -51,16 +63,7 @@ pub fn compact_day_verified(
     created_ts_ns: i64,
     audit: &RawLogAudit,
 ) -> Result<CompactStats, StorageError> {
-    if !audit.is_clean() {
-        let codes: Vec<&str> = audit.findings.iter().map(|f| f.code.as_str()).collect();
-        return Err(StorageError::Refused(format!(
-            "audit not clean for {}/{}: {}",
-            layout::venue_slug(venue),
-            date,
-            codes.join(", ")
-        )));
-    }
-    compact_day(
+    compact_day_verified_opts(
         root,
         venue,
         date,
@@ -71,6 +74,50 @@ pub fn compact_day_verified(
         source_hash,
         compactor_version,
         created_ts_ns,
+        audit,
+        CompactOptions::default(),
+    )
+}
+
+/// [`compact_day_verified`] with explicit [`CompactOptions`] (B-5 repair
+/// path: `force` rebuilds a day whose Parquet already carries the matching
+/// source hash — e.g. hollow files written by the schema-4 bug).
+#[allow(clippy::too_many_arguments)]
+pub fn compact_day_verified_opts(
+    root: &Path,
+    venue: Venue,
+    date: &str,
+    day_start_ns: i64,
+    day_end_ns: i64,
+    events: Vec<EventEnvelope>,
+    symbols: &SymbolTable,
+    source_hash: &str,
+    compactor_version: &str,
+    created_ts_ns: i64,
+    audit: &RawLogAudit,
+    opts: CompactOptions,
+) -> Result<CompactStats, StorageError> {
+    if !audit.is_clean() {
+        let codes: Vec<&str> = audit.findings.iter().map(|f| f.code.as_str()).collect();
+        return Err(StorageError::Refused(format!(
+            "audit not clean for {}/{}: {}",
+            layout::venue_slug(venue),
+            date,
+            codes.join(", ")
+        )));
+    }
+    compact_day_opts(
+        root,
+        venue,
+        date,
+        day_start_ns,
+        day_end_ns,
+        events,
+        symbols,
+        source_hash,
+        compactor_version,
+        created_ts_ns,
+        opts,
     )
 }
 
@@ -92,14 +139,49 @@ pub fn compact_day(
     compactor_version: &str,
     created_ts_ns: i64,
 ) -> Result<CompactStats, StorageError> {
+    compact_day_opts(
+        root,
+        venue,
+        date,
+        day_start_ns,
+        day_end_ns,
+        events,
+        symbols,
+        source_hash,
+        compactor_version,
+        created_ts_ns,
+        CompactOptions::default(),
+    )
+}
+
+/// [`compact_day`] with explicit [`CompactOptions`] (B-5 repair path: see
+/// [`CompactOptions::force`]).
+#[allow(clippy::too_many_arguments)]
+pub fn compact_day_opts(
+    root: &Path,
+    venue: Venue,
+    date: &str,
+    day_start_ns: i64,
+    day_end_ns: i64,
+    events: Vec<EventEnvelope>,
+    symbols: &SymbolTable,
+    source_hash: &str,
+    compactor_version: &str,
+    created_ts_ns: i64,
+    opts: CompactOptions,
+) -> Result<CompactStats, StorageError> {
     let mut stats = CompactStats::default();
 
     // LAB-5: count trade events before compaction so we can verify zero-row
     // writes against a non-zero input. A live HL day with `n_trades > 0` and
-    // parquet_rows == 0 is a bug, not success.
+    // parquet_rows == 0 is a bug, not success. Schema-agnostic: schema-4
+    // hyperliquid trades decode as `TradeWithAddr`, so the canary must count
+    // `trade_view()` events, not only the schema-3 variant (B-4, audit
+    // 2026-09-03 — the Trade-only count is exactly why the hollow days
+    // shipped without tripping LAB-5).
     let n_trade_events = events
         .iter()
-        .filter(|e| matches!(e.body, MarketEvent::Trade { .. }))
+        .filter(|e| e.body.trade_view().is_some())
         .count();
 
     // Group Parquet-backed streams by (stream, symbol). BTreeMap ⇒
@@ -123,9 +205,11 @@ pub fn compact_day(
         let path = layout::partition_file(root, stream, venue, &name, date);
 
         // Idempotency: skip if the existing file was built from the same source.
+        // `force` (B-5 repair) overrides the skip so hollow/stale files are
+        // rebuilt from the current raw bytes.
         if path.exists() {
             if let Ok(Some(existing)) = parquet_trades::read_source_hash(&path) {
-                if existing == source_hash {
+                if existing == source_hash && !opts.force {
                     match stream {
                         "trades" => stats.trades_files_skipped += 1,
                         "positions" => stats.positions_files_skipped += 1,
@@ -187,7 +271,7 @@ pub fn compact_day(
     }
 
     // Manifest for ALL streams (STO-2).
-    let m = manifest::derive_manifest(
+    let mut m = manifest::derive_manifest(
         layout::venue_slug(venue),
         date,
         day_start_ns,
@@ -203,6 +287,22 @@ pub fn compact_day(
         created_ts_ns,
     );
     let mpath = layout::manifest_file(root, venue, date);
+    // Merge, don't overwrite: `layout::manifest_file` is per venue/date with
+    // NO symbol component, but compaction runs per symbol (one raw log per
+    // symbol). An unconditional overwrite would drop every stream of the
+    // earlier-compacted symbol from the day's manifest — silently starving
+    // STO-2 coverage/gap reads of that symbol and, worse, letting the A-1
+    // prune gate verify one symbol's raw log against another symbol's proof
+    // (B-2, audit 2026-09-03). This run's streams win on key collision (the
+    // freshest stats for the same source bytes); streams we did not see this
+    // run are preserved.
+    if let Ok(existing) = manifest::read_manifest(&mpath) {
+        if existing.venue == m.venue && existing.date == m.date {
+            for (key, stats) in existing.streams {
+                m.streams.entry(key).or_insert(stats);
+            }
+        }
+    }
     manifest::write_manifest(&mpath, &m)?;
 
     Ok(stats)

@@ -42,6 +42,13 @@ pub enum PruneRefusal {
         stream: String,
         symbol: String,
     },
+    /// The day's manifest carries NO stream for the symbol being pruned (B-2,
+    /// audit 2026-09-03). Compaction is per-symbol but the manifest is per
+    /// venue/day, and a clobbered/legacy manifest can list only the
+    /// last-compacted symbol. Deleting this symbol's raw log on ANOTHER
+    /// symbol's proof would be exactly the C-2 failure A-1 exists to close —
+    /// refuse until the symbol's own streams are in the manifest.
+    SymbolNotInManifest { symbol: String },
 }
 
 /// Verify that a venue/day is safely prunable: the manifest exists and, for
@@ -55,10 +62,52 @@ pub enum PruneRefusal {
 /// always apply. Returns `Ok(())` if safe to delete the source logs, or the
 /// first refusal reason.
 pub fn verify_prunable(root: &Path, venue: Venue, date: &str) -> Result<(), PruneRefusal> {
+    verify_prunable_impl(root, venue, date, None)
+}
+
+/// [`verify_prunable`] scoped to one symbol: additionally requires the day
+/// manifest to carry at least one stream for `symbol` before ANY proof is
+/// accepted (B-2). `verify_prunable` alone iterates only the streams the
+/// manifest lists, so on a clobbered/legacy manifest that lost the symbol's
+/// entry (per-symbol compaction overwrites the shared venue/day manifest) it
+/// would verify another symbol's Parquet+raw and green-light deleting THIS
+/// symbol's raw log unexamined. mp-ops prune calls this; `symbol` is the raw
+/// log being deleted.
+pub fn verify_prunable_symbol(
+    root: &Path,
+    venue: Venue,
+    date: &str,
+    symbol: &str,
+) -> Result<(), PruneRefusal> {
+    verify_prunable_impl(root, venue, date, Some(symbol))
+}
+
+fn verify_prunable_impl(
+    root: &Path,
+    venue: Venue,
+    date: &str,
+    require_symbol: Option<&str>,
+) -> Result<(), PruneRefusal> {
     let manifest = match compactor::load_manifest(root, venue, date) {
         Ok(m) => m,
         Err(_) => return Err(PruneRefusal::ManifestMissing),
     };
+
+    // B-2 per-symbol guard: the deleted raw log's own symbol must be present
+    // in the day manifest. Without this, a manifest that lists only the
+    // last-compacted symbol would let this symbol's raw log be deleted on
+    // another symbol's proof (the exact C-2 failure A-1 was built to close).
+    if let Some(symbol) = require_symbol {
+        let owned = manifest
+            .streams
+            .keys()
+            .any(|key| key.rsplit_once(':').is_some_and(|(_, s)| s == symbol));
+        if !owned {
+            return Err(PruneRefusal::SymbolNotInManifest {
+                symbol: symbol.to_owned(),
+            });
+        }
+    }
 
     for (key, stats) in &manifest.streams {
         let Some((stream, symbol)) = key.split_once(':') else {

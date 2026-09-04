@@ -1,9 +1,13 @@
 //! `mp-ops` — operational CLI for the Money Printer system (SPEC-011).
 //!
 //! Subcommands:
-//!   compact --date YYYY-MM-DD --venue bybit --symbol BTCUSDT
+//!   compact --date YYYY-MM-DD --venue bybit --symbol BTCUSDT [--force]
 //!           Compacts a raw event log into partitioned Parquet files.
-//!           Date also accepts YYYYMMDD (backward compatible).
+//!           Date also accepts YYYYMMDD (backward compatible). --force
+//!           overrides the idempotency skip and rewrites the day's Parquet
+//!           even when the existing footer's source hash already matches
+//!           (B-5 repair path — rebuilds hollow files written by a buggy
+//!           writer without deleting them first).
 //!   prune --date YYYY-MM-DD --venue bybit --symbol BTCUSDT [--dry-run]
 //!           Hash-verified hot-tier retention: refuses to delete a raw log
 //!           unless compaction proof exists (W-6/C-2), then removes it and
@@ -356,7 +360,11 @@ fn prune_day(
     // refuse every properly compacted day (observed live 2026-09-03 on the
     // 08-13/08-22/08-24 hyperliquid days).
     let cold_root = root.join("cold");
-    match prune::verify_prunable(&cold_root, venue, &date_dashed) {
+    // B-2 (audit 2026-09-03): verify scoped to THIS symbol — refuse unless the
+    // day manifest actually carries the symbol's own streams, so a clobbered/
+    // legacy manifest (only the last-compacted symbol present) can never
+    // green-light deleting this symbol's raw log on another symbol's proof.
+    match prune::verify_prunable_symbol(&cold_root, venue, &date_dashed, symbol) {
         Ok(()) => {}
         Err(why) => {
             return Err(format!(
@@ -445,10 +453,19 @@ fn prunable_refusal(r: &PruneRefusal) -> String {
         PruneRefusal::FooterMissingSourceLogHash { stream, symbol } => format!(
             "`{stream}/{symbol}` Parquet footer has no source_log_hash (unknown provenance)"
         ),
+        PruneRefusal::SymbolNotInManifest { symbol } => format!(
+            "manifest has no stream for `{symbol}` (clobbered/legacy manifest — re-compact the symbol or repair the manifest before pruning)"
+        ),
     }
 }
 
 fn cmd_compact(args: &[String]) -> Result<String, String> {
+    // B-5 repair path: `--force` overrides the idempotency skip so a day
+    // whose Parquet already carries the matching source hash is rebuilt
+    // from the current raw bytes (e.g. the schema-4 hollow shells). Safe:
+    // the writer is a pure function of (events, version, hash) and the
+    // raw log is never touched.
+    let force = args.iter().any(|a| a == "--force");
     let date_raw = need(args, "--date")?;
     // Normalize: strip dashes for raw log filename, build dashed for partition paths.
     let date_flat = date_raw.replace('-', "");
@@ -494,7 +511,8 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
 
     // Compact through the verified INT-4 gate (spec 024 08-03 decision): the
     // same `compact_day_verified` that refuses quarantined logs drives ingress.
-    let stats = compactor::compact_day_verified(
+    let opts = mp_storage::CompactOptions { force };
+    let stats = compactor::compact_day_verified_opts(
         &cold_root,
         venue,
         &date_dashed,
@@ -506,6 +524,7 @@ fn cmd_compact(args: &[String]) -> Result<String, String> {
         COMPACTOR_VERSION,
         created_ts_ns,
         &audit,
+        opts,
     )
     .map_err(|e| format!("compact_day_verified failed: {e}"))?;
 

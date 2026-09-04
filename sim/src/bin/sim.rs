@@ -31,12 +31,8 @@ use mp_features::catalog::{
 use mp_features::FeatureEngine;
 use mp_features::LiqDelta;
 use mp_sim::{
-    bars_per_year as mp_bars_per_year, monte_carlo, plateau_ok, Backtester, MetricsSummary,
-    PaperSession, RunRecord, SimConfig, WalkForwardParams, WindowResult,
-};
-use mp_strategies::{
-    CarryConfig, CarryV1, CoinFlipStrategy, LiqFadeConfig, LiqFadeV1, NullStrategy,
-    OrderflowConfig, OrderflowV1, Strategy, Universe,
+    bars_per_year as mp_bars_per_year, monte_carlo, plateau_ok, strategy_named, Backtester,
+    MetricsSummary, PaperSession, RunRecord, SimConfig, WalkForwardParams, WindowResult,
 };
 use std::io::Write;
 use std::process::ExitCode;
@@ -59,88 +55,6 @@ fn read_log(path: &str) -> Result<Vec<EventEnvelope>, String> {
         out.push(ev.map_err(|e| format!("read log {path}: {e}"))?);
     }
     Ok(out)
-}
-
-fn universe_from_events(events: &[EventEnvelope]) -> Universe {
-    let mut venues = Vec::new();
-    let mut symbols = Vec::new();
-    for ev in events {
-        if !venues.contains(&ev.venue) {
-            venues.push(ev.venue);
-        }
-        if !symbols.contains(&ev.symbol) {
-            symbols.push(ev.symbol);
-        }
-        if venues.len() > 3 && symbols.len() > 5 {
-            break;
-        }
-    }
-    Universe { venues, symbols }
-}
-
-fn strategy_named(
-    name: &str,
-    events: &[EventEnvelope],
-    entry_threshold: Option<f64>,
-    exit_threshold: Option<f64>,
-) -> Result<Box<dyn Strategy>, String> {
-    match name {
-        "coinflip" => Ok(Box::new(CoinFlipStrategy::new())),
-        "null" => Ok(Box::new(NullStrategy)),
-        "carry-v1" => {
-            let uni = universe_from_events(events);
-            let mut cfg = CarryConfig::default();
-            if let Some(et) = entry_threshold {
-                cfg.entry_threshold = et;
-            }
-            if let Some(xt) = exit_threshold {
-                cfg.exit_threshold = xt;
-            } else if let Some(et) = entry_threshold {
-                cfg.exit_threshold = et * 0.2;
-            }
-            Ok(Box::new(CarryV1::new(
-                mp_core::StrategyId::new("carry-v1"),
-                uni,
-                cfg,
-            )))
-        }
-        "orderflow-v1" => {
-            let uni = universe_from_events(events);
-            let mut cfg = OrderflowConfig::default();
-            if let Some(et) = entry_threshold {
-                cfg.entry_gauge = et;
-            }
-            if let Some(xt) = exit_threshold {
-                cfg.exit_gauge = xt;
-            }
-            Ok(Box::new(OrderflowV1::new(
-                mp_core::StrategyId::new("orderflow-v1"),
-                uni,
-                cfg,
-            )))
-        }
-        // liq-fade-v1: fade a liquidation cascade after exhaustion (liq.*
-        // features). entry/exit thresholds map to entry_dist_bps (stretch
-        // floor) and exit_dist_bps (reversion target).
-        "liq-fade-v1" => {
-            let uni = universe_from_events(events);
-            let mut cfg = LiqFadeConfig::default();
-            if let Some(et) = entry_threshold {
-                cfg.entry_dist_bps = et;
-            }
-            if let Some(xt) = exit_threshold {
-                cfg.exit_dist_bps = xt;
-            }
-            Ok(Box::new(LiqFadeV1::new(
-                mp_core::StrategyId::new("liq-fade-v1"),
-                uni,
-                cfg,
-            )))
-        }
-        other => Err(format!(
-            "unknown strategy: {other} (coinflip|null|carry-v1|orderflow-v1|liq-fade-v1)"
-        )),
-    }
 }
 
 /// The sim-side strategy-visible feature set (spec 004/006): every feature a

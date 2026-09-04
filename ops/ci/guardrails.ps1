@@ -263,24 +263,41 @@ if (Test-Path $rootManifest) {
 }
 
 # ---- ALP-2: new strategy crate must have registry row + hypothesis.md ------
-# Every strategies/src/*.rs file must have a matching strategies/{id}/hypothesis.md
-# and a row in research/registry.jsonl (spec 053 ALP-2).
+# Every strategies/src/*.rs strategy module must have a matching
+# strategies/{id}/hypothesis.md and a row in research/registry.jsonl
+# (spec 053 ALP-2). Strategy ids are hyphenated; module filenames use
+# underscores (carry_v1.rs -> carry-v1), so the id is normalized before
+# the dir lookup (B-3, audit 2026-09-03 — the pre-fix mapping looked up
+# the underscore name and crashed on Join-Path arity under
+# $ErrorActionPreference=Stop).
 $strategiesDir = Join-Path $root 'strategies'
-$registryPath = Join-Path $root 'research' 'registry.jsonl'
+$registryPath = Join-Path $root 'research\registry.jsonl'
+# Support modules that live beside strategies but are not strategy crates
+# (the trait module, the promotion funnel, and the STR-9 fixtures).
+$skipModules = @('lib', 'mod', 'strategy', 'funnel', 'examples')
+$registryIds = @()
+if (Test-Path -LiteralPath $registryPath) {
+    $registryIds = @(Get-Content -LiteralPath $registryPath | ForEach-Object {
+        try { ($_ | ConvertFrom-Json).id } catch { $null }
+    })
+}
 if (Test-Path $strategiesDir) {
     foreach ($f in @(Get-ChildItem -Path (Join-Path $strategiesDir 'src') -Filter '*.rs' -File -ErrorAction SilentlyContinue)) {
         $id = $f.BaseName
-        # Skip lib.rs (the trait module) and mod.rs
-        if ($id -in @('lib', 'mod')) { continue }
-        $hypPath = Join-Path $strategiesDir $id 'hypothesis.md'
+        if ($skipModules -contains $id) { continue }
+        $hypId = $id -replace '_', '-'
+        $hypPath = Join-Path (Join-Path $strategiesDir $hypId) 'hypothesis.md'
         if (-not (Test-Path $hypPath)) {
-            Err "ALP-2: strategy crate $id has no hypothesis.md"
+            Err "ALP-2: strategy module $id has no strategies/$hypId/hypothesis.md"
+        }
+        if ($registryIds -notcontains $hypId) {
+            Err "ALP-2: strategy $hypId has no row in research/registry.jsonl"
         }
     }
 }
 
 # ---- Skill frontmatter sanity --------------------------------------------------
-foreach ($f in @(Get-ChildItem (Join-Path $root '.claude\skills') -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue)) {
+foreach ($f in @(Get-ChildItem (Join-Path $root '.claude/skills') -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue)) {
     $head = Get-Content -LiteralPath $f.FullName -TotalCount 1
     if ($head -ne '---') { Err "skill $($f.FullName) missing YAML frontmatter" }
     $c = Get-Content -LiteralPath $f.FullName -Raw

@@ -65,6 +65,57 @@ fn table() -> (SymbolTable, SymbolId) {
     (t, id)
 }
 
+/// Two-symbol table for the per-symbol-compaction manifest merge test (B-2).
+fn table_two() -> (SymbolTable, SymbolId, SymbolId) {
+    let mut t = SymbolTable::new();
+    let btc = t.intern(Venue::Bybit, "BTCUSDT", |id| {
+        mp_core::SymbolMeta::new(
+            id,
+            Venue::Bybit,
+            "BTCUSDT",
+            "BTC",
+            "USDT",
+            InstrumentKind::Perp,
+            0.1,
+            0.001,
+            5.0,
+        )
+    });
+    let eth = t.intern(Venue::Bybit, "ETHUSDT", |id| {
+        mp_core::SymbolMeta::new(
+            id,
+            Venue::Bybit,
+            "ETHUSDT",
+            "ETH",
+            "USDT",
+            InstrumentKind::Perp,
+            0.01,
+            0.001,
+            5.0,
+        )
+    });
+    (t, btc, eth)
+}
+
+/// A schema-4 trade event (the variant hyperliquid decodes to — the one the
+/// pre-5f8fd7d writer dropped, and the one LAB-5's Trade-only canary missed).
+fn trade_with_addr(sym: SymbolId, recv: i64, seq: u64, price: f64) -> EventEnvelope {
+    EventEnvelope::new(
+        Venue::Bybit,
+        sym,
+        recv,
+        recv,
+        seq,
+        MarketEvent::TradeWithAddr {
+            price,
+            qty: 1.0,
+            side: Side::Buy,
+            trade_id: seq,
+            taker_addr: "0xabc".to_string(),
+        },
+    )
+}
+
 #[test]
 fn sto_1_and_4_trades_roundtrip_and_idempotent() {
     let root = tmp("sto14");
@@ -732,6 +783,208 @@ fn lab_5_compact_refuses_zero_row_when_trades_exist() {
     )
     .unwrap();
     assert!(stats.trade_rows >= 1, "LAB-5: must not be 0 rows");
+}
+
+// ---- B-4/B-1 compact-level regression: a TradeWithAddr-only day must write
+// rows (the schema-4 hollow-shell bug), and the LAB-5 canary must see it.
+
+#[test]
+fn lab_5_compact_trade_with_addr_day_writes_rows() {
+    let root = tmp("lab5-twa");
+    let (syms, btc) = table();
+    let events = vec![
+        trade_with_addr(btc, 10, 1, 100.0),
+        trade_with_addr(btc, 20, 2, 101.0),
+        trade_with_addr(btc, 30, 3, 99.5),
+    ];
+
+    // The whole compact path (not just write_trades) must produce rows for
+    // schema-4 events — this exact input was a 0-row hollow file before
+    // 5f8fd7d, and the Trade-only LAB-5 canary let it through (B-4).
+    let stats = compact_day(
+        &root,
+        Venue::Bybit,
+        "2026-08-18",
+        0,
+        DAY,
+        events.clone(),
+        &syms,
+        "hashTWA",
+        "g",
+        0,
+    )
+    .unwrap();
+    assert_eq!(stats.trades_files_written, 1);
+    assert_eq!(stats.trade_rows, 3, "TradeWithAddr rows must be written");
+
+    // Read-back sanity: 3 rows on disk, and the manifest agrees.
+    let ds = Dataset::open(&root);
+    assert_eq!(ds.trades_day(Venue::Bybit, "BTCUSDT", "2026-08-18").unwrap().len(), 3);
+    let m = mp_storage::compactor::load_manifest(&root, Venue::Bybit, "2026-08-18").unwrap();
+    assert_eq!(m.streams["trades:BTCUSDT"].events, 3);
+}
+
+// ---- B-2 regression: per-symbol compaction must MERGE the shared venue/date
+// manifest, not overwrite it (the last symbol used to win, dropping the other
+// symbol's streams — which also broke prune's per-symbol proof).
+
+#[test]
+fn sto_manifest_merges_symbols_from_multiple_compactions() {
+    let root = tmp("sto-merge");
+    let (syms, btc, eth) = table_two();
+    let day = "2026-07-11";
+
+    // Pipeline shape: one compact run per symbol, same venue/day.
+    let btc_events = vec![trade(btc, 10, 1, 100.0), trade(btc, 20, 2, 101.0)];
+    compact_day(
+        &root,
+        Venue::Bybit,
+        day,
+        0,
+        DAY,
+        btc_events,
+        &syms,
+        "hashBTC",
+        "g",
+        0,
+    )
+    .unwrap();
+    let eth_events = vec![trade(eth, 30, 3, 3000.0), trade(eth, 40, 4, 3001.0)];
+    compact_day(
+        &root,
+        Venue::Bybit,
+        day,
+        0,
+        DAY,
+        eth_events,
+        &syms,
+        "hashETH",
+        "g",
+        0,
+    )
+    .unwrap();
+
+    // After the second (ETH) run, the manifest must still list BTC's streams:
+    // overwriting would silently lose them (B-2). Both Parquet files exist.
+    let m = mp_storage::compactor::load_manifest(&root, Venue::Bybit, day).unwrap();
+    assert_eq!(m.streams["trades:BTCUSDT"].events, 2, "BTC stream must survive the ETH run");
+    assert_eq!(m.streams["trades:ETHUSDT"].events, 2, "ETH stream must be present");
+    assert!(root.join("trades").join("venue=bybit").join("symbol=BTCUSDT").join(
+        format!("date={day}")
+    ).join("part-000.parquet").exists());
+    assert!(root.join("trades").join("venue=bybit").join("symbol=ETHUSDT").join(
+        format!("date={day}")
+    ).join("part-000.parquet").exists());
+}
+
+// ---- B-2 regression (prune half): pruning a symbol whose stream the day
+// manifest lost (per-symbol compaction clobber / legacy manifest) must be
+// refused — deleting that symbol's raw log on another symbol's proof is the
+// exact C-2 failure the A-1 gate exists to close.
+
+#[test]
+fn sto_3_prune_refuses_symbol_absent_from_manifest() {
+    let data = tmp("sto3-sym");
+    let cold = data.join("cold");
+    let (syms, btc, eth) = table_two();
+    let day = "2026-07-13";
+    let btc_events = vec![trade(btc, 10, 1, 100.0), trade(btc, 20, 2, 101.0)];
+    let eth_events = vec![trade(eth, 30, 3, 3000.0), trade(eth, 40, 4, 3001.0)];
+    let hash_btc = write_raw_log(&data, day, "BTCUSDT", &syms, &btc_events);
+    let hash_eth = write_raw_log(&data, day, "ETHUSDT", &syms, &eth_events);
+    compact_day(
+        &cold, Venue::Bybit, day, 0, DAY, btc_events, &syms, &hash_btc, "g", 0,
+    )
+    .unwrap();
+    compact_day(
+        &cold, Venue::Bybit, day, 0, DAY, eth_events, &syms, &hash_eth, "g", 0,
+    )
+    .unwrap();
+
+    // Healthy merged manifest: both symbols verify and are prunable.
+    assert_eq!(
+        prune::verify_prunable_symbol(&cold, Venue::Bybit, day, "BTCUSDT"),
+        Ok(())
+    );
+    assert_eq!(
+        prune::verify_prunable_symbol(&cold, Venue::Bybit, day, "ETHUSDT"),
+        Ok(())
+    );
+
+    // Simulate the clobber a pre-fix per-symbol compaction left behind: the
+    // day manifest lists only the last-compacted symbol (ETHUSDT). The
+    // UNGATED check still passes (it iterates whatever the manifest lists —
+    // the hole B-2 closed)…
+    let mpath = mp_storage::layout::manifest_file(&cold, Venue::Bybit, day);
+    let mut m = mp_storage::compactor::load_manifest(&cold, Venue::Bybit, day).unwrap();
+    m.streams.remove("trades:BTCUSDT");
+    mp_storage::manifest::write_manifest(&mpath, &m).unwrap();
+    assert_eq!(
+        prune::verify_prunable(&cold, Venue::Bybit, day),
+        Ok(()),
+        "ungated verify still passes on ETHUSDT's proof alone"
+    );
+    // …but the symbol-scoped gate must refuse to delete the BTCUSDT raw.
+    assert_eq!(
+        prune::verify_prunable_symbol(&cold, Venue::Bybit, day, "BTCUSDT"),
+        Err(mp_storage::prune::PruneRefusal::SymbolNotInManifest {
+            symbol: "BTCUSDT".to_owned(),
+        })
+    );
+    // The symbol the manifest DOES cover stays prunable.
+    assert_eq!(
+        prune::verify_prunable_symbol(&cold, Venue::Bybit, day, "ETHUSDT"),
+        Ok(())
+    );
+}
+
+// ---- B-5 regression: --force (CompactOptions.force) rebuilds a file whose
+// footer hash already matches — the repair path for the hollow shells.
+
+#[test]
+fn compact_force_rewrites_matching_source_hash() {
+    let root = tmp("force");
+    let (syms, btc) = table();
+    let events = vec![trade(btc, 10, 1, 100.0), trade(btc, 20, 2, 101.0)];
+    let day = "2026-07-12";
+
+    compact_day(&root, Venue::Bybit, day, 0, DAY, events.clone(), &syms, "hashA", "g", 0)
+        .unwrap();
+    // Idempotent re-run: skipped.
+    let stats = compact_day(&root, Venue::Bybit, day, 0, DAY, events.clone(), &syms, "hashA", "g", 0)
+        .unwrap();
+    assert_eq!(stats.trades_files_skipped, 1);
+    assert_eq!(stats.trades_files_written, 0);
+
+    // Forced re-run with a new hash: file is REWRITTEN, not skipped, and the
+    // new footer hash lands.
+    let stats = mp_storage::compact_day_opts(
+        &root,
+        Venue::Bybit,
+        day,
+        0,
+        DAY,
+        events,
+        &syms,
+        "hashB",
+        "g",
+        0,
+        mp_storage::CompactOptions { force: true },
+    )
+    .unwrap();
+    assert_eq!(stats.trades_files_written, 1, "force must rewrite, not skip");
+    assert_eq!(stats.trades_files_skipped, 0);
+    let path = root
+        .join("trades")
+        .join("venue=bybit")
+        .join("symbol=BTCUSDT")
+        .join(format!("date={day}"))
+        .join("part-000.parquet");
+    assert_eq!(
+        mp_storage::parquet_trades::read_source_hash(&path).unwrap().as_deref(),
+        Some("hashB"),
+        "forced rewrite must stamp the new source hash"
+    );
 }
 
 // ---- LAB-6 regression: materialize symbols_hash conflict is an error (P2 in pipeline)

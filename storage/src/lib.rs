@@ -54,7 +54,10 @@ pub enum StorageError {
 pub use audit::{
     audit_raw_log, scorecard, AuditConfig, DailyScorecard, RawLogAudit, RecordingBursts,
 };
-pub use compactor::{compact_day, compact_day_verified, CompactStats};
+pub use compactor::{
+    compact_day, compact_day_opts, compact_day_verified, compact_day_verified_opts, CompactOptions,
+    CompactStats,
+};
 pub use cross_venue::{
     app_version, config_hash, detect, findings_file, parse_config, version_string, write_findings,
     Classification, CohortMember, CrossVenueConfig, Finding, Findings, SymbolCohort,
