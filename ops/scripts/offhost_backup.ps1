@@ -129,14 +129,23 @@ function Test-StagingSourceExists {
     param([string]$Stem)
     $hits = [regex]::Matches($Stem, "__")
     for ($mask = 0; $mask -lt [math]::Pow(2, $hits.Count); $mask++) {
-        $candidate = $Stem
-        for ($i = $hits.Count - 1; $i -ge 0; $i--) {
+        # Reconstruct left-to-right from the ORIGINAL match indices (fix
+        # 2026-09-04): the old LastIndexOf-substitution loop could never split
+        # a 3+ underscore run (`...ver=0___params.age` from a `_params` source
+        # filename) correctly - it always took the rightmost pair, so every
+        # `_params` artifact false-negatived, got pruned locally + remotely
+        # every run, and churned ~76 re-uploads daily.
+        $sb = New-Object System.Text.StringBuilder
+        $ptr = 0
+        for ($i = 0; $i -lt $hits.Count; $i++) {
             if ($mask -band [math]::Pow(2, $i)) {
-                $idx = $candidate.LastIndexOf("__")
-                $candidate = $candidate.Substring(0, $idx) + "\" + $candidate.Substring($idx + 2)
+                [void]$sb.Append($Stem.Substring($ptr, $hits[$i].Index - $ptr))
+                [void]$sb.Append('\')
+                $ptr = $hits[$i].Index + 2
             }
         }
-        if (Test-Path (Join-Path $Repo $candidate)) { return $true }
+        [void]$sb.Append($Stem.Substring($ptr))
+        if (Test-Path (Join-Path $Repo $sb.ToString())) { return $true }
     }
     return $false
 }
@@ -298,9 +307,20 @@ if (-not $SkipVerify) {
     $verifyDir = Join-Path (Split-Path $staging -Parent) ".offhost-verify"
     try {
         New-Item -ItemType Directory -Force -Path $verifyDir | Out-Null
-        & $Rclone check $staging "$Remote" --size-only --fast-list 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "offhost_backup: rclone check FAILED - push not verified (exit $LASTEXITCODE)"; exit 2
+        # Retry the check gate (2026-09-04): a just-uploaded gdrive object can
+        # list with a stale size for a few seconds (eventual consistency), and
+        # the link is flaky - a single transient failure must not fail the tier.
+        $checkOk = $false
+        for ($attempt = 1; $attempt -le 3 -and -not $checkOk; $attempt++) {
+            & $Rclone check $staging "$Remote" --size-only --fast-list 2>$null
+            if ($LASTEXITCODE -eq 0) { $checkOk = $true }
+            elseif ($attempt -lt 3) {
+                Write-Warning "offhost_backup: rclone check attempt $attempt failed (exit $LASTEXITCODE) - retrying"
+                Start-Sleep -Seconds 20
+            }
+        }
+        if (-not $checkOk) {
+            Write-Error "offhost_backup: rclone check FAILED after 3 attempts - push not verified (exit $LASTEXITCODE)"; exit 2
         }
         $vFail = 0
         foreach ($entry in $manifest) {
@@ -309,9 +329,16 @@ if (-not $SkipVerify) {
             $tmpGz  = Join-Path $verifyDir "v.gz"
             $tmpPlain = Join-Path $verifyDir "v.plain"
             Remove-Item $tmpAge, $tmpGz, $tmpPlain -Force -ErrorAction SilentlyContinue
-            & $Rclone copyto "$Remote/$name" $tmpAge 2>$null
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "offhost_backup: verify download failed for $name"; $vFail = 1; continue
+            # Retry the per-file download (2026-09-04): one flaky-link blip on
+            # any of ~1,100 artifacts must not fail the whole tier's verify.
+            $dlOk = $false
+            for ($attempt = 1; $attempt -le 3 -and -not $dlOk; $attempt++) {
+                & $Rclone copyto "$Remote/$name" $tmpAge 2>$null
+                if ($LASTEXITCODE -eq 0) { $dlOk = $true }
+                elseif ($attempt -lt 3) { Start-Sleep -Seconds 10 }
+            }
+            if (-not $dlOk) {
+                Write-Error "offhost_backup: verify download failed for $name (3 attempts)"; $vFail = 1; continue
             }
             & $Age -d -i $AgeKey -o $tmpGz $tmpAge
             if ($LASTEXITCODE -ne 0) {
@@ -341,7 +368,11 @@ if ($Register) {
     # the trigger stays pinned to UTC across DST, same as vps_backup.ps1.
     $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(2).AddMinutes(30), [DateTimeKind]::Utc)
     $localAt = $utcTarget.ToLocalTime()
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Remote `"$Remote`""
+    # Output redirected to a gitignored log (2026-09-04): the old action
+    # captured nothing, so a scheduled exit-2 had no visible cause.
+    $logPath = Join-Path $PSScriptRoot "offhost_backup.log"
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden " +
+        "-Command `"& '{0}' -Remote '{1}' *> '{2}'`"" -f $PSCommandPath, $Remote, $logPath)
     $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `

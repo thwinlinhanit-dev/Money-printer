@@ -199,6 +199,34 @@ JSONL manifest. Drill: `ops/scripts/vps_restore_drill.ps1 -Destination <root>`
 restored copy with the real `mp-ops` tooling. Re-run the drill each time the
 streak advances.
 
+**Marker semantics (hardened 2026-09-04, commit `124800b`):** `.last_backup_ts`
+is written ONLY after the integrity pass verifies the delta complete — a
+failed run (exit 1/2) leaves the marker where it was, so the next incremental
+re-pulls the missing files. Before this, the marker advanced before integrity,
+so an exit-2 run's missing files fell off every future incremental (the
+2026-09-03 173-file gap; recovered with `-Force`). A transfer that lands ZERO
+files for a non-empty delta is a hard failure — Windows bsdtar exits 0 on
+empty input, so a dropped ssh stream used to parse as a clean "success".
+Transfers retry (default 3 attempts, 30s apart; `-MaxTransferAttempts` /
+`-RetryDelaySec`). After any gap, resync the full corpus with
+`vps_backup.ps1 -Destination C:\mp-backup -Force` (ignores the marker). The
+manifest's last entry is the integrity record: `dst_delta_files ==
+src_delta_files` must hold. Staleness + integrity + corpus size are surfaced
+daily by `ops/scripts/mp_health.ps1` (Task Scheduler `MoneyPrinterHealth`,
+05:30 UTC = 12:00 local, after the 09:00 off-host leg; output logged to
+`ops/scripts/mp_health.log`; `-Register` recreates the task).
+
+The off-host leg (`offhost_backup.ps1`) was hardened the same day: remote-only
+orphans self-heal (a stale remote ciphertext used to fail the `rclone check`
+gate exit-2 forever — the 2026-09-04 incident), the check gate and per-file
+verify downloads retry transient failures (flaky link / gdrive eventual
+consistency), the `_params` triple-underscore stem decoder was fixed (it
+false-negatived and churned ~76 artifacts every run), and the scheduled
+task's output is redirected to `ops/scripts/offhost_backup.log` so a
+scheduled failure has a visible cause. Exit codes: 0 = pushed + verified;
+1 = push failed; 2 = integrity/verify failed; 3 = config; 10 = partial
+(live files skipped, retry tomorrow).
+
 **Implemented (2026-08-14): the relay DRAIN — `ops/scripts/vps_drain.ps1`
 (Task Scheduler `MoneyPrinterVpsDrain`, 01:00 UTC — after the 00:05 gate AND
 the 00:30 backup).** The backup is a READ-ONLY mirror to a separate root; the
@@ -359,10 +387,10 @@ Windows stays the master corpus):
   bybit ones, and the ~130 MB/day accumulation + nightly 389 MiB collision
   re-transfer stop.
 - **Keep** `MoneyPrinterVpsBackup` (00:30 W-6 mirror) + `MoneyPrinterVpsDrain`
-  (01:00) + `MoneyPrinterOffhostBackup` + `MoneyPrinterDataBackup`: the
-  Windows box stays the master corpus (drain destination) and keeps its
-  safety copies. The pre-drain "(+ the backup task)" instruction no longer
-  applies.
+  (01:00) + `MoneyPrinterOffhostBackup` + `MoneyPrinterDataBackup` +
+  `MoneyPrinterHealth` (05:30 UTC daily report): the Windows box stays the
+  master corpus (drain destination) and keeps its safety copies. The
+  pre-drain "(+ the backup task)" instruction no longer applies.
 - `MoneyPrinterDailyPipeline` (Windows-side audit/features/compaction): keep
   running — it now audits the drain destination; nothing to stop.
 - Do the stop at a UTC day boundary (e.g. 23:55 UTC) so only the stop-day's

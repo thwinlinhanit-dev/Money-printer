@@ -18,6 +18,14 @@
 #   2 = any critical  (printed as [CRIT])
 #
 # Safe to run any time; no side effects.
+#
+#   .\ops\scripts\mp_health.ps1 -Register   # register daily MoneyPrinterHealth task
+#                                           # (05:30 UTC = 12:00 local, after the
+#                                           # 09:00 off-host backup finishes)
+
+param(
+    [switch]$Register  # register (or refresh) the daily MoneyPrinterHealth task
+)
 
 $ErrorActionPreference = "Continue"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
@@ -75,11 +83,16 @@ if ($logs.Count -eq 0) {
     $crit += "no hyperliquid logs"
 } else {
     $newest = ($logs | Select-Object -Last 1).Name.Substring(0,8)
-    $yesterday = ((Get-Date).ToUniversalTime().AddDays(-1).ToString("yyyyMMdd"))
-    if ($newest -ge $yesterday) {
-        Out-Line "[ OK ]" "newest closed hyperliquid day: $newest (yesterday = $yesterday)"
+    # Schedule-aware expectation (2026-09-04): the drain task runs 01:00 local
+    # = 18:30 UTC, so a UTC day D's files land at the drain on D+1 - i.e. the
+    # newest present day is (now - 18.5h).Date - 1. The old check compared
+    # against yesterday UTC and CRIT'd for ~18h of every healthy day.
+    $utcNow = [DateTime]::UtcNow
+    $expected = $utcNow.AddHours(-18.5).Date.AddDays(-1).ToString("yyyyMMdd")
+    if ($newest -ge $expected) {
+        Out-Line "[ OK ]" "newest closed hyperliquid day: $newest (expected >= $expected given 01:00 local drain)"
     } else {
-        Out-Line "[CRIT]" "newest closed hyperliquid day: $newest; yesterday=$yesterday - drain is BEHIND"
+        Out-Line "[CRIT]" "newest closed hyperliquid day: $newest; expected >= $expected - drain is BEHIND"
         $crit += "drain behind (newest=$newest)"
     }
     $present = @($logs | Select-Object -Last 3 | ForEach-Object { $_.Name.Substring(0,8) })
@@ -196,6 +209,26 @@ $rawSizeGB = ((Get-ChildItem -LiteralPath $raw -File -ErrorAction SilentlyContin
     Measure-Object Length -Sum).Sum) / 1GB
 Out-Line "  ..." ("C: free {0:N1} GB | data\raw {1:N2} GB" -f $freeGB, $rawSizeGB)
 if ($freeGB -lt 20) { Out-Line "[WARN]" "C: free under 20 GB"; $warn += "low disk" }
+
+# ---- 7. Register daily task --------------------------------------------------
+# MoneyPrinterHealth: daily 05:30 UTC (after the 09:00 local off-host backup
+# normally completes) so one report surfaces drain freshness, both backup legs,
+# the C:\mp-backup corpus, and disk pressure. Output is redirected to a log
+# (gitignored *.log) so the task result AND the report are both inspectable.
+if ($Register) {
+    $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(5).AddMinutes(30), [DateTimeKind]::Utc)
+    $localAt = $utcTarget.ToLocalTime()
+    $logPath = Join-Path $PSScriptRoot "mp_health.log"
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden " +
+        "-Command `"& '{0}' *> '{1}'`"" -f $PSCommandPath, $logPath)
+    $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+    Register-ScheduledTask -TaskName "MoneyPrinterHealth" -Action $action -Trigger $trigger -Settings $settings -User $env:USERNAME -Force | Out-Null
+    Out-Line "[ OK ]" "registered MoneyPrinterHealth (daily $($utcTarget.ToString('HH:mm')) UTC = $($localAt.ToString('HH:mm')) local, log $logPath)"
+}
 
 Write-Host ""
 if ($crit.Count -gt 0) {
