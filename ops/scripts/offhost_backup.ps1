@@ -228,7 +228,24 @@ $encrypt = {
         # see it).
         $sha = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         Compress-Gzip $f.FullName $gzTmp
+        # EAP Continue around the native call (same class as the push fix
+        # 2026-09-04): age stderr must not become a NativeCommandError under
+        # the global EAP=Stop; $LASTEXITCODE is the real signal.
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         & $Age -e -R $PublicKey -o $out $gzTmp
+        $ageCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        if ($ageCode -ne 0) {
+            Remove-Item $gzTmp -Force -ErrorAction SilentlyContinue
+            $today = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+            if ($f.Name -like "*${today}*") {
+                Write-Warning "offhost_backup: SKIP locked live file (backed up tomorrow): $rel"
+                $script:skipped += $rel
+                return
+            }
+            Write-Error "age encrypt failed: $($f.FullName)"; exit 1
+        }
         Remove-Item $gzTmp -Force
     } catch {
         Remove-Item $gzTmp -Force -ErrorAction SilentlyContinue
@@ -245,16 +262,6 @@ $encrypt = {
             return
         }
         Write-Error "encrypt failed (gzip/age): $($f.FullName) - $($_.Exception.Message)"; exit 1
-    }
-    if ($LASTEXITCODE -ne 0) {
-        Remove-Item $gzTmp -Force -ErrorAction SilentlyContinue
-        $today = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
-        if ($f.Name -like "*${today}*") {
-            Write-Warning "offhost_backup: SKIP locked live file (backed up tomorrow): $rel"
-            $script:skipped += $rel
-            return
-        }
-        Write-Error "age encrypt failed: $($f.FullName)"; exit 1
     }
     $script:manifest.Add(@{ rel = $rel; size = $f.Length; sha256 = $sha }) | Out-Null
     $script:nFiles++
@@ -290,8 +297,20 @@ $manifestPath = Join-Path $staging "_manifest.json"
 # incremental design). The manifest (plaintext sha256 per file) is pushed
 # alongside and is what the check phase verifies against - size-only alone is
 # never trusted for integrity (audit 2026-08-17).
-& $Rclone copy $staging "$Remote" --transfers 4 --checkers 8 --size-only
-if ($LASTEXITCODE -ne 0) { Write-Error "offhost_backup: rclone copy failed (exit $LASTEXITCODE)"; exit 1 }
+# EAP must be Continue here (fix 2026-09-04): every other rclone call is
+# wrapped, but the push was not - so rclone's stderr NOTICE (shared gdrive
+# client_id retirement warning) became a NativeCommandError under the global
+# EAP=Stop and terminally killed the run at push start, uploading nothing
+# (exit 1, silent). Native stderr is NOT a failure signal; $LASTEXITCODE is.
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"  # native stderr is not an error record
+# Explicit IO/connect timeouts (2026-09-05): rclone's defaults let a stalled
+# link hang the push forever (observed: 8h execution-limit kill mid-verify).
+# A timeout turns a dead link into a fast failure the retry can recover from.
+& $Rclone copy $staging "$Remote" --transfers 4 --checkers 8 --size-only --timeout 10m --contimeout 30s
+$copyCode = $LASTEXITCODE
+$ErrorActionPreference = $prevEAP
+if ($copyCode -ne 0) { Write-Error "offhost_backup: rclone copy failed (exit $copyCode)"; exit 1 }
 Write-Host "offhost_backup: pushed $nFiles artifacts to $Remote"
 
 # --- Verify (post-push check, opt-out for huge remotes) --------------------
@@ -312,7 +331,7 @@ if (-not $SkipVerify) {
         # the link is flaky - a single transient failure must not fail the tier.
         $checkOk = $false
         for ($attempt = 1; $attempt -le 3 -and -not $checkOk; $attempt++) {
-            & $Rclone check $staging "$Remote" --size-only --fast-list 2>$null
+            & $Rclone check $staging "$Remote" --size-only --fast-list --timeout 10m --contimeout 30s 2>$null
             if ($LASTEXITCODE -eq 0) { $checkOk = $true }
             elseif ($attempt -lt 3) {
                 Write-Warning "offhost_backup: rclone check attempt $attempt failed (exit $LASTEXITCODE) - retrying"
@@ -333,7 +352,11 @@ if (-not $SkipVerify) {
             # any of ~1,100 artifacts must not fail the whole tier's verify.
             $dlOk = $false
             for ($attempt = 1; $attempt -le 3 -and -not $dlOk; $attempt++) {
-                & $Rclone copyto "$Remote/$name" $tmpAge 2>$null
+                # --timeout/--contimeout (2026-09-05): a stalled download hung
+                # the verify past the task's execution limit (8h kill at
+                # 04:24). A timeout fails the attempt fast; the retry loop
+                # below recovers. 10m IO idle is generous for big parquet.
+                & $Rclone copyto "$Remote/$name" $tmpAge --timeout 10m --contimeout 30s 2>$null
                 if ($LASTEXITCODE -eq 0) { $dlOk = $true }
                 elseif ($attempt -lt 3) { Start-Sleep -Seconds 10 }
             }
@@ -377,7 +400,13 @@ if ($Register) {
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -MultipleInstances IgnoreNew `
-        -ExecutionTimeLimit (New-TimeSpan -Hours 8) `
+        # ExecutionTimeLimit 24h (2026-09-05): the 8h limit killed a healthy
+        # run mid-verify at exactly start+8h (observed 04:24, result 267014).
+        # The pipeline legitimately needs >8h: ~2h encrypt + push + per-file
+        # hash verify of ~1,500 artifacts over a flaky gdrive link (each
+        # download retried 3x). 24h covers the worst case; IgnoreNew absorbs
+        # a next-day trigger if a run ever spills over.
+        -ExecutionTimeLimit (New-TimeSpan -Hours 24) `
         -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
     Register-ScheduledTask -TaskName "MoneyPrinterOffhostBackup" -Action $action -Trigger $trigger -Settings $settings -User $env:USERNAME -Force | Out-Null
     Write-Host "offhost_backup: registered MoneyPrinterOffhostBackup (daily $($utcTarget.ToString('HH:mm')) UTC = $($localAt.ToString('HH:mm')) local)"
