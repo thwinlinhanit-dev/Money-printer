@@ -163,6 +163,37 @@ foreach ($old in Get-ChildItem -Path $staging -File -Filter "*.age") {
     }
 }
 
+# Remote-only orphan sweep (fix 2026-09-04): the loop above only reaches
+# remote orphans whose LOCAL artifact still exists. If a prior run died between
+# the local Remove-Item and the remote deletefile, the remote ciphertext is
+# never revisited - and since the verify phase's `rclone check` requires an
+# exact mirror (it exits 1 on ANY difference, remote-only included), the run
+# fails exit 2 every day forever. Sweep the other direction too: anything on
+# the remote absent from the (post-prune) staging dir is an orphan and gets
+# deleted, restoring the mirror invariant the check phase requires.
+# Fail-closed: a failed remote list/delete fails the run.
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"  # native stderr is not an error record
+$remoteFiles = & $Rclone lsf "$Remote" 2>$null
+$lsfCode = $LASTEXITCODE
+$ErrorActionPreference = $prevEAP
+if ($lsfCode -ne 0) {
+    Write-Error "offhost_backup: rclone lsf failed during remote orphan sweep (exit $lsfCode)"; exit 1
+}
+$localNames = @(Get-ChildItem -Path $staging -File | ForEach-Object { $_.Name })
+foreach ($rName in ($remoteFiles | ForEach-Object { $_.Trim() })) {
+    if ($localNames -contains $rName) { continue }
+    Write-Host "offhost_backup: prune remote-only orphan $rName (no local staging artifact)"
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $Rclone deletefile "$Remote/$rName" 2>$null
+    $delCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    if ($delCode -ne 0) {
+        Write-Error "offhost_backup: rclone deletefile failed for remote-only orphan $rName (exit $delCode)"; exit 1
+    }
+}
+
 $manifest = New-Object System.Collections.ArrayList
 $corpusRoot = Join-Path $Repo $DataRoot
 $sources = @(
