@@ -400,13 +400,15 @@ if ($Register) {
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -MultipleInstances IgnoreNew `
-        # ExecutionTimeLimit 24h (2026-09-05): the 8h limit killed a healthy
+        # ExecutionTimeLimit 36h (2026-09-05): the 8h limit killed a healthy
         # run mid-verify at exactly start+8h (observed 04:24, result 267014).
-        # The pipeline legitimately needs >8h: ~2h encrypt + push + per-file
-        # hash verify of ~1,500 artifacts over a flaky gdrive link (each
-        # download retried 3x). 24h covers the worst case; IgnoreNew absorbs
-        # a next-day trigger if a run ever spills over.
-        -ExecutionTimeLimit (New-TimeSpan -Hours 24) `
+        # The pipeline legitimately needs >24h at observed link speeds: ~2h
+        # encrypt + push + a full 53 GiB per-file hash verify at ~0.7 MiB/s
+        # single-stream gdrive (~21h, measured 2026-09-05) - the 24h limit
+        # was a near-miss kill risk. Tradeoff: IgnoreNew drops the next-day
+        # trigger if a run spills past 09:00, so a very slow verify can skip
+        # one day - acceptable vs losing the whole verify to a kill.
+        -ExecutionTimeLimit (New-TimeSpan -Hours 36) `
         -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
     Register-ScheduledTask -TaskName "MoneyPrinterOffhostBackup" -Action $action -Trigger $trigger -Settings $settings -User $env:USERNAME -Force | Out-Null
     Write-Host "offhost_backup: registered MoneyPrinterOffhostBackup (daily $($utcTarget.ToString('HH:mm')) UTC = $($localAt.ToString('HH:mm')) local)"
