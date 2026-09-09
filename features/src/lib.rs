@@ -42,7 +42,9 @@ use mp_core::Venue;
 pub use accumulation::{AccumulationConfig, AccumulationDetector, SubSignal};
 pub use data_quality::{DataQualityState, QualityTracker};
 pub use evaluation::{
-    decide, distribution, evaluate, grade_from_report, PromotionDecision, DEFAULT_MIN_N,
+    decide, distribution, evaluate, evaluate_full, grade_from_report, HorizonSummary,
+    PromotionDecision, RegimeBucket, SampleTier, DEFAULT_DECAY_WINDOWS, DEFAULT_MIN_N,
+    DEFAULT_REGIME_FEATURE, DECAY_MIN_PER_WINDOW, REGIME_MIN_TAGGED, RESEARCH_MIN_N,
     EvaluationReport,
 };
 pub use observation::{

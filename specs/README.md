@@ -62,6 +62,7 @@ should be updated).
 | 051 | [Daily Paper Rehearsal](051-paper-rehearsal.md) | execution | ✅ implemented — daily_paper.ps1 + pipeline (PAP-1..9/10); PAP-8 slice B deferred |
 | 052 | [Operator Console](052-operator-console.md) | decision plane | ✅ implemented — /v1/status in termd.py (CON-1..7) |
 | 053 | [Alpha Program](053-alpha-program.md) | intelligence | ✅ implemented — ALP-1..9 all landed + tests alp_1..9 |
+| 054 | [Research Lab Hardening](054-research-lab-hardening.md) | intelligence | ✅ implemented — Phases 0–6 (2026-09-04) + Phase 7 anti-randomness gates REL-24..29 (2026-09-07: quality Missing/Gap, sample tiers R-5, regime refusal R-6, decay R-7, golden dirty fixture); status in `docs/research/RESEARCH-LAB-STATUS.md` |
 
 Status values: `draft` → `ready` (implementable) → `implementing` →
 `implemented` → `superseded`. Update this table in the same commit as the work
@@ -103,7 +104,7 @@ RES, UI, ZCP (012), BKP (013), FSP (014), MAT (016), GRD (017), MOD (018),
 INT (024), WHL (028), MAC (030), OPT (031), BDC (001 codec amendment), MSC (032),
 WAL (033), NFL (034), SWG (035), SLQ (036), GRE (037), IVS (038), OFI (039),
 IBI (040), TER (041), WCG (042), CFV (043), TOK (044), ACC (045), DEF (046),
-COZ (047), COR (048), LAB (050), PAP (051), CON (052), ALP (053).
+COZ (047), COR (048), LAB (050), PAP (051), CON (052), ALP (053), REL (054).
 
 ## How to implement a spec
 

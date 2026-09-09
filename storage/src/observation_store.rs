@@ -35,8 +35,11 @@ use std::sync::Arc;
 pub const KV_IDENTITY_FINGERPRINT: &str = "identity_fingerprint";
 pub const KV_OBSERVATION_SCHEMA_VER: &str = "observation_schema_ver";
 
-/// Current observation Parquet schema version (bump = new columns are legal).
-pub const OBSERVATION_SCHEMA_VER: u16 = 1;
+/// Current observation Parquet schema version. Bumped to 2 on 2026-09-07:
+/// the quality vocabulary gained `Missing` (4) and `Gap` (5) (spec 054
+/// REL-27). Codes 0..3 are UNCHANGED so pre-existing files decode
+/// byte-identically.
+pub const OBSERVATION_SCHEMA_VER: u16 = 2;
 
 fn observation_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -71,6 +74,8 @@ fn quality_code(q: DataQualityState) -> u8 {
         DataQualityState::InsufficientHistory => 1,
         DataQualityState::Stale => 2,
         DataQualityState::Invalid => 3,
+        DataQualityState::Missing => 4,
+        DataQualityState::Gap => 5,
     }
 }
 
@@ -79,6 +84,9 @@ fn quality_from_code(code: u8) -> DataQualityState {
         0 => DataQualityState::Healthy,
         1 => DataQualityState::InsufficientHistory,
         2 => DataQualityState::Stale,
+        3 => DataQualityState::Invalid,
+        4 => DataQualityState::Missing,
+        5 => DataQualityState::Gap,
         _ => DataQualityState::Invalid,
     }
 }
@@ -526,6 +534,42 @@ mod tests {
         got.sort_unstable();
         assert_eq!(got, expect);
         assert!(all.iter().all(|o| o.identity.fingerprint() == obs[0].identity.fingerprint()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rel_27_quality_codes_roundtrip_incl_missing_and_gap() {
+        // REL-27: the extended quality vocabulary survives the Parquet
+        // roundtrip; legacy codes 0..3 are unchanged (old files decode
+        // byte-identically).
+        assert_eq!(quality_code(DataQualityState::Healthy), 0);
+        assert_eq!(quality_code(DataQualityState::InsufficientHistory), 1);
+        assert_eq!(quality_code(DataQualityState::Stale), 2);
+        assert_eq!(quality_code(DataQualityState::Invalid), 3);
+        assert_eq!(quality_code(DataQualityState::Missing), 4);
+        assert_eq!(quality_code(DataQualityState::Gap), 5);
+        for (code, state) in [
+            (0u8, DataQualityState::Healthy),
+            (1, DataQualityState::InsufficientHistory),
+            (2, DataQualityState::Stale),
+            (3, DataQualityState::Invalid),
+            (4, DataQualityState::Missing),
+            (5, DataQualityState::Gap),
+        ] {
+            assert_eq!(quality_from_code(code), state);
+        }
+        // Unknown codes fail closed to Invalid (blocks — never Healthy).
+        assert_eq!(quality_from_code(200), DataQualityState::Invalid);
+
+        let dir = tmp("quality-codes");
+        let mut obs = sample_obs(2, false);
+        obs[0].quality = DataQualityState::Missing;
+        obs[1].quality = DataQualityState::Gap;
+        let path = dir.join("q.parquet");
+        write_observations(&path, &obs).unwrap();
+        let back = read_observations(&path).unwrap();
+        assert_eq!(back[0].quality, DataQualityState::Missing);
+        assert_eq!(back[1].quality, DataQualityState::Gap);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

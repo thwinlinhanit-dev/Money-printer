@@ -1,6 +1,6 @@
 # 054 — Research Lab Hardening
 
-**Status:** Active (2026-09-04)
+**Status:** Active (2026-09-04; extended 2026-09-07 — Phase 7 anti-randomness gates)
 **Budget:** $0 / free-tier (`docs/ZERO_COST_MODE.md`)
 **Plan:** `docs/implementation/RESEARCH-LAB-HARDENING-PLAN.md`
 **Status report:** `docs/research/RESEARCH-LAB-STATUS.md`
@@ -103,12 +103,76 @@ no-overwrite guard) and are deterministic and replayable.
 - **REL-22** — Accumulation evidence representation improved (REL-6) WITHOUT
   breaking the existing strict AND logic (ACC-6) or the cooldown (ACC-4).
 
+## Phase 7 — Anti-randomness gates (added 2026-09-07)
+
+Extends Phase 5 with the task-mandated anti-randomness rules (R-5 tiers,
+R-6 regime, R-7 decay) and hardens Phase 1's quality vocabulary. These gates
+are deliberately KILL-BIASED: most ideas must die (R-8), so every gate below
+refuses promotion when its evidence is absent — never silently passes.
+
+- **REL-24 (R-5)** — Sample-size TIERS are mandatory:
+  `Insufficient` (n < `min_n`, default 30) / `Preliminary` (min_n ≤ n <
+  `RESEARCH_MIN_N` = 100) / `Research` (n ≥ 100). The evaluation report
+  carries the tier; PROMOTION requires the Research tier — a Preliminary
+  sample is refused with `SAMPLE_TIER_PRELIMINARY` (below min_n stays
+  `INSUFFICIENT_SAMPLE`).
+- **REL-25 (R-6)** — Regime tagging and reporting: observations whose fire
+  snapshot carries the regime feature (default `regime.trend`: 0.0 = TREND,
+  1.0 = CHOP, per the existing `TrendRegime` feature) are bucketed per regime
+  with n / net-expectancy / win-rate in the report. When the overall gate
+  would pass but the tagged evidence is regime-limited, promotion is REFUSED
+  with `ONLY_WORKS_IN_<REGIME>` (a positive and a negative regime coexist),
+  `REGIME_SAMPLE_TOO_SMALL_<REGIME>` (a regime has 0 < n < 10), or
+  `REGIME_COVERAGE_SINGLE_<REGIME>` (every tagged observation falls in one
+  regime — general effectiveness unproven). Untagged observations are covered
+  by the overall gates and are not regime-gated.
+- **REL-26 (R-7)** — Sustained-decay detection: the closed-outcome sample is
+  split chronologically into `DEFAULT_DECAY_WINDOWS` = 3 equal chunks (each
+  ≥ `DECAY_MIN_PER_WINDOW` = 5, else decay is not judged). If the TWO most
+  recent chunks both have net expectancy ≤ 0, promotion is refused with
+  `DECAY_SUSPECT` — an edge that existed once but recently died forces a
+  retest, never a promotion.
+- **REL-27 (R-1)** — `DataQualityState` gains the two missing states of the
+  task vocabulary: `Missing` (the symbol/stream was NEVER observed —
+  distinct from `InsufficientHistory`, which means some-but-fewer-than-min
+  samples) and `Gap` (an inter-observation hole larger than the staleness
+  window was detected; the state blocks until `min_samples` fresh post-gap
+  observations arrive). Both block signal firing. Screener/detector
+  "feature never observed" paths now report `Missing`. Parquet quality
+  codes: legacy 0..3 unchanged, Missing = 4, Gap = 5 (old files decode
+  byte-identically).
+- **REL-28** — The golden dataset fixture covers the DIRTY cases, not just
+  the happy path: insufficient history (cold start), a >staleness-window
+  gap, and a NaN (invalid) value, plus a healthy segment — asserting blocked
+  fires are counted, non-Healthy observations never exist, and the whole
+  state hash is stable.
+- **REL-29** — Reject reasons are machine-readable codes followed by human
+  detail: `INSUFFICIENT_SAMPLE`, `SAMPLE_TIER_PRELIMINARY`,
+  `NET_EXPECTANCY_NEGATIVE`, `DECAY_SUSPECT`, `ONLY_WORKS_IN_*`,
+  `REGIME_SAMPLE_TOO_SMALL_*`, `REGIME_COVERAGE_SINGLE_*`, `NON_FINITE` —
+  matching the task's structured decision format.
+
 ## Storage
 
 - **REL-23** — Observations persist as Parquet (`mp-storage`), one row per
   (observation, outcome), zstd-6, footer KV = identity fingerprint + schema
   version, `{date}-{content_hash}.parquet` partitioning, W-6 no-overwrite
   guard, deterministic content hash. No new database.
+
+## Decisions (W-5)
+
+- **2026-09-07, REL-24 thresholds:** 30 / 100 are fixed consts
+  (`DEFAULT_MIN_N`, `RESEARCH_MIN_N`), not config plumbing — the smallest
+  change that satisfies R-5; config wiring is deferred.
+- **2026-09-07, REL-25 regime source:** the fire snapshot already carries
+  `regime.trend` for accumulation fires (the only strategy family with a
+  regime input today), so tagging reads the snapshot instead of adding a
+  new series. The task's example labels (LOW_VOL) map onto whichever regime
+  feature is configured; TREND/CHOP are the only bands that exist.
+- **2026-09-07, conflict resolution (task process rule):** existing tests
+  treated n=30 as promotable; the task's R-5 makes Research (≥100) the
+  promotion floor. Tests `rel_15/18/19` were STRENGTHENED to the stricter
+  gate (a tightening, never a loosening — PD-5).
 
 ## Out of scope (explicitly deferred)
 
@@ -126,4 +190,13 @@ distribution, Parquet round-trip + W-6, POC/VAH/VAL tie determinism.
 Integration (`sim/tests/observation_engine.rs`): raw → feature → signal →
 observation → outcome; reproducibility; no-lookahead (open windows never
 fabricated); recorder-write-only (decision-log hash unchanged); golden
-observation hash fixture.
+observation hash fixture; golden DIRTY fixture (REL-28: insufficient
+history + gap + invalid NaN + healthy segment, blocked fires counted,
+frozen hash).
+
+Phase 7 unit: tier classification + `SAMPLE_TIER_PRELIMINARY` refusal
+(REL-24); regime buckets + `ONLY_WORKS_IN_*` / `REGIME_SAMPLE_TOO_SMALL_*`
+/ `REGIME_COVERAGE_SINGLE_*` refusals (REL-25); decay-chunk detection +
+`DECAY_SUSPECT` (REL-26); `Missing`/`Gap` tracker states incl. heal-after-
+min-samples + Parquet code roundtrip (REL-27); machine reason-code prefixes
+(REL-29).

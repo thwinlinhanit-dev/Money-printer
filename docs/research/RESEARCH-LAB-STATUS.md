@@ -1,6 +1,7 @@
-# RESEARCH-LAB-STATUS — capability status (2026-09-04)
+# RESEARCH-LAB-STATUS — capability status (2026-09-07; initial 2026-09-04,
+# Phase 7 anti-randomness gates closed 2026-09-07 — see plan §10)
 
-Spec: `specs/054-research-lab-hardening.md` · Plan:
+Spec: `specs/054-research-lab-hardening.md` (incl. REL-24..29) · Plan:
 `docs/implementation/RESEARCH-LAB-HARDENING-PLAN.md` · Branch:
 `feature/signal-catalog-footprint`.
 
@@ -8,14 +9,19 @@ Spec: `specs/054-research-lab-hardening.md` · Plan:
 
 | Capability | Status | Evidence |
 |---|---|---|
-| Data integrity — explicit quality state (REL-1..3) | **PASS** | `features/src/data_quality.rs` — `DataQualityState` (Healthy / InsufficientHistory / Stale / Invalid); tests `rel_1..rel_4`; accumulation blocks on short history (no 0.5 fallback), screener exposes per-rule state |
+| Data integrity — explicit quality state (REL-1..3, REL-27/R-1) | **PASS** | `features/src/data_quality.rs` — `DataQualityState` (Healthy / InsufficientHistory / Stale / Invalid / **Missing / Gap**); never neutral/0.5; screener "never observed" ⇒ Missing, gap through the staleness window ⇒ Gap until fresh min_samples heal it; Parquet codes 0–5, schema ver bumped |
 | Identity — canonical + invalidation (REL-4..7) | **PASS** | `features/src/signal_identity.rs` + `signal_catalog.rs`; `apply_grade` refuses mismatched/pre-hardening grades; tests prove params / feature-version / schema / cost-model changes invalidate old evidence |
 | Observations — immutable + gated (REL-8..11) | **PASS** | `features/src/observation.rs`; quality-gated recording with blocked-fire counter; deterministic ids; recorder proven write-only (decision-log hash unchanged) |
 | Forward outcomes — horizons/gross/net/MFE/MAE (REL-12..14) | **PASS** | `features/src/outcome.rs`; series-coverage guard (REL-13) + no-lookahead tests; integration slice raw → feature → signal → observation → outcome |
 | Evaluation & promotion (REL-15..19) | **PASS** | `features/src/evaluation.rs`; sample gate, gross-vs-net, p25/p50/p75, structured `PromotionDecision`, `grade_from_report` bridge |
+| Sample-size tiers (REL-24/R-5) | **PASS** | `SampleTier { Insufficient, Preliminary, Research }`, promotion floor `RESEARCH_MIN_N = 100`; `SAMPLE_TIER_PRELIMINARY` refusal tested at 30/99/100 |
+| Regime tagging & refusal (REL-25/R-6) | **PASS** | buckets from the fire snapshot's `regime.trend`; `ONLY_WORKS_IN_*` refusal, `REGIME_COVERAGE_SINGLE_*` / `REGIME_SAMPLE_TOO_SMALL_*` flags (`REGIME_MIN_TAGGED = 10`) |
+| Sustained-decay detection (REL-26/R-7) | **PASS** | chronological-window net expectancy (3 windows, ≥5 per window); two consecutive non-positive recent windows ⇒ `DECAY_SUSPECT` refusal |
+| Machine-readable reject codes + JSON decision (REL-29/R-8) | **PASS** | every reject carries a `CODE: detail` reason; `PromotionDecision::to_json` = `{"decision":"REJECT","reasons":["INSUFFICIENT_SAMPLE",…]}` |
+| Golden dirty fixture (gaps/invalid/insufficient) | **PASS** | `rel_28_golden_dirty_fixture_gaps_invalid_insufficient_history` — fixed dirty feed walks Missing→Insufficient→Healthy→Gap→Healthy→Invalid with frozen FNV hash `17618162958652494096` |
 | Parquet observation store (REL-23) | **PASS** | `storage/src/observation_store.rs`; round-trip, W-6 no-overwrite, deterministic content hash, partitioned write |
 | Footprint/accumulation cleanup (REL-20..22) | **PASS** | market-profile approximation documented; `total_cmp` POC determinism tested for POC/VAH/VAL; accumulation evidence fields in hit snapshots, strict AND untouched |
-| Determinism / reproducibility | **PASS** | golden observation hash frozen in `sim/tests/observation_engine.rs`; `cargo test` green; sim decision-log golden hash (`sim_14`) unchanged |
+| Determinism / reproducibility | **PASS** | golden observation hash + golden dirty-fixture hash frozen in `sim/tests/observation_engine.rs`; full workspace `cargo test` green (2026-09-07); sim decision-log golden hash (`sim_14`) unchanged |
 | Live trading disabled (PD-1) | **PASS** | trading mode `sleep`; no OMS/venue wiring added; observation code is research-only |
 | $0 budget / no new database | **PASS** | zero new deps outside the workspace; Parquet only |
 

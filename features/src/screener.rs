@@ -187,28 +187,28 @@ impl Screener {
         hits
     }
 
-    /// Explicit rule state per (symbol, rule) (spec 054 REL-3): whether the
-    /// rule CAN fire given what the screener has seen so far. A condition
-    /// whose feature was never observed makes the rule's state
-    /// `InsufficientHistory` — visible to callers instead of the legacy
-    /// silent "condition never satisfied" — and blocks the rule until the
-    /// feature arrives. Staleness/invalidity are the QualityTracker's domain
-    /// (the screener has no time window of its own); callers combining both
-    /// take the worse state.
+    /// Explicit rule state per (symbol, rule) (spec 054 REL-3/REL-27): whether
+    /// the rule CAN fire given what the screener has seen so far. A condition
+    /// whose feature was never observed makes the rule's state `Missing` (the
+    /// task's R-1 vocabulary: unknown is its own state) — visible to callers
+    /// instead of the legacy silent "condition never satisfied" — and blocks
+    /// the rule until the feature arrives. Staleness/invalidity are the
+    /// QualityTracker's domain (the screener has no time window of its own);
+    /// callers combining both take the worse state.
     pub fn state(&self, symbol: SymbolId, rule_id: &str) -> DataQualityState {
         let Some(rule) = self.rules.iter().find(|r| r.id == rule_id) else {
-            return DataQualityState::InsufficientHistory;
+            return DataQualityState::Missing;
         };
         let snap = match self.snapshots.get(&symbol) {
             Some(s) => s,
-            None => return DataQualityState::InsufficientHistory,
+            None => return DataQualityState::Missing,
         };
         if rule
             .conds
             .iter()
             .any(|c| !snap.contains_key(&c.feature))
         {
-            DataQualityState::InsufficientHistory
+            DataQualityState::Missing
         } else {
             DataQualityState::Healthy
         }
@@ -248,9 +248,9 @@ mod tests {
 
     #[test]
     fn rel_3_unseen_feature_is_explicit_insufficient_history() {
-        // Spec 054 REL-3: a rule whose condition feature has never been
-        // observed must expose InsufficientHistory — the legacy behavior was
-        // a silent "condition never satisfied" with no way to tell a dead
+        // Spec 054 REL-3/REL-27: a rule whose condition feature has never been
+        // observed must expose Missing (never observed) — the legacy behavior
+        // was a silent "condition never satisfied" with no way to tell a dead
         // feed from a legitimately-false rule.
         let mut s = Screener::new(vec![Rule {
             id: "r1".into(),
@@ -260,10 +260,7 @@ mod tests {
                 threshold: 0.0,
             }],
         }]);
-        assert_eq!(
-            s.state(SymbolId(7), "r1"),
-            DataQualityState::InsufficientHistory
-        );
+        assert_eq!(s.state(SymbolId(7), "r1"), DataQualityState::Missing);
         // Feed the feature (with the engine-style name map, as production
         // wires it): the rule can now fire ⇒ Healthy.
         s.set_name_map(BTreeMap::from([(SymbolId(9), "funding.rate".to_string())]));
@@ -277,10 +274,7 @@ mod tests {
             ver: 1,
         });
         assert_eq!(s.state(SymbolId(7), "r1"), DataQualityState::Healthy);
-        // Unknown rule id is also InsufficientHistory (cannot fire).
-        assert_eq!(
-            s.state(SymbolId(7), "nope"),
-            DataQualityState::InsufficientHistory
-        );
+        // Unknown rule id is also Missing (cannot fire).
+        assert_eq!(s.state(SymbolId(7), "nope"), DataQualityState::Missing);
     }
 }

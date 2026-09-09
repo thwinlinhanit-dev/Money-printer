@@ -395,14 +395,15 @@ impl AccumulationDetector {
         })
     }
 
-    /// Explicit quality per symbol (spec 054 REL-2): `InsufficientHistory`
-    /// while either percentile window has fewer than 5 in-window samples,
-    /// else `Healthy`. The detector never fires while this is not `Healthy`,
-    /// and this accessor makes the blocked state OBSERVABLE instead of
-    /// silent — a user can now see *why* a symbol is not producing hits.
+    /// Explicit quality per symbol (spec 054 REL-2/REL-27): `Missing` when
+    /// the symbol has never been observed, `InsufficientHistory` while either
+    /// percentile window has fewer than 5 in-window samples, else `Healthy`.
+    /// The detector never fires while this is not `Healthy`, and this
+    /// accessor makes the blocked state OBSERVABLE instead of silent — a
+    /// user can now see *why* a symbol is not producing hits.
     pub fn quality(&self, symbol: SymbolId, now_ns: i64) -> DataQualityState {
         let Some(state) = self.states.get(&symbol) else {
-            return DataQualityState::InsufficientHistory;
+            return DataQualityState::Missing;
         };
         let oi = state.oi_delta.percentile_in_window(now_ns, self.cfg.percentile_window_ns);
         let sf = state.smart_flow.percentile_in_window(now_ns, self.cfg.percentile_window_ns);

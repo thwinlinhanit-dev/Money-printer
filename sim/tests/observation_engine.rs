@@ -194,3 +194,116 @@ fn rel_10_golden_observation_hash_is_stable() {
     const GOLDEN: u64 = 18245435220829170398;
     assert_eq!(hash, GOLDEN, "golden observation hash changed");
 }
+
+/// Golden DIRTY fixture (REL-28): the observation engine driven through the
+/// quality-vocabulary's failure modes in a fixed order — insufficient
+/// history (cold start), a >staleness-window GAP, and a NaN (invalid) value
+/// — alongside a healthy segment. Asserts blocked fires are counted, non-
+/// Healthy observations never exist, and the whole state hash is stable.
+#[test]
+fn rel_28_golden_dirty_fixture_gaps_invalid_insufficient_history() {
+    use mp_features::data_quality::DataQualityState;
+    use mp_features::observation::ObservationEngine;
+    use mp_features::signal_identity::SignalResearchIdentity;
+    use mp_features::FeatureUpdate;
+    use std::collections::BTreeMap;
+
+    const HOUR: i64 = 3_600_000_000_000;
+    fn upd(sym: SymbolId, val: f64, ts: i64) -> FeatureUpdate {
+        FeatureUpdate {
+            symbol: sym,
+            feature: SymbolId(9),
+            name: "funding.rate".into(),
+            venue: Venue::Bybit,
+            value: val,
+            ts_ns: ts,
+            ver: 1,
+        }
+    }
+    let btc = SymbolId(0);
+    let mut e = ObservationEngine::with_default_quality(
+        SignalResearchIdentity::new("dirty_fixture", 1, "p", "c"),
+        T0,
+    );
+    let mut states: Vec<&'static str> = Vec::new();
+    let mut recorded: Vec<mp_features::SignalObservation> = Vec::new();
+    let mut blocked = 0u64;
+    let mut fire = |e: &mut ObservationEngine,
+                    states: &mut Vec<&'static str>,
+                    recorded: &mut Vec<_>,
+                    blocked: &mut u64,
+                    ts: i64| {
+        states.push(match e.quality(btc, ts) {
+            DataQualityState::Healthy => "Healthy",
+            DataQualityState::InsufficientHistory => "InsufficientHistory",
+            DataQualityState::Stale => "Stale",
+            DataQualityState::Invalid => "Invalid",
+            DataQualityState::Missing => "Missing",
+            DataQualityState::Gap => "Gap",
+        });
+        match e.record(
+            ts,
+            btc,
+            Venue::Bybit,
+            mp_features::observation::Direction::Long,
+            BTreeMap::from([("funding.rate".to_string(), 0.0001)]),
+        ) {
+            Some(o) => recorded.push(o),
+            None => *blocked += 1,
+        }
+    };
+
+    // 1. Cold start: 3 samples ⇒ InsufficientHistory ⇒ fire blocked.
+    for i in 0..3 {
+        e.on_feature_update(&upd(btc, 0.0001, T0 + i));
+    }
+    fire(&mut e, &mut states, &mut recorded, &mut blocked, T0 + 3);
+    // 2. Enough history ⇒ Healthy ⇒ recorded.
+    for i in 3..5 {
+        e.on_feature_update(&upd(btc, 0.0001, T0 + i));
+    }
+    fire(&mut e, &mut states, &mut recorded, &mut blocked, T0 + 5);
+    // 3. A 4-hour hole through the 1h staleness window ⇒ the resumption
+    //    sample flags a GAP ⇒ fire blocked.
+    e.on_feature_update(&upd(btc, 0.0001, T0 + 4 * HOUR));
+    fire(&mut e, &mut states, &mut recorded, &mut blocked, T0 + 4 * HOUR + 1);
+    // 4. min_samples fresh post-resumption observations heal the Gap ⇒
+    //    recorded again.
+    for i in 1..=5 {
+        e.on_feature_update(&upd(btc, 0.0001, T0 + 4 * HOUR + i));
+    }
+    fire(&mut e, &mut states, &mut recorded, &mut blocked, T0 + 4 * HOUR + 6);
+    // 5. A NaN poisons the stream ⇒ Invalid ⇒ fire blocked, forever.
+    e.on_feature_update(&upd(btc, f64::NAN, T0 + 4 * HOUR + 7));
+    fire(&mut e, &mut states, &mut recorded, &mut blocked, T0 + 4 * HOUR + 8);
+
+    // The dirty path is exactly as designed: two recorded observations,
+    // three blocked fires, and the state walk Missing→…→Gap→Invalid.
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(blocked, 3);
+    assert!(recorded
+        .iter()
+        .all(|o| o.quality == DataQualityState::Healthy));
+    assert_eq!(
+        states,
+        vec![
+            "InsufficientHistory",
+            "Healthy",
+            "Gap",
+            "Healthy",
+            "Invalid"
+        ]
+    );
+    // Frozen golden hash over the recorded observations + blocked count +
+    // state walk: any semantic change to the quality machinery shows here.
+    let artifact = serde_json::json!({
+        "recorded": recorded,
+        "blocked": blocked,
+        "states": states,
+    });
+    let hash = mp_core::fnv1a_64_str(&artifact.to_string());
+    // Frozen 2026-09-07 with the full 6-state quality vocabulary (Missing/Gap
+    // added): fixed dirty feed ⇒ this exact recorded-set + state-walk hash.
+    const GOLDEN_DIRTY: u64 = 17618162958652494096;
+    assert_eq!(hash, GOLDEN_DIRTY, "golden dirty-fixture hash changed");
+}

@@ -1,6 +1,7 @@
 # RESEARCH-LAB-HARDENING-PLAN
 
-**Status:** Implemented 2026-09-04 (Phases 0–6 complete; see
+**Status:** Implemented 2026-09-04 (Phases 0–6); Phase 7 anti-randomness
+gates re-audited and closed 2026-09-07 (§10; see
 `docs/research/RESEARCH-LAB-STATUS.md` and `specs/054` for the PASS/FAIL
 report).
 **Branch:** `feature/signal-catalog-footprint`
@@ -258,3 +259,29 @@ Nothing critically broken ⇒ proceed.
 7. `docs/research/RESEARCH-LAB-STATUS.md` created with PASS/FAIL per
    capability; `specs/054` + this plan updated in the same commits.
 8. Guardrails pass and a self-review is recorded before push.
+
+## 10. Re-audit against the 2026-09-07 anti-randomness task spec (Phase 7)
+
+The 2026-09-04 implementation satisfied spec 054 (REL-1..REL-23), but the
+target task spec is **stricter** in four confirmed places. Re-audit found:
+
+| # | Defect | Rule | Resolution |
+|---|---|---|---|
+| D15 | Sample sizing was a single binary gate (`DEFAULT_MIN_N`) — no tier vocabulary, so 30 samples could promote exactly like 3,000 | R-5 | `SampleTier { Insufficient, Preliminary, Research }` + `RESEARCH_MIN_N = 100`; promotion requires `Research`; `SAMPLE_TIER_PRELIMINARY` reject (`features/src/evaluation.rs`) |
+| D16 | No regime tagging — a signal that only works in one regime looked "generally effective" | R-6 | Regime buckets tagged from the fire snapshot's existing `regime.trend` feature (0.0=TREND/1.0=CHOP); `ONLY_WORKS_IN_*` refusal, `REGIME_COVERAGE_SINGLE_*` / `REGIME_SAMPLE_TOO_SMALL_*` flags (`REGIME_MIN_TAGGED = 10`) |
+| D17 | No decay detection — evidence never aged | R-7 | Chronological-window net expectancy (`DEFAULT_DECAY_WINDOWS = 3`, `DECAY_MIN_PER_WINDOW = 5`); two consecutive recent non-positive windows ⇒ `DECAY_SUSPECT` refusal |
+| D18 | Quality vocabulary had 4 states (Healthy/InsufficientHistory/Stale/Invalid); missing data was implicit and gaps were only staleness | R-1 | `DataQualityState` extended with `Missing` (never observed) and `Gap` (hole through the staleness window); screener/accumulation "never observed" ⇒ `Missing` (never neutral/0.5); gap heals only after fresh `min_samples` observations; Parquet store codes 4/5 with schema-version bump |
+| D19 | Golden fixtures covered only clean feeds — no fixture exercised gaps, invalid values, or insufficient history | Mandatory tests | `rel_28_golden_dirty_fixture_gaps_invalid_insufficient_history` (sim/tests): fixed dirty feed walks Missing→Insufficient→Healthy→Gap→Healthy→Invalid with a frozen FNV hash |
+
+Also closed against the task's structured-rejection format (R-8, kill-bias):
+all reject reasons carry machine-readable codes (`INSUFFICIENT_SAMPLE`,
+`SAMPLE_TIER_PRELIMINARY`, `NET_EXPECTANCY_NEGATIVE`, `NON_FINITE`,
+`DECAY_SUSPECT`, `ONLY_WORKS_IN_*`, …) and `PromotionDecision::to_json`
+emits `{"decision":"REJECT","reasons":["INSUFFICIENT_SAMPLE",…]}`.
+
+Spec 054 amended with REL-24..REL-29 (PD-6: spec before code). Tests:
+`rel_15/16/17/18/19` regression green, `rel_24` (tiers ×4), `rel_25`
+(regime refusals ×3 + flags), `rel_26` (decay windows), `rel_27`
+(Missing/Gap semantics ×4), `rel_28` (golden dirty fixture), `rel_29`
+(reason codes + JSON shape), `rel_24` per-horizon rollup; full workspace
+green including the unchanged sim decision-log golden hash.

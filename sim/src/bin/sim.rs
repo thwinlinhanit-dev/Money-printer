@@ -324,9 +324,10 @@ fn run() -> Result<ExitCode, String> {
                     let rep = mp_features::evaluate(bt.observations(), h, mp_features::DEFAULT_MIN_N);
                     let dec = mp_features::decide(&rep);
                     println!(
-                        "horizon {:>6}s: n={} gross_exp={:+.6} net_exp={:+.6} win={:.3} p25={:.4} p50={:.4} p75={:.4} | {}",
+                        "horizon {:>6}s: n={} tier={} gross_exp={:+.6} net_exp={:+.6} win={:.3} p25={:.4} p50={:.4} p75={:.4} | {}",
                         h / 1_000_000_000,
                         rep.n,
+                        rep.tier.label(),
                         rep.gross_expectancy,
                         rep.net_expectancy,
                         rep.win_rate,
@@ -339,6 +340,17 @@ fn run() -> Result<ExitCode, String> {
                             format!("GATE REFUSED — {}", dec.reasons.join("; "))
                         }
                     );
+                    // Phase 7 (REL-29): the machine-readable decision artifact
+                    // alongside the human line — same reasons, code-prefixed.
+                    println!("  decision: {}", dec.to_json());
+                    if !rep.regimes.is_empty() {
+                        for b in &rep.regimes {
+                            println!(
+                                "  regime {:>8}: n={:>4} net_exp={:+.6} win={:.3}",
+                                b.regime, b.n, b.net_expectancy, b.win_rate
+                            );
+                        }
+                    }
                 }
             }
             Ok(ExitCode::SUCCESS)
