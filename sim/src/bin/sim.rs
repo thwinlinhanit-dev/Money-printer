@@ -516,8 +516,11 @@ fn run() -> Result<ExitCode, String> {
                     .map_err(|e| format!("paper feed refused: {e}"))?;
                 let grew = session.consumed > before;
                 println!(
-                    "paper-tail poll {poll}: consumed={} dup={} idle={idle}",
-                    session.consumed, session.duplicates
+                    "paper-tail poll {poll}: consumed={} dup={} idle={idle} obs={} obs_blocked={}",
+                    session.consumed,
+                    session.duplicates,
+                    session.backtester().observations().len(),
+                    session.backtester().blocked_observations()
                 );
                 if grew {
                     idle = 0;

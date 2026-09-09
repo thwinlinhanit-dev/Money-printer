@@ -197,6 +197,19 @@ refuses promotion when its evidence is absent — never silently passes.
   backtest arm. `paper-tail` enables recording before the poll loop with
   `created_at` = the first frame's `recv_ts_ns` (deterministic per replay,
   PD-3). Run `config_text` records `observations=<bool>` for the tracker.
+- **2026-09-09, REL-30 tail-path incremental property:** `paper-tail` must
+  record observations INCREMENTALLY on a growing log, not only at close:
+  each poll re-reads the log, SIM-15 dedup consumes only new frames, and the
+  recorder accumulates mid-stream (the poll line prints `obs=` /
+  `obs_blocked=`). A non-growing log idles out with ZERO observations — a
+  tail that sees no data fabricates nothing (R-1). Regression
+  `rel_30_paper_tail_records_observations_incrementally` proves per-poll
+  growth, early-fire BLOCKING before sufficient history (R-1), and that the
+  tailed observation set + decision-log hash equal a one-shot replay of the
+  completed log. Live proof on a growing 20→30 MB slice: obs 0→9→139→146
+  mid-stream, session ends on idle, close attaches outcomes and refuses
+  honestly (SAMPLE_TIER_PRELIMINARY + NET_NEG + DECAY).
+
 - **2026-09-07, REL-31 relocation + conflict resolution:** the `footprint`
   study binary moves `features/src/bin` → `storage/src/bin` because
   `mp-storage` (which depends on `mp-features`, never the reverse) owns all

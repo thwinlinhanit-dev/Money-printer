@@ -111,4 +111,27 @@ Findings:
 - Artifacts: 3 new identity dirs, 41 new Parquet files. Both control tapes
   share ONE identity (`8e415159…`) — the fingerprint is tape-independent by
   design; date partitions separate the tapes and the W-6 guard accepted both
-  writes (no symbols_hash drift: same venue/symbol universe).
+  writes (no symbols_hash drift: same venue/symbol universe).## REL-30 incremental-tail live proof (2026-09-09)
+
+`paper-tail --params-hash` proven against a GROWING log slice (a real 20 MB
+`head` of the 4d tape grown to 30 MB by five 2 MB appends mid-run, 3s polls):
+
+- Poll-line observability added: `obs=<n> obs_blocked=<n>` now prints every
+  poll (read-only counters from the write-only recorder). Live trace shows
+  incremental recording mid-stream: `obs=0 → 9 → 139 → 146` as chunks landed,
+  with dedup consuming only new frames (`dup=` monotone).
+- Negative control (accidental, then kept): same command against a
+  non-growing log idles out after 5 polls with 0 observations, 0 Parquet, and
+  an honest `INSUFFICIENT_SAMPLE` refusal — a tail that sees no data
+  fabricates nothing.
+- Regression test `rel_30_paper_tail_records_observations_incrementally`:
+  observations grow strictly per poll while the log grows; fires before
+  sufficient history are BLOCKED not recorded (R-1 — the block count is
+  captured once and must never grow); the final tailed observation set is
+  EQUAL to a one-shot paper replay of the completed log, decision-log hash
+  included.
+-  Artifacts: `data/tail-rel30-live-negative-control.out`,
+  `data/tail-rel30-live2-incremental-proof.out`; runs journaled as
+  `tail-rel30-live{,2}`; observation Parquet under identity `9dc922a8…`.
+  The live close refused on three coded reasons (n=63 < Research floor,
+  NET_NEG, DECAY) — the tier gate visibly biting on a small live sample.

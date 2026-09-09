@@ -552,6 +552,116 @@ mod tests {
         assert!(tg_payload["decision_log_hash"].is_number());
     }
 
+    // REL-30 incremental-tail proof: recording over a GROWING log must turn
+    // each newly arrived fire into an observation per poll — the set grows
+    // monotonically across polls (write-only, mid-stream, before close), and
+    // the final tailed observation set must EQUAL a one-shot paper replay of
+    // the completed log (same identity, same stream → same observations).
+    #[test]
+    fn rel_30_paper_tail_records_observations_incrementally() {
+        let dir = std::env::temp_dir().join(format!("mp-rel30tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("live.log");
+
+        let mut syms = SymbolTable::new();
+        syms.intern(Venue::Bybit, "BTCUSDT", |id| {
+            mp_core::SymbolMeta::new(
+                id,
+                Venue::Bybit,
+                "BTCUSDT",
+                "BTC",
+                "USDT",
+                InstrumentKind::Perp,
+                0.1,
+                0.001,
+                5.0,
+            )
+        });
+        fn append_chunk(path: &Path, ids: std::ops::Range<u64>) {
+            let (mut w, truncated) = EventLogWriter::open(path).unwrap();
+            assert!(!truncated, "tail fixture log must not corrupt on reopen");
+            for i in ids {
+                let mut e = trade(
+                    (i as i64) * 1_000_000 + 1,
+                    100.0 + (i % 7) as f64,
+                    if i % 2 == 0 { Side::Buy } else { Side::Sell },
+                );
+                e = e.with_provenance(EventProvenance {
+                    stream: "trade".into(),
+                    subscription: "trade".into(),
+                    connection_id: 1,
+                    snapshot_source: SnapshotSource::None,
+                });
+                w.append(&e).unwrap();
+            }
+        }
+        let chunk = 20u64;
+        append_chunk(&log_path, 0..chunk);
+
+        fn read_log(path: &Path) -> Vec<EventEnvelope> {
+            let reader = LogReader::open(path).expect("open");
+            reader.map(|e| e.expect("read")).collect()
+        }
+
+        // Tail session with recording enabled BEFORE any batch (the binary's
+        // paper-tail contract); created_at = first already-present frame.
+        let initial = read_log(&log_path);
+        let created_at = initial.first().map(|e| e.recv_ts_ns).unwrap_or(0);
+        let mut bt = make_bt();
+        bt.enable_observations("rel30-tail-proof".into(), 1, created_at);
+        let mut tailed = PaperSession::new(bt);
+
+        tailed.push_batch(initial).unwrap();
+        let n1 = tailed.backtester().observations().len();
+        assert!(n1 > 0, "poll 1 must record observations mid-stream (write-only, before close)");
+        // R-1 in action: fires before the quality tracker has sufficient
+        // history are BLOCKED, never recorded. Capture that early-block
+        // count; it must never grow once history is sufficient.
+        let b1 = tailed.backtester().blocked_observations();
+        assert!(b1 > 0, "first-poll fires before sufficient history must be blocked (R-1)");
+
+        // Polls 2 and 3: the 'collector' appends fresh frames; the tail
+        // re-reads the whole log and consumes only the new tail.
+        for p in 0..2u64 {
+            append_chunk(&log_path, (chunk + p * chunk)..(chunk + (p + 1) * chunk));
+            tailed.push_batch(read_log(&log_path)).unwrap();
+            let n = tailed.backtester().observations().len();
+            assert!(
+                n > n1,
+                "observations must grow with the log (poll {}): {n} <= {n1}",
+                p + 2
+            );
+            assert_eq!(
+                tailed.backtester().blocked_observations(),
+                b1,
+                "no NEW blocks once history is sufficient (poll {})",
+                p + 2
+            );
+        }
+        assert_eq!(tailed.consumed, chunk * 3, "every frame consumed exactly once");
+        assert!(tailed.duplicates >= chunk * 3, "re-reads skipped as dups");
+        let tailed_obs = tailed.backtester().observations().to_vec();
+        let tailed_bt = tailed.close().unwrap();
+
+        // One-shot paper replay of the completed log, identical recorder
+        // setup: the tailed observation set must be IDENTICAL.
+        let mut bt2 = make_bt();
+        bt2.enable_observations("rel30-tail-proof".into(), 1, created_at);
+        let mut once = PaperSession::new(bt2);
+        once.push_batch(read_log(&log_path)).unwrap();
+        let once_obs = once.backtester().observations().to_vec();
+        assert_eq!(
+            tailed_obs, once_obs,
+            "incrementally-tailed observations must equal one-shot replay"
+        );
+        assert_eq!(
+            tailed_bt.decision_log().hash(),
+            once.close().unwrap().decision_log().hash(),
+            "decision-log equality still holds under recording (G3)"
+        );
+    }
+
     // PAP-8: paper-tail over a real event LOG — the live-tail contract
     // without a live VPS. The `sim paper-tail` loop re-reads the growing log
     // from the head each poll and hands the batch to PaperSession, which skips
