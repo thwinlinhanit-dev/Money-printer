@@ -8,8 +8,9 @@
 
 use mp_core::EventEnvelope;
 use mp_strategies::{
-    CarryConfig, CarryV1, CoinFlipStrategy, LiqFadeConfig, LiqFadeV1, NullStrategy,
-    OrderflowConfig, OrderflowV1, Strategy, Universe,
+    CarryConfig, CarryV1, CoinFlipAnyStrategy, CoinFlipStrategy, LiqFadeConfig, LiqFadeV1,
+    NullStrategy, OrderflowConfig, OrderflowV1, RangeReclaimConfig, Strategy,
+    SwingRangeReclaimV1, Universe,
 };
 
 /// Universe derived from the events a run will replay — venues + symbols seen
@@ -45,6 +46,9 @@ pub fn strategy_named(
 ) -> Result<Box<dyn Strategy>, String> {
     match name {
         "coinflip" => Ok(Box::new(CoinFlipStrategy::new())),
+        // REL-32 venue-generic noise control: fires on any venue's cvd.* at a
+        // sampled rate — the R-8 "must be rejected" baseline.
+        "coinflip-any" => Ok(Box::new(CoinFlipAnyStrategy::new())),
         "null" => Ok(Box::new(NullStrategy)),
         "carry-v1" => {
             let uni = universe_from_events(events);
@@ -96,8 +100,22 @@ pub fn strategy_named(
                 cfg,
             )))
         }
+        // swing-range-reclaim-v1 (spec 036, the registered paper strategy -
+        // spec 051): multi-hour horizon, volume-profile sweep-reclaim. Added
+        // 2026-09-06 - the resolver omitted it, so the daily paper rehearsal
+        // (which defaults to this strategy) faulted with "unknown strategy"
+        // and the pipeline WARNed every day. entry/exit thresholds are not
+        // wired (the strategy has no CLI overrides today).
+        "swing-range-reclaim-v1" => {
+            let uni = universe_from_events(events);
+            Ok(Box::new(SwingRangeReclaimV1::new(
+                mp_core::StrategyId::new("swing-range-reclaim-v1"),
+                uni,
+                RangeReclaimConfig::default(),
+            )))
+        }
         other => Err(format!(
-            "unknown strategy: {other} (coinflip|null|carry-v1|orderflow-v1|liq-fade-v1)"
+            "unknown strategy: {other} (coinflip|coinflip-any|null|carry-v1|orderflow-v1|liq-fade-v1|swing-range-reclaim-v1)"
         )),
     }
 }

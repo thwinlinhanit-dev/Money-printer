@@ -1,0 +1,115 @@
+### PANEL START 2026-09-09T12:30:58Z
+   Compiling mp-sim v0.1.0 (C:\Users\thwin\Desktop\Money-printer-claude-trading-research-intelligence-4tzim4\Money-printer-claude-trading-research-intelligence-4tzim4\sim)
+    Finished `release` profile [optimized] target(s) in 1m 09s
+### BUILD OK 2026-09-09T12:32:13Z
+==================================================
+### RUN strategy=coinflip-any run_id=eval-20260909-control-swing log=swing_hyperliquid_BTC.log START 2026-09-09T12:32:13Z
+run eval-20260909-control-swing: trades=1909 expectancy=-41.536302 stress2x=-49.610917 maxDD=949663.84 log_hash=1813396068331717721
+observations: 23570 recorded, 2 blocked (quality gate), 13 parquet file(s) in data/observations
+horizon    900s: n=23055 tier=RESEARCH gross_exp=-0.000026 net_exp=-0.000776 win=0.491 p25=-0.0015 p50=-0.0008 p75=0.0000 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000776 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000776 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime     CHOP: n=9112 net_exp=-0.000741 win=0.491
+  regime    TREND: n=13942 net_exp=-0.000799 win=0.491
+horizon   3600s: n=22956 tier=RESEARCH gross_exp=-0.000030 net_exp=-0.000780 win=0.504 p25=-0.0023 p50=-0.0007 p75=0.0008 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000780 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000780 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime     CHOP: n=9074 net_exp=-0.000729 win=0.507
+  regime    TREND: n=13881 net_exp=-0.000814 win=0.502
+horizon  14400s: n=21688 tier=RESEARCH gross_exp=-0.000027 net_exp=-0.000777 win=0.505 p25=-0.0034 p50=-0.0007 p75=0.0020 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000777 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000777 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime     CHOP: n=8752 net_exp=-0.000905 win=0.501
+  regime    TREND: n=12935 net_exp=-0.000690 win=0.507
+horizon  86400s: n=17233 tier=RESEARCH gross_exp=-0.000179 net_exp=-0.000929 win=0.498 p25=-0.0055 p50=-0.0008 p75=0.0038 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000929 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000929 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime     CHOP: n=7375 net_exp=-0.001007 win=0.490
+  regime    TREND: n=9857 net_exp=-0.000870 win=0.503
+### RUN eval-20260909-control-swing EXIT=0 END 2026-09-09T12:47:37Z
+==================================================
+### RUN strategy=carry-v1 run_id=eval-20260909-carry-swing log=swing_hyperliquid_BTC.log START 2026-09-09T12:47:37Z
+run eval-20260909-carry-swing: trades=12006 expectancy=-8.081587 stress2x=-19.010083 maxDD=104031.00 log_hash=11218419299538087852
+observations: 19208 recorded, 0 blocked (quality gate), 12 parquet file(s) in data/observations
+horizon    900s: n=19208 tier=RESEARCH gross_exp=-0.000028 net_exp=-0.000778 win=0.484 p25=-0.0011 p50=-0.0008 p75=-0.0004 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000778 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000778 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime    TREND: n=7234 net_exp=-0.000799 win=0.488
+  regime     CHOP: n=11974 net_exp=-0.000765 win=0.482
+horizon   3600s: n=19208 tier=RESEARCH gross_exp=-0.000104 net_exp=-0.000854 win=0.486 p25=-0.0016 p50=-0.0008 p75=0.0000 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000854 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000854 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime    TREND: n=7234 net_exp=-0.000942 win=0.483
+  regime     CHOP: n=11974 net_exp=-0.000801 win=0.488
+horizon  14400s: n=19161 tier=RESEARCH gross_exp=-0.000389 net_exp=-0.001139 win=0.485 p25=-0.0027 p50=-0.0008 p75=0.0010 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.001139 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.001139 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime    TREND: n=7197 net_exp=-0.001244 win=0.481
+  regime     CHOP: n=11964 net_exp=-0.001077 win=0.488
+horizon  86400s: n=18516 tier=RESEARCH gross_exp=+0.000194 net_exp=-0.000556 win=0.524 p25=-0.0044 p50=-0.0002 p75=0.0034 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000556 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000556 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime    TREND: n=6828 net_exp=-0.000653 win=0.526
+  regime     CHOP: n=11688 net_exp=-0.000500 win=0.523
+### RUN eval-20260909-carry-swing EXIT=0 END 2026-09-09T12:59:42Z
+==================================================
+### RUN strategy=orderflow-v1 run_id=eval-20260909-orderflow-swing log=swing_hyperliquid_BTC.log START 2026-09-09T12:59:42Z
+run eval-20260909-orderflow-swing: trades=8173 expectancy=-11.972685 stress2x=-17.459196 maxDD=230873.39 log_hash=10347852523125460287
+observations: 1576 recorded, 0 blocked (quality gate), 12 parquet file(s) in data/observations
+horizon    900s: n=1571 tier=RESEARCH gross_exp=+0.000538 net_exp=-0.000212 win=0.553 p25=-0.0015 p50=-0.0006 p75=0.0005 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000212 ≤ 0 (REL-16)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000212 ≤ 0 (REL-16)"]}
+  regime    TREND: n=1072 net_exp=-0.000288 win=0.556
+  regime     CHOP: n= 499 net_exp=-0.000050 win=0.545
+horizon   3600s: n=1543 tier=RESEARCH gross_exp=+0.001031 net_exp=+0.000281 win=0.538 p25=-0.0026 p50=-0.0005 p75=0.0016 | GATE PASS — gate passed at horizon 3600s: n=1543, tier=RESEARCH, net_expectancy=0.000281, win_rate=0.538
+  decision: {"decision":"PROMOTE","reasons":["gate passed at horizon 3600s: n=1543, tier=RESEARCH, net_expectancy=0.000281, win_rate=0.538"]}
+  regime    TREND: n=1056 net_exp=+0.000228 win=0.547
+  regime     CHOP: n= 487 net_exp=+0.000396 win=0.517
+horizon  14400s: n=1426 tier=RESEARCH gross_exp=+0.001316 net_exp=+0.000566 win=0.517 p25=-0.0041 p50=-0.0005 p75=0.0032 | GATE PASS — gate passed at horizon 14400s: n=1426, tier=RESEARCH, net_expectancy=0.000566, win_rate=0.517
+  decision: {"decision":"PROMOTE","reasons":["gate passed at horizon 14400s: n=1426, tier=RESEARCH, net_expectancy=0.000566, win_rate=0.517"]}
+  regime    TREND: n= 978 net_exp=+0.000589 win=0.527
+  regime     CHOP: n= 448 net_exp=+0.000517 win=0.496
+horizon  86400s: n=1158 tier=RESEARCH gross_exp=-0.000534 net_exp=-0.001284 win=0.476 p25=-0.0070 p50=-0.0012 p75=0.0051 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.001284 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.001284 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime    TREND: n= 812 net_exp=-0.001256 win=0.482
+  regime     CHOP: n= 346 net_exp=-0.001348 win=0.462
+### RUN eval-20260909-orderflow-swing EXIT=0 END 2026-09-09T13:00:50Z
+==================================================
+### RUN strategy=liq-fade-v1 run_id=eval-20260909-liqfade-swing log=swing_hyperliquid_BTC.log START 2026-09-09T13:00:50Z
+run eval-20260909-liqfade-swing: trades=0 expectancy=+0.000000 stress2x=+0.000000 maxDD=0.00 log_hash=17358356865834976939
+observations: 0 recorded, 0 blocked (quality gate), 0 parquet file(s) in data/observations
+horizon    900s: n=0 tier=INSUFFICIENT gross_exp=+0.000000 net_exp=+0.000000 win=0.000 p25=0.0000 p50=0.0000 p75=0.0000 | GATE REFUSED — INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)
+  decision: {"decision":"REJECT","reasons":["INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)"]}
+horizon   3600s: n=0 tier=INSUFFICIENT gross_exp=+0.000000 net_exp=+0.000000 win=0.000 p25=0.0000 p50=0.0000 p75=0.0000 | GATE REFUSED — INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)
+  decision: {"decision":"REJECT","reasons":["INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)"]}
+horizon  14400s: n=0 tier=INSUFFICIENT gross_exp=+0.000000 net_exp=+0.000000 win=0.000 p25=0.0000 p50=0.0000 p75=0.0000 | GATE REFUSED — INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)
+  decision: {"decision":"REJECT","reasons":["INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)"]}
+horizon  86400s: n=0 tier=INSUFFICIENT gross_exp=+0.000000 net_exp=+0.000000 win=0.000 p25=0.0000 p50=0.0000 p75=0.0000 | GATE REFUSED — INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)
+  decision: {"decision":"REJECT","reasons":["INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)"]}
+### RUN eval-20260909-liqfade-swing EXIT=0 END 2026-09-09T13:01:03Z
+==================================================
+### RUN strategy=swing-range-reclaim-v1 run_id=eval-20260909-swingreclaim-swing log=swing_hyperliquid_BTC.log START 2026-09-09T13:01:03Z
+run eval-20260909-swingreclaim-swing: trades=0 expectancy=+0.000000 stress2x=+0.000000 maxDD=0.00 log_hash=17358356865834976939
+observations: 0 recorded, 0 blocked (quality gate), 0 parquet file(s) in data/observations
+horizon    900s: n=0 tier=INSUFFICIENT gross_exp=+0.000000 net_exp=+0.000000 win=0.000 p25=0.0000 p50=0.0000 p75=0.0000 | GATE REFUSED — INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)
+  decision: {"decision":"REJECT","reasons":["INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)"]}
+horizon   3600s: n=0 tier=INSUFFICIENT gross_exp=+0.000000 net_exp=+0.000000 win=0.000 p25=0.0000 p50=0.0000 p75=0.0000 | GATE REFUSED — INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)
+  decision: {"decision":"REJECT","reasons":["INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)"]}
+horizon  14400s: n=0 tier=INSUFFICIENT gross_exp=+0.000000 net_exp=+0.000000 win=0.000 p25=0.0000 p50=0.0000 p75=0.0000 | GATE REFUSED — INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)
+  decision: {"decision":"REJECT","reasons":["INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)"]}
+horizon  86400s: n=0 tier=INSUFFICIENT gross_exp=+0.000000 net_exp=+0.000000 win=0.000 p25=0.0000 p50=0.0000 p75=0.0000 | GATE REFUSED — INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)
+  decision: {"decision":"REJECT","reasons":["INSUFFICIENT_SAMPLE: 0 closed outcomes < required 30 (REL-15 sample-size gate)"]}
+### RUN eval-20260909-swingreclaim-swing EXIT=0 END 2026-09-09T13:01:15Z
+==================================================
+### RUN strategy=coinflip-any run_id=eval-20260909-control-4d-rerun log=merged_hyperliquid_BTC_4d.log START 2026-09-09T13:01:16Z
+run eval-20260909-control-4d-rerun: trades=136277 expectancy=+26.425674 stress2x=+11.988815 maxDD=1989640.66 log_hash=13173006222044710437
+observations: 17517 recorded, 0 blocked (quality gate), 4 parquet file(s) in data/observations
+horizon    900s: n=17457 tier=RESEARCH gross_exp=+0.000019 net_exp=-0.000731 win=0.502 p25=-0.0023 p50=-0.0007 p75=0.0009 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000731 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000731 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime    TREND: n=12509 net_exp=-0.000722 win=0.501
+  regime     CHOP: n=4946 net_exp=-0.000750 win=0.504
+horizon   3600s: n=17354 tier=RESEARCH gross_exp=+0.000044 net_exp=-0.000706 win=0.503 p25=-0.0035 p50=-0.0007 p75=0.0020 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000706 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000706 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime    TREND: n=12433 net_exp=-0.000676 win=0.505
+  regime     CHOP: n=4919 net_exp=-0.000781 win=0.497
+horizon  14400s: n=16647 tier=RESEARCH gross_exp=+0.000016 net_exp=-0.000734 win=0.500 p25=-0.0058 p50=-0.0007 p75=0.0043 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000734 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000734 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime    TREND: n=11920 net_exp=-0.000708 win=0.499
+  regime     CHOP: n=4725 net_exp=-0.000800 win=0.504
+horizon  86400s: n=12543 tier=RESEARCH gross_exp=-0.000218 net_exp=-0.000968 win=0.494 p25=-0.0104 p50=-0.0009 p75=0.0084 | GATE REFUSED — NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000968 ≤ 0 (REL-16); DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)
+  decision: {"decision":"REJECT","reasons":["NET_EXPECTANCY_NEGATIVE: no positive net edge after costs — net expectancy -0.000968 ≤ 0 (REL-16)","DECAY_SUSPECT: the two most recent windows have non-positive net expectancy — sustained underperformance forces a retest (REL-26/R-7)"]}
+  regime    TREND: n=8968 net_exp=-0.000866 win=0.497
+  regime     CHOP: n=3573 net_exp=-0.001215 win=0.488
+### RUN eval-20260909-control-4d-rerun EXIT=0 END 2026-09-09T13:08:17Z
+### PANEL DONE 2026-09-09T13:08:17Z

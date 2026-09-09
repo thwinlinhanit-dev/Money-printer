@@ -151,6 +151,24 @@ refuses promotion when its evidence is absent — never silently passes.
   `NET_EXPECTANCY_NEGATIVE`, `DECAY_SUSPECT`, `ONLY_WORKS_IN_*`,
   `REGIME_SAMPLE_TOO_SMALL_*`, `REGIME_COVERAGE_SINGLE_*`, `NON_FINITE` —
   matching the task's structured decision format.
+- **REL-30** — Paper-mode observation recording: the paper path (`sim paper`,
+  `sim paper-tail`) exposes the SAME write-only `ObservationRecorder` the
+  backtest path uses — `--params-hash` enables, `--obs-dir` persists Parquet,
+  `--horizons` configures post-close outcome attachment. Recording is
+  observational only: it must never perturb the decision path (the batched
+  paper stream hash with recording on equals the hash with it off — G3/SIM-15
+  holds), outcomes attach only after `close()` from the recorded mark  series (open windows stay empty, REL-14), and identities are stamped exactly as
+  in backtest. Live trading remains disabled (PD-1).
+- **REL-31** — Hit-journal migration: the legacy JSONL forward-return
+  backfill (spec 017 GRD-2/GRD-4, gross-only, no identity) is retired as a
+  RESEARCH artifact. `ScreenerHit`s gain a bridge onto the identity-stamped
+  observation flow: each hit becomes a `SignalObservation` (params-hash
+  identity, `regime.trend`-style snapshot passthrough, per-hit direction
+  default Long) whose outcomes (gross AND net, MFE/MAE) come from the Phase-4
+  outcome engine and persist as Parquet. The JSONL hit journal remains the
+  WRITE-side fire log (append-only, W-6), but grading/evaluation reads the
+  observation store. Legacy `HitRecord` JSONL keeps loading (serde defaults)
+  so historical files never break; new backfill JSONL is no longer produced.
 
 ## Storage
 
@@ -173,6 +191,48 @@ refuses promotion when its evidence is absent — never silently passes.
   treated n=30 as promotable; the task's R-5 makes Research (≥100) the
   promotion floor. Tests `rel_15/18/19` were STRENGTHENED to the stricter
   gate (a tightening, never a loosening — PD-5).
+- **2026-09-07, REL-30 paper wiring:** the flag rides the existing
+  `Backtester::enable_observations` + `PaperSession` — no new recorder code
+  path; the binary extracts the research-report printer shared with the
+  backtest arm. `paper-tail` enables recording before the poll loop with
+  `created_at` = the first frame's `recv_ts_ns` (deterministic per replay,
+  PD-3). Run `config_text` records `observations=<bool>` for the tracker.
+- **2026-09-07, REL-31 relocation + conflict resolution:** the `footprint`
+  study binary moves `features/src/bin` → `storage/src/bin` because
+  `mp-storage` (which depends on `mp-features`, never the reverse) owns all
+  Parquet writes — no dependency cycle. ENTRY-CONVENTION conflict: spec 017
+  GRD-4 enters on the first trade STRICTLY AFTER the hit (execution-shaped:
+  you cannot fill on your own trigger tick), while REL-14's outcome engine
+  enters on the last mark at-or-before the fire time (measurement-shaped:
+  the mark the signal could see). The observation flow's convention governs
+  research artifacts (tested, used by sim/evaluation); GRD-4 remains binding
+  for execution/fill studies. Direction: a screener hit carries no side, so
+  the bridge defaults `Direction::Long` and the identity's params-hash must
+  disclose it (documented, never hidden).
+- **2026-09-07, REL-25 fire-context capture:** the sim `ObservationRecorder`
+  captures the last-seen FINITE `regime.trend` value per symbol from the
+  feature stream and enriches every fire snapshot (write-only side state;
+  the triggering update wins when it IS the regime feature). The sim binary
+  registers `TrendRegime` (lookback 20 / threshold 0.25 — the materialized
+  swing defaults) on the engine's bar stream so research runs carry regime
+  context; TEST engines do not register it, so the golden decision-log
+  hashes are unaffected. Re-registered research runs produce NEW hashes by
+  design — the feature stream grew; re-run ids carry an `-r2` suffix. A
+  regime-void fire (feature never seen for that symbol) carries NO tag, and
+  the R-6 gate stays silent rather than inventing regimes (R-1). First real
+  result: no `ONLY_WORKS_IN_*` fired because NO regime is net-positive
+  (carry negative in both regimes; orderflow's gross edge concentrates in
+  TREND — win 0.534 vs 0.498 — but net-negative in both).
+- **REL-32** — Venue-generic noise control: `coinflip-any` — a coinflip
+  variant whose subscription matches ANY `cvd.{venue}` feature (the engine's
+  per-venue CVD family exists for every venue with trades), fires on a
+  seeded-rate SAMPLE of qualifying updates (fires/second is a parameter,
+  default 1/100 updates so a 4-day tape yields thousands of fires without
+  drowning the gate), with direction from the same seeded `ctx.next_u64()`
+  (CONV-11: seeded, deterministic, edge-free). Purpose: the R-8 control —
+  a strategy that MUST be rejected at every horizon; a pipeline that lets
+  it pass is broken. Legacy `coinflip` (fixed `cvd.bybit` subscription,
+  fire-on-every-update) is unchanged for golden-test stability.
 
 ## Out of scope (explicitly deferred)
 

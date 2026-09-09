@@ -15,7 +15,7 @@ pub mod strategy;
 pub mod swing_range_reclaim_v1;
 
 pub use carry_v1::{CarryConfig, CarryV1};
-pub use examples::{CoinFlipStrategy, NullStrategy};
+pub use examples::{CoinFlipAnyStrategy, CoinFlipStrategy, NullStrategy};
 pub use funnel::{
     Actor, Autopsy, EvidenceRef, FunnelError, FunnelState, Stage, Transition, EVIDENCE_MAX_AGE_NS,
 };

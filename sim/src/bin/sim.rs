@@ -30,6 +30,7 @@ use mp_features::catalog::{
 };
 use mp_features::FeatureEngine;
 use mp_features::LiqDelta;
+use mp_features::oi_regime::TrendRegime;
 use mp_sim::{
     bars_per_year as mp_bars_per_year, monte_carlo, plateau_ok, strategy_named, Backtester,
     MetricsSummary, PaperSession, RunRecord, SimConfig, WalkForwardParams, WindowResult,
@@ -94,6 +95,16 @@ fn engine() -> FeatureEngine {
             Venue::BinanceFutures,
         ))
     });
+    // REL-25/R-6 fire context: the trend-regime bar feature rides the sim
+    // engine's bar stream so every fire snapshot can carry the last-seen
+    // regime value (regime_last in the recorder — write-only). Lookback 20 /
+    // threshold 0.25 = the materialized swing defaults (OiRegimeConfig).
+    // Bar tf = the engine's own tf (1s): the efficiency ratio then covers
+    // ~20s of tape — coarse but honest regime context for research runs.
+    // Registered for the recorder's benefit only; it never affects dispatch
+    // (no sim strategy subscribes to `regime.trend`).
+    let (trend_lookback, trend_threshold) = (20usize, 0.25f64);
+    e.register_bar(move || Box::new(TrendRegime::new(trend_lookback, trend_threshold)));
     e
 }
 
@@ -216,18 +227,29 @@ fn run_paper(
     strategy: &str,
     seed: u64,
     chunk: usize,
+    obs_params_hash: Option<&str>,
 ) -> Result<Backtester, String> {
     let cfg = SimConfig {
         min_coverage: 1.0,
         bar_tf_ns: 1_000_000,
         ..SimConfig::default()
     };
-    let bt = Backtester::new(
+    let mut bt = Backtester::new(
         engine(),
         strategy_named(strategy, events, None, None)?,
         cfg,
         seed,
     );
+    // Research-lab observation recording (spec 054 REL-30): enabled BEFORE
+    // the feed — the SAME write-only recorder the backtest arm uses
+    // (Backtester::enable_observations); created_at is the first frame's
+    // recv (deterministic per replay, PD-3). Recording never perturbs the
+    // decision path — the batched paper stream hash with recording on equals
+    // the hash with it off (SIM-15/G3 holds).
+    if let Some(ph) = obs_params_hash {
+        let created_at = events.first().map(|e| e.recv_ts_ns).unwrap_or(0);
+        bt.enable_observations(ph.to_string(), 1, created_at);
+    }
     let mut session = PaperSession::new(bt);
     for batch in events.chunks(chunk.max(1)) {
         session
@@ -237,6 +259,70 @@ fn run_paper(
     session
         .close()
         .map_err(|e| format!("paper close refused: {e}"))
+}
+
+/// Research evaluation (spec 054 REL-12..19 + REL-30): attach forward
+/// outcomes POST-run, optionally persist Parquet, and print per-horizon
+/// reports. Shared verbatim by the backtest, paper, and paper-tail arms —
+/// one report machinery on every path (no divergent formats).
+fn print_research_reports(
+    bt: &mut Backtester,
+    horizons: &[i64],
+    obs_dir: Option<&str>,
+) -> Result<(), String> {
+    bt.attach_outcomes(horizons);
+    if let Some(dir) = obs_dir {
+        let paths = mp_storage::observation_store::partitioned_write(
+            std::path::Path::new(dir),
+            bt.observations(),
+        )
+        .map_err(|e| format!("observation write: {e}"))?;
+        println!(
+            "observations: {} recorded, {} blocked (quality gate), {} parquet file(s) in {dir}",
+            bt.observations().len(),
+            bt.blocked_observations(),
+            paths.len()
+        );
+    } else {
+        println!(
+            "observations: {} recorded, {} blocked (quality gate)",
+            bt.observations().len(),
+            bt.blocked_observations()
+        );
+    }
+    for &h in horizons {
+        let rep = mp_features::evaluate(bt.observations(), h, mp_features::DEFAULT_MIN_N);
+        let dec = mp_features::decide(&rep);
+        println!(
+            "horizon {:>6}s: n={} tier={} gross_exp={:+.6} net_exp={:+.6} win={:.3} p25={:.4} p50={:.4} p75={:.4} | {}",
+            h / 1_000_000_000,
+            rep.n,
+            rep.tier.label(),
+            rep.gross_expectancy,
+            rep.net_expectancy,
+            rep.win_rate,
+            rep.p25,
+            rep.p50,
+            rep.p75,
+            if rep.gate_passed {
+                format!("GATE PASS — {}", dec.reasons.join("; "))
+            } else {
+                format!("GATE REFUSED — {}", dec.reasons.join("; "))
+            }
+        );
+        // Phase 7 (REL-29): the machine-readable decision artifact
+        // alongside the human line — same reasons, code-prefixed.
+        println!("  decision: {}", dec.to_json());
+        if !rep.regimes.is_empty() {
+            for b in &rep.regimes {
+                println!(
+                    "  regime {:>8}: n={:>4} net_exp={:+.6} win={:.3}",
+                    b.regime, b.n, b.net_expectancy, b.win_rate
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run() -> Result<ExitCode, String> {
@@ -300,58 +386,7 @@ fn run() -> Result<ExitCode, String> {
             // Research evaluation (spec 054 REL-12..19): attach outcomes,
             // optionally persist to Parquet, and print per-horizon reports.
             if obs_params_hash.is_some() {
-                bt.attach_outcomes(&horizons);
-                if let Some(dir) = &obs_dir {
-                    let paths = mp_storage::observation_store::partitioned_write(
-                        std::path::Path::new(dir),
-                        bt.observations(),
-                    )
-                    .map_err(|e| format!("observation write: {e}"))?;
-                    println!(
-                        "observations: {} recorded, {} blocked (quality gate), {} parquet file(s) in {dir}",
-                        bt.observations().len(),
-                        bt.blocked_observations(),
-                        paths.len()
-                    );
-                } else {
-                    println!(
-                        "observations: {} recorded, {} blocked (quality gate)",
-                        bt.observations().len(),
-                        bt.blocked_observations()
-                    );
-                }
-                for &h in &horizons {
-                    let rep = mp_features::evaluate(bt.observations(), h, mp_features::DEFAULT_MIN_N);
-                    let dec = mp_features::decide(&rep);
-                    println!(
-                        "horizon {:>6}s: n={} tier={} gross_exp={:+.6} net_exp={:+.6} win={:.3} p25={:.4} p50={:.4} p75={:.4} | {}",
-                        h / 1_000_000_000,
-                        rep.n,
-                        rep.tier.label(),
-                        rep.gross_expectancy,
-                        rep.net_expectancy,
-                        rep.win_rate,
-                        rep.p25,
-                        rep.p50,
-                        rep.p75,
-                        if rep.gate_passed {
-                            format!("GATE PASS — {}", dec.reasons.join("; "))
-                        } else {
-                            format!("GATE REFUSED — {}", dec.reasons.join("; "))
-                        }
-                    );
-                    // Phase 7 (REL-29): the machine-readable decision artifact
-                    // alongside the human line — same reasons, code-prefixed.
-                    println!("  decision: {}", dec.to_json());
-                    if !rep.regimes.is_empty() {
-                        for b in &rep.regimes {
-                            println!(
-                                "  regime {:>8}: n={:>4} net_exp={:+.6} win={:.3}",
-                                b.regime, b.n, b.net_expectancy, b.win_rate
-                            );
-                        }
-                    }
-                }
+                print_research_reports(&mut bt, &horizons, obs_dir.as_deref())?;
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -374,13 +409,32 @@ fn run() -> Result<ExitCode, String> {
             } else {
                 strategy.as_str()
             };
-            let bt = run_paper(&events, effective_strategy, seed, chunk)?;
+            let obs_params_hash = flag(rest, "--params-hash");
+            let obs_dir = flag(rest, "--obs-dir");
+            let horizons = flag(rest, "--horizons")
+                .map(|s| parse_horizons(&s))
+                .transpose()?
+                .unwrap_or_else(default_horizons);
+            // REL-30: --params-hash enables the same write-only observation
+            // recorder as backtest (see run_paper); --obs-dir persists Parquet
+            // and the per-horizon reports print after record_run.
+            let mut bt = run_paper(
+                &events,
+                effective_strategy,
+                seed,
+                chunk,
+                obs_params_hash.as_deref(),
+            )?;
+            let obs_flag = obs_params_hash.is_some();
             let config_text = if flag(rest, "--zero-intents").is_some() {
-                format!("paper;strategy={strategy};seed={seed};chunk={chunk};zero_intents=true")
+                format!("paper;strategy={strategy};seed={seed};chunk={chunk};zero_intents=true;observations={obs_flag}")
             } else {
-                format!("paper;strategy={strategy};seed={seed};chunk={chunk}")
+                format!("paper;strategy={strategy};seed={seed};chunk={chunk};observations={obs_flag}")
             };
             record_run(&runs_dir, &run_id, &git_sha, &config_text, &bt, &events)?;
+            if obs_params_hash.is_some() {
+                print_research_reports(&mut bt, &horizons, obs_dir.as_deref())?;
+            }
             Ok(ExitCode::SUCCESS)
         }
         "paper-tail" => {
@@ -414,17 +468,31 @@ fn run() -> Result<ExitCode, String> {
             // seed the session; the close path re-reads it for `record_run`, so
             // today's tail is not extra I/O beyond what the CLI already does.
             let initial = read_log(&log)?;
+            // REL-30: paper-tail exposes the same write-only recorder —
+            // enabled BEFORE the poll loop, created_at = the first already-
+            // present frame (deterministic per replay, PD-3).
+            let obs_params_hash = flag(rest, "--params-hash");
+            let obs_dir = flag(rest, "--obs-dir");
+            let horizons = flag(rest, "--horizons")
+                .map(|s| parse_horizons(&s))
+                .transpose()?
+                .unwrap_or_else(default_horizons);
             let cfg = SimConfig {
                 min_coverage: 1.0,
                 bar_tf_ns: 1_000_000,
                 ..SimConfig::default()
             };
-            let mut session = PaperSession::new(Backtester::new(
+            let mut bt = Backtester::new(
                 engine(),
                 strategy_named(&strategy, &initial, None, None)?,
                 cfg,
                 seed,
-            ));
+            );
+            if let Some(ph) = &obs_params_hash {
+                let created_at = initial.first().map(|e| e.recv_ts_ns).unwrap_or(0);
+                bt.enable_observations(ph.clone(), 1, created_at);
+            }
+            let mut session = PaperSession::new(bt);
             // Seed the session with the already-present frames; subsequent
             // polls re-read the whole log and dedup on the merge key (SIM-15),
             // so seeding here is idempotent with the tail loop below.
@@ -469,9 +537,16 @@ fn run() -> Result<ExitCode, String> {
                 .map_err(|e| format!("paper close refused (SIM-4): {e}"))?;
             let events = read_log(&log)?;
             let config_text = format!(
-                "paper-tail;strategy={strategy};seed={seed};poll_ms={poll_ms};idle={max_idle_polls}"
+                "paper-tail;strategy={strategy};seed={seed};poll_ms={poll_ms};idle={max_idle_polls};observations={}",
+                obs_params_hash.is_some()
             );
             record_run(&runs_dir, &run_id, &git_sha, &config_text, &bt, &events)?;
+            // REL-30: outcomes attach AFTER close from the recorded mark
+            // series only; the reports are the same machinery as backtest.
+            if obs_params_hash.is_some() {
+                let mut bt = bt;
+                print_research_reports(&mut bt, &horizons, obs_dir.as_deref())?;
+            }
             Ok(ExitCode::SUCCESS)
         }
         "wf" => {

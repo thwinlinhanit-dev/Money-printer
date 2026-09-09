@@ -6,7 +6,7 @@
 
 use crate::data_quality::DataQualityState;
 use crate::engine::FeatureUpdate;
-use mp_core::SymbolId;
+use mp_core::{SymbolId, Venue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -57,6 +57,11 @@ pub struct ScreenerHit {
     /// pre-hardening journal lines parseable: they decode as `Healthy`.
     #[serde(default)]
     pub quality: DataQualityState,
+    /// Venue the firing update arrived on (spec 054 REL-31: observations must
+    /// stamp venue). `None` only in records written before this field existed;
+    /// the observation bridge REFUSES venue-less hits (R-1: never imputed).
+    #[serde(default)]
+    pub venue: Option<Venue>,
 }
 
 /// Kind of screener hit (entry vs exit).
@@ -169,6 +174,7 @@ impl Screener {
                     ts_ns: u.ts_ns,
                     snapshot: snap.clone(),
                     quality: DataQualityState::Healthy,
+                    venue: Some(u.venue),
                 });
             } else if !satisfied && was {
                 // Exit transition (active → inactive) — spec 022 exit hits
@@ -178,6 +184,7 @@ impl Screener {
                     ts_ns: u.ts_ns,
                     snapshot: snap.clone(),
                     quality: DataQualityState::Healthy,
+                    venue: Some(u.venue),
                 });
             }
             self.active.insert(key, satisfied);

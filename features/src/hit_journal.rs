@@ -5,13 +5,20 @@
 //! at the binary edge pass `&WallClock`, in tests/replay pass a fixed
 //! `SimClock` (PD-3/CONV-5).
 
+use crate::observation::{observation_id, Direction, SignalObservation};
+use crate::signal_identity::SignalResearchIdentity;
 use crate::ScreenerHit;
-use mp_core::Clock;
+use mp_core::{Clock, Venue};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// A hit with optional forward returns (null at write time).
+///
+/// LEGACY artifact (spec 054 REL-31): the forward-return backfill this
+/// struct carried is retired — grading reads the identity-stamped
+/// observation store instead. The struct keeps deserializing (serde
+/// defaults) so historical journal files never break.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HitRecord {
     pub rule_id: String,
@@ -21,6 +28,9 @@ pub struct HitRecord {
     pub forward_return_1h: Option<f64>,
     pub forward_return_4h: Option<f64>,
     pub forward_return_24h: Option<f64>,
+    /// Firing venue (REL-31). Absent in pre-REL-31 journal lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub venue: Option<Venue>,
 }
 
 impl From<ScreenerHit> for HitRecord {
@@ -33,8 +43,47 @@ impl From<ScreenerHit> for HitRecord {
             forward_return_1h: None,
             forward_return_4h: None,
             forward_return_24h: None,
+            venue: h.venue,
         }
     }
+}
+
+/// Bridge a screener hit onto the identity-stamped observation flow (spec
+/// 054 REL-31): the hit becomes a `SignalObservation` with the caller's
+/// research identity, so outcomes (gross AND net) can be attached by the
+/// Phase-4 outcome engine and persisted as Parquet.
+///
+/// - `seq` is the caller's monotonic hit counter — deterministic replay
+///   produces identical observation ids (REL-10).
+/// - Direction defaults to `Long` (a screener hit carries no side); the
+///   identity's params-hash MUST disclose that default (spec 054 W-5
+///   2026-09-07) — documented, never hidden.
+/// - A hit without a venue (pre-REL-31 record) is REFUSED, not imputed (R-1:
+///   unknown is never fabricated).
+pub fn hit_to_observation(
+    hit: &ScreenerHit,
+    identity: &SignalResearchIdentity,
+    created_at_ns: i64,
+    seq: u64,
+) -> Result<SignalObservation, String> {
+    let venue = hit.venue.ok_or_else(|| {
+        format!(
+            "hit {} @ {} carries no venue (pre-REL-31 record) — refusing to impute (R-1)",
+            hit.rule_id, hit.ts_ns
+        )
+    })?;
+    Ok(SignalObservation {
+        observation_id: observation_id(&identity.fingerprint(), hit.ts_ns, seq),
+        identity: identity.clone(),
+        timestamp_ns: hit.ts_ns,
+        symbol: hit.symbol,
+        venue,
+        direction: Direction::Long,
+        feature_snapshot: hit.snapshot.clone(),
+        quality: hit.quality.clone(),
+        created_at_ns,
+        outcomes: Vec::new(),
+    })
 }
 
 /// Hit journal: append-only JSONL per day ( partitioned by the date of the
@@ -255,6 +304,7 @@ mod tests {
             ts_ns: 1784456653319497000,
             snapshot: [("funding_rate".into(), 0.00015)].into(),
             quality: crate::DataQualityState::Healthy,
+            venue: Some(mp_core::Venue::Bybit),
         };
         j.record(hit).unwrap();
         let date = HitJournal::date_str_for_ns(FIXED_NS);
@@ -277,6 +327,7 @@ mod tests {
                 ts_ns: 1784456653319497000 + i * 1_000_000_000,
                 snapshot: Default::default(),
                 quality: crate::DataQualityState::Healthy,
+                venue: Some(mp_core::Venue::Bybit),
             })
             .unwrap();
         }
@@ -285,6 +336,52 @@ mod tests {
         assert_eq!(records.len(), 10);
         assert!(records.iter().all(|r| r.rule_id == "rule_a"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // REL-31: legacy JSONL lines (pre-quality, pre-venue) still load —
+    // serde defaults fill quality=Healthy, venue=None; historical files
+    // never break.
+    #[test]
+    fn rel_31_legacy_jsonl_line_still_loads() {
+        let legacy = "{\"rule_id\":\"funding_extreme\",\"symbol\":0,\"ts_ns\":1784456653319497000,\"snapshot\":{\"funding_rate\":0.00015},\"forward_return_1h\":null,\"forward_return_4h\":null,\"forward_return_24h\":null}";
+        let rec: HitRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(rec.rule_id, "funding_extreme");
+        assert_eq!(rec.venue, None, "legacy lines decode venue-less");
+        assert!(rec.forward_return_1h.is_none());
+    }
+
+    // REL-31: the bridge stamps the FULL identity, defaults Direction::Long,
+    // and produces deterministic ids (same inputs ⇒ same id; different seq ⇒
+    // different id). A venue-less hit is refused, never imputed (R-1).
+    #[test]
+    fn rel_31_hit_to_observation_bridges_identity_and_refuses_venue_less() {
+        let identity =
+            crate::signal_identity::SignalResearchIdentity::new("footprint.rule", 1, "dir-long-default", "cost-v1");
+        let with_venue = ScreenerHit {
+            rule_id: "whale_imb".into(),
+            symbol: SymbolId(1),
+            ts_ns: 1784456653319497000,
+            snapshot: [("footprint.imb.60s.whale".into(), 0.62)].into(),
+            quality: crate::DataQualityState::Healthy,
+            venue: Some(mp_core::Venue::Bybit),
+        };
+        let a = hit_to_observation(&with_venue, &identity, FIXED_NS, 0).unwrap();
+        let b = hit_to_observation(&with_venue, &identity, FIXED_NS, 0).unwrap();
+        assert_eq!(a.observation_id, b.observation_id, "deterministic id (REL-10)");
+        let c = hit_to_observation(&with_venue, &identity, FIXED_NS, 1).unwrap();
+        assert_ne!(a.observation_id, c.observation_id, "seq distinguishes hits");
+        assert_eq!(a.identity, identity);
+        assert_eq!(a.venue, mp_core::Venue::Bybit);
+        assert_eq!(a.direction, Direction::Long, "documented default");
+        assert_eq!(a.timestamp_ns, with_venue.ts_ns);
+        assert_eq!(a.feature_snapshot, with_venue.snapshot);
+        assert_eq!(a.quality, crate::DataQualityState::Healthy);
+        assert!(a.outcomes.is_empty(), "outcomes attach later (Phase 4)");
+
+        let mut venue_less = with_venue.clone();
+        venue_less.venue = None;
+        let err = hit_to_observation(&venue_less, &identity, FIXED_NS, 0).unwrap_err();
+        assert!(err.contains("no venue"), "refusal names the reason: {err}");
     }
 
     #[test]
@@ -299,6 +396,7 @@ mod tests {
             ts_ns: 1784456653319497000,
             snapshot: Default::default(),
             quality: crate::DataQualityState::Healthy,
+            venue: Some(mp_core::Venue::Bybit),
         })
         .unwrap();
         drop(j);

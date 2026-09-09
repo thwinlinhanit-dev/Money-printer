@@ -29,6 +29,7 @@ Cold storage layer: transforms raw event logs into Hive-partitioned Parquet tabl
 - `src/bin/mp-bootstrap.rs` — historical bootstrap CLI (spec 027, HBS-1/HBS-9)
 - `src/materialize.rs` — log→FeatureStore materialization pipeline (spec 016; mp-features engine, EVT-5 merge, canonical log ordering, symbols snapshot, `MP_MATERIALIZE_MAX_BYTES` RAM guard); `stream_logs_merged` — streaming k-way merge (same MAT-5/EVT-5/EVT-8 canonical order, frame-by-frame) for the daily determinism replay's RAM guard, and `load_logs_merged` — the eager loader the materializer uses
 - `src/bin/mp-materialize.rs` — materialization CLI (spec 016, `--log --config --out --git-sha`; prints `symbols_hash`/snapshot path)
+- `src/bin/footprint.rs` — offline orderflow study runner (spec 017 grading; relocated from mp-features 2026-09-07 per spec 054 REL-31 — Parquet writes belong here, `mp-storage` depends on `mp-features`, never the reverse): journals hits via `HitJournal` AND bridges them to identity-stamped `SignalObservation`s (`hit_to_observation`), attaches Phase-4 outcomes (gross+net, MFE/MAE) from the trade tape, writes Parquet observations, prints per-horizon `evaluate`/`decide` reports — the legacy JSONL forward-return backfill is retired
 
 ## Verification
 

@@ -392,6 +392,7 @@ impl AccumulationDetector {
             ts_ns: now_ns,
             snapshot,
             quality: crate::data_quality::DataQualityState::Healthy,
+            venue: Some(update.venue),
         })
     }
 

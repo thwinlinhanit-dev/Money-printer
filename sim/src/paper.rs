@@ -681,4 +681,75 @@ mod tests {
         }
         assert_eq!(streak, 0, "PAP-9: a fault must reset the streak to 0");
     }
+
+    // REL-30: paper-mode observation recording is the SAME write-only
+    // recorder the backtest arm uses, and it must never perturb the decision
+    // path: a batched session with recording ON hashes identically to one
+    // with it OFF (G3/SIM-15 primitive holds under recording). Outcomes
+    // attach only AFTER close, from the recorded mark series — open windows
+    // are never fabricated (REL-14).
+    #[test]
+    fn rel_30_paper_recording_is_write_only_and_deterministic() {
+        let events: Vec<EventEnvelope> = (0..60)
+            .map(|i| {
+                trade(
+                    i * 1_000_000 + 1,
+                    100.0 + (i % 7) as f64,
+                    if i % 2 == 0 { Side::Buy } else { Side::Sell },
+                )
+            })
+            .collect();
+
+        // Plain session (recording OFF), overlapping batches.
+        let mut plain = PaperSession::new(make_bt());
+        plain.push_batch(events[..40].to_vec()).unwrap();
+        plain.push_batch(events[30..].to_vec()).unwrap();
+        let plain_bt = plain.close().unwrap();
+
+        // Recorded session: identical batches, recording ON via the exposed
+        // backtester handle — the same enable_observations entry point the
+        // backtest binary uses.
+        let mut rec = PaperSession::new(make_bt());
+        rec.backtester_mut()
+            .enable_observations("rel30".into(), 1, events[0].recv_ts_ns);
+        rec.push_batch(events[..40].to_vec()).unwrap();
+        rec.push_batch(events[30..].to_vec()).unwrap();
+        assert!(
+            !rec.backtester().observations().is_empty(),
+            "REL-30: recording must capture fires during the stream"
+        );
+        assert!(
+            rec.backtester()
+                .observations()
+                .iter()
+                .all(|o| o.outcomes.is_empty()),
+            "REL-30: outcomes attach only after close — never mid-stream"
+        );
+        let rec_bt = rec.close().unwrap();
+
+        assert_eq!(
+            plain_bt.decision_log().hash(),
+            rec_bt.decision_log().hash(),
+            "REL-30: recording must not perturb the decision path (G3 hash)"
+        );
+        assert!(rec_bt.blocked_observations() > 0, "cold-start fires are quality-blocked");
+
+        // Post-close outcome attachment: closed horizons get outcomes, an
+        // absurdly-long horizon gets NOTHING (no lookahead, REL-14).
+        let mut rec2 = PaperSession::new(make_bt());
+        rec2.backtester_mut()
+            .enable_observations("rel30".into(), 1, events[0].recv_ts_ns);
+        rec2.push_batch(events).unwrap();
+        let mut bt = rec2.close().unwrap();
+        // 5ms closes inside the 60ms feed for early observations only; the
+        // absurd 10,000-day horizon closes for nobody (REL-14).
+        bt.attach_outcomes(&[5_000_000, 10_000 * 86_400_000_000_000]);
+        let obs = bt.observations();
+        let with_outcome = obs.iter().filter(|o| !o.outcomes.is_empty()).count();
+        assert!(with_outcome > 0, "closed windows produce outcomes");
+        assert!(
+            with_outcome < obs.len(),
+            "REL-30: open windows must NOT be fabricated into outcomes"
+        );
+    }
 }

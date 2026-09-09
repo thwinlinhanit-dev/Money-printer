@@ -84,3 +84,30 @@ Runs weekly (configurable). Produces per rule:
 
 ## Open questions
 - None.
+
+## Amendment 2026-09-07 (spec 054 REL-31): JSONL backfill retired as a RESEARCH artifact
+
+The JSONL forward-return backfill path above (gross-only, no signal identity)
+is superseded for research purposes by the identity-stamped observation flow
+(spec 054 REL-8..14, REL-23, REL-31): screener hits bridge to
+`SignalObservation`s whose outcomes come from the Phase-4 outcome engine
+(gross AND net of the cost model, MFE/MAE) and persist as Parquet with the
+W-6 guard and identity fingerprints in the footer. The JSONL hit journal
+REMAINS the write-side fire log (append-only, W-6); the Python grading job
+(`research/grading_job.py`) continues to work on materialized hit bundles as
+per the 2026-08-17 decision — this amendment does not break it.
+
+Entry-convention adjudication (task process rule "when existing code conflicts
+with the plan, explain, choose the smallest safe change, add regression
+tests"): GRD-4's "entry = first price strictly after `ts_ns`" is
+EXECUTION-shaped (a real order cannot fill on its own trigger tick) and stays
+binding for execution/fill studies. REL-14's "entry = last mark at-or-before
+the fire time" is MEASUREMENT-shaped (the information the signal could see)
+and governs research artifacts. The two answer different questions; neither
+is wrong. The observation-flow convention is now the graded research standard
+because it is the tested one (rel_12..rel_14 outcome tests, sim integration).
+Direction: a `ScreenerHit` carries no side; the bridge defaults
+`Direction::Long` and the identity's params-hash must disclose that default.
+Migration implemented in `mp-features::hit_journal::hit_to_observation` +
+`storage/src/bin/footprint.rs` (relocated from mp-features — Parquet writes
+belong to mp-storage, no dependency cycle).
