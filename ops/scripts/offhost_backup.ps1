@@ -24,6 +24,10 @@
 #     post-push check therefore decrypts each REMOTE artifact and compares
 #     the plaintext sha256 against the manifest - size-only alone is no
 #     longer trusted. -SkipVerify opts out (huge remotes).
+#   - gdrive-throttle hardening (2026-09-12): EVERY rclone call is tps-limited
+#     (--tpslimit 2) with rclone-internal retries (--retries 5
+#     --low-level-retries 20). Unbounded tps provoked Google rateLimitExceeded
+#     wedges (0-byte partials, verified live in data/retest on 09-12).
 #   - Fail-closed: missing tool, missing key, missing remote, or any rclone
 #     error => exit non-zero. An unconfigured backup must never silently
 #     succeed.
@@ -31,6 +35,7 @@
 # Usage:
 #   .\ops\scripts\offhost_backup.ps1 -Remote "b2:money-printer"            # push
 #   .\ops\scripts\offhost_backup.ps1 -Remote "b2:money-printer" -Register  # + daily task
+#   .\ops\scripts\offhost_backup.ps1 -Remote "b2:money-printer" -RePin    # re-register task only, NO backup (~21h)
 #   .\ops\scripts\offhost_backup.ps1 -Remote "local:ops/offhost-drill"     # local drill (no cloud)
 #
 # Exit codes: 0 = pushed + verified; 1 = push failed; 2 = integrity/verify
@@ -39,6 +44,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Remote,   # rclone remote:path (e.g. b2:money-printer)
     [switch]$Register,                               # register MoneyPrinterOffhostBackup daily task
+    [switch]$RePin,                                  # re-register task ONLY (fix stale boundary, skip backup)
     [switch]$SkipVerify,                             # skip post-push rclone check (slow on big remotes)
     [string]$RcloneConfig,                           # optional path to rclone.conf (default ~/.config/rclone/rclone.conf)
     [string]$DataRoot = "data",                      # corpus root relative to repo root
@@ -53,6 +59,60 @@ $Rclone = Join-Path $Tools "rclone.exe"
 $Age = Join-Path $Tools "age.exe"
 $AgeKey = Join-Path $Repo "ops\keys\offhost.agekey"
 $PublicKey = Join-Path $Repo "ops\keys\offhost.age.pub"
+
+# Register (or re-pin) the daily task. -RePin exists because -Register runs
+# the FULL backup first (register-and-run pattern, ~21h observed 2026-09-05),
+# so correcting a stale StartBoundary used to mean a full backup detour
+# (MoneyPrinterOffhostBackup's boundary went stale 2026-09-04). The re-pin
+# path rebuilds the task registration and exits BEFORE preflight, so it works
+# even when the backup environment (rclone/age/remote) is broken.
+function Register-OffhostTask {
+    # 02:30 UTC (after the 01:00 drain lands closed days) - convert to local so
+    # the trigger stays pinned to UTC across DST, same as vps_backup.ps1.
+    $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(2).AddMinutes(30), [DateTimeKind]::Utc)
+    $localAt = $utcTarget.ToLocalTime()
+    # Registration-race guard (2026-09-05): pin the first trigger to tomorrow
+    # when registering at/after the target time (MoneyPrinterDataBackup 00:07Z
+    # launch failure, 0xFFFD0000 - see daily_pipeline.ps1 -RegisterTask).
+    if ($localAt -le (Get-Date)) { $localAt = $localAt.AddDays(1) }
+    # Output redirected to a gitignored log (2026-09-04): the old action
+    # captured nothing, so a scheduled exit-2 had no visible cause.
+    $logPath = Join-Path $PSScriptRoot "offhost_backup.log"
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden " +
+        "-Command `"& '{0}' -Remote '{1}' *> '{2}'`"" -f $PSCommandPath, $Remote, $logPath)
+    $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
+    # ExecutionTimeLimit 36h (2026-09-05): the 8h limit killed a healthy
+    # run mid-verify at exactly start+8h (observed 04:24, result 267014).
+    # The pipeline legitimately needs >24h at observed link speeds: ~2h
+    # encrypt + push + a full 53 GiB per-file hash verify at ~0.7 MiB/s
+    # single-stream gdrive (~21h, measured 2026-09-05) - the 24h limit
+    # was a near-miss kill risk. Tradeoff: IgnoreNew drops the next-day
+    # trigger if a run spills past 09:00, so a very slow verify can skip
+    # one day - acceptable vs losing the whole verify to a kill.
+    # NOTE (2026-09-06): this comment must stay OUTSIDE the backtick
+    # continuation - a `#` comment between continued lines ends the logical
+    # statement, so -ExecutionTimeLimit ran as a standalone command and the
+    # registration died (CommandNotFound, latent since the 36h change;
+    # the stale 09-04 StartBoundary was its symptom).
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 36) `
+        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
+    Register-ScheduledTask -TaskName "MoneyPrinterOffhostBackup" -Action $action -Trigger $trigger -Settings $settings -User $env:USERNAME -Force | Out-Null
+    Write-Host "offhost_backup: registered MoneyPrinterOffhostBackup (daily $($utcTarget.ToString('HH:mm')) UTC = $($localAt.ToString('HH:mm')) local)"
+}
+
+# --- Re-pin only (2026-09-06) ----------------------------------------------
+# Dedicated path to correct a stale task boundary WITHOUT running the ~21h
+# backup: rebuild the registration and exit 0 before any preflight or
+# encryption work. The previous way to re-pin was `-Register`, which runs the
+# full backup first - a ~21h detour for a one-line fix.
+if ($RePin) {
+    Register-OffhostTask
+    Write-Host "offhost_backup: re-pin done - task re-registered, backup NOT run"
+    exit 0
+}
 
 # gzip helper (built-in .NET GZipStream - no external tool, works on any Windows host).
 function Compress-Gzip {
@@ -155,9 +215,31 @@ function Test-StagingSourceExists {
 # (the corpus is W-6 append-only, but deleted-file artifacts must still stop
 # being pushed). Before re-encrypting: drop orphaned staging artifacts and
 # their remote counterparts. Fail-closed: a failed remote delete fails the run.
+#
+# Owner-approved deletion exemption (2026-09-11, B1 execution): sources
+# deleted by a journaled owner decision (action=owner_approved in
+# data/retention_delete_manifest.jsonl) KEEP their off-host artifacts — the
+# signed decision term is "delete from master, KEEP OFF-HOST". Without this
+# exemption the prune below would destroy the only remaining off-host copy
+# of exactly the data the owner paid the delete to preserve. A corrupt
+# journal line must never break the nightly backup, hence the silent catch.
+$ownerKeep = New-Object System.Collections.Generic.HashSet[string]
+$deleteJournal = Join-Path $Repo "data\retention_delete_manifest.jsonl"
+if (Test-Path $deleteJournal) {
+    foreach ($jl in Get-Content $deleteJournal -Encoding UTF8) {
+        if (-not $jl.Trim()) { continue }
+        try {
+            $jj = $jl | ConvertFrom-Json
+            if ($jj.action -eq "owner_approved" -and $jj.file) {
+                [void]$ownerKeep.Add((($jj.file -replace '[\\/]','__') + ".age"))
+            }
+        } catch { }
+    }
+}
 $verifyDir = Join-Path (Split-Path $staging -Parent) ".offhost-verify"
 if (Test-Path $verifyDir) { Remove-Item $verifyDir -Recurse -Force }
 foreach ($old in Get-ChildItem -Path $staging -File -Filter "*.age") {
+    if ($ownerKeep.Contains($old.Name)) { continue }   # owner-approved delete: keep off-host copy
     $stem = $old.Name.Substring(0, $old.Name.Length - 4)
     if (Test-StagingSourceExists -Stem $stem) { continue }
     Write-Host "offhost_backup: prune staging orphan $($old.Name) (corpus source no longer exists)"
@@ -307,7 +389,7 @@ $ErrorActionPreference = "Continue"  # native stderr is not an error record
 # Explicit IO/connect timeouts (2026-09-05): rclone's defaults let a stalled
 # link hang the push forever (observed: 8h execution-limit kill mid-verify).
 # A timeout turns a dead link into a fast failure the retry can recover from.
-& $Rclone copy $staging "$Remote" --transfers 4 --checkers 8 --size-only --timeout 10m --contimeout 30s
+& $Rclone copy $staging "$Remote" --transfers 4 --checkers 8 --size-only --timeout 10m --contimeout 30s --tpslimit 2 --tpslimit-burst 3 --retries 5 --low-level-retries 20
 $copyCode = $LASTEXITCODE
 $ErrorActionPreference = $prevEAP
 if ($copyCode -ne 0) { Write-Error "offhost_backup: rclone copy failed (exit $copyCode)"; exit 1 }
@@ -331,7 +413,7 @@ if (-not $SkipVerify) {
         # the link is flaky - a single transient failure must not fail the tier.
         $checkOk = $false
         for ($attempt = 1; $attempt -le 3 -and -not $checkOk; $attempt++) {
-            & $Rclone check $staging "$Remote" --size-only --fast-list --timeout 10m --contimeout 30s 2>$null
+            & $Rclone check $staging "$Remote" --size-only --fast-list --timeout 10m --contimeout 30s --tpslimit 2 --tpslimit-burst 3 --retries 5 --low-level-retries 20 2>$null
             if ($LASTEXITCODE -eq 0) { $checkOk = $true }
             elseif ($attempt -lt 3) {
                 Write-Warning "offhost_backup: rclone check attempt $attempt failed (exit $LASTEXITCODE) - retrying"
@@ -356,7 +438,7 @@ if (-not $SkipVerify) {
                 # the verify past the task's execution limit (8h kill at
                 # 04:24). A timeout fails the attempt fast; the retry loop
                 # below recovers. 10m IO idle is generous for big parquet.
-                & $Rclone copyto "$Remote/$name" $tmpAge --timeout 10m --contimeout 30s 2>$null
+                & $Rclone copyto "$Remote/$name" $tmpAge --timeout 10m --contimeout 30s --tpslimit 2 --tpslimit-burst 3 --retries 5 --low-level-retries 20 2>$null
                 if ($LASTEXITCODE -eq 0) { $dlOk = $true }
                 elseif ($attempt -lt 3) { Start-Sleep -Seconds 10 }
             }
@@ -387,31 +469,7 @@ if (-not $SkipVerify) {
 
 # --- Register daily task ----------------------------------------------------
 if ($Register) {
-    # 02:30 UTC (after the 01:00 drain lands closed days) - convert to local so
-    # the trigger stays pinned to UTC across DST, same as vps_backup.ps1.
-    $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(2).AddMinutes(30), [DateTimeKind]::Utc)
-    $localAt = $utcTarget.ToLocalTime()
-    # Output redirected to a gitignored log (2026-09-04): the old action
-    # captured nothing, so a scheduled exit-2 had no visible cause.
-    $logPath = Join-Path $PSScriptRoot "offhost_backup.log"
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden " +
-        "-Command `"& '{0}' -Remote '{1}' *> '{2}'`"" -f $PSCommandPath, $Remote, $logPath)
-    $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
-    $settings = New-ScheduledTaskSettingsSet `
-        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable -MultipleInstances IgnoreNew `
-        # ExecutionTimeLimit 36h (2026-09-05): the 8h limit killed a healthy
-        # run mid-verify at exactly start+8h (observed 04:24, result 267014).
-        # The pipeline legitimately needs >24h at observed link speeds: ~2h
-        # encrypt + push + a full 53 GiB per-file hash verify at ~0.7 MiB/s
-        # single-stream gdrive (~21h, measured 2026-09-05) - the 24h limit
-        # was a near-miss kill risk. Tradeoff: IgnoreNew drops the next-day
-        # trigger if a run spills past 09:00, so a very slow verify can skip
-        # one day - acceptable vs losing the whole verify to a kill.
-        -ExecutionTimeLimit (New-TimeSpan -Hours 36) `
-        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
-    Register-ScheduledTask -TaskName "MoneyPrinterOffhostBackup" -Action $action -Trigger $trigger -Settings $settings -User $env:USERNAME -Force | Out-Null
-    Write-Host "offhost_backup: registered MoneyPrinterOffhostBackup (daily $($utcTarget.ToString('HH:mm')) UTC = $($localAt.ToString('HH:mm')) local)"
+    Register-OffhostTask
 }
 
 Write-Host "offhost_backup: done (files=$nFiles skipped=$($skipped.Count))"

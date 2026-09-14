@@ -40,6 +40,13 @@ files, and the same P2 fires regardless of the growth projection.
   (see `ops/runbooks/zero-cost-mode.md` for crontab entry). VPS verdicts
   land in journald and Telegram (`--telegram`). With `ZERO_COST=1`, the
   daily pipeline auto-prunes raw logs > 14 days.
+- The binance-futures era (`data/raw` 2026-07-18..08-08, 19.98 GB) can
+  never pass the INT-4 gate (`missing_provenance`, coverage < 0.995) and so
+  can never be pruned by the automated path — it is an OPEN OWNER DECISION
+  (`docs/OWNER-DECISION-binance-era.md`: accept / migrate / raise-cap). With
+  the default (accept) the corpus floors at ~34–35 GB, so this P2 keeps
+  firing on the forward projection most nights — expected, by design, until
+  the owner signs.
 - Re-run the projection by hand (the budget is explicit config):
   `mp-ops storage-budget --cap-bytes <N> --telegram` with
   `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` set (or `--cap-bytes` matching the

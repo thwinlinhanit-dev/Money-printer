@@ -109,6 +109,21 @@ fn run() -> Result<ExitCode, String> {
             .join(format!("{}.json", stats.symbols_hash));
         println!("symbols snapshot: {}", snap.display());
     }
+    if stats.lookback_rows_suppressed > 0 {
+        println!(
+            "lookback: suppressed {} row(s) dated {} (prior-day census warm-up; \
+             yesterday's parquet is immutable, W-6)",
+            stats.lookback_rows_suppressed,
+            stats.lookback_dates.join(", ")
+        );
+    }
+    if stats.forward_rows_redated > 0 {
+        println!(
+            "boundary: re-dated {} final-bar row(s) into the target day's parquet \
+             (end-of-day close; no next-day parquet written)",
+            stats.forward_rows_redated
+        );
+    }
 
     // Spec 040 IBI-10: optional cross-market lead-lag table over the SAME
     // merged log set. Requires `[ibit_cross].deriv_underlying` in the config

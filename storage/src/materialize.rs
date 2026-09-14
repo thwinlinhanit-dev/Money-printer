@@ -26,6 +26,22 @@
 //! consumer resolves `symbol_id` by reading the snapshot the footer points at.
 //! Re-runs over the same logs produce the same snapshot bytes (W-6 no-overwrite).
 //!
+//! Boundary discipline (2026-09-06): the run's target dates come from the
+//! `YYYYMMDD` log-file prefixes, and a run persists rows for ITS dates only.
+//! Two natural crossing artifacts are handled deterministically: (1) prior-day
+//! rows — whale-census polls started before midnight but written after it land
+//! in the next day's file with yesterday's stamps; they warm the engine (so
+//! the day's first deltas are correct vs the real last reading) but are
+//! counted and dropped, because the prior day's parquet is immutable (W-6)
+//! and rewriting it with today's run-wide symbol table is the `symbols_hash`
+//! drift the daily gate refused on; (2) next-day rows — `finish()` closes the
+//! last partial bar at the next midnight (00:00:00.000 of the following day);
+//! those rows are re-dated to the target day's last nanosecond so the final
+//! bar persists in the day's own parquet instead of pre-creating the next
+//! day's (which the next run would then refuse). Both are surfaced in
+//! `MaterializeStats` and the CLI; undated log names disable the discipline
+//! (legacy behavior, tests).
+//!
 //! RAM guard: every log is loaded into memory for the k-way merge (fine for a
 //! day-scale corpus). Before reading anything, the total on-disk size of the
 //! logs is checked against `MP_MATERIALIZE_MAX_BYTES` (default
@@ -46,7 +62,7 @@ use mp_core::{
 };
 use mp_features::{engine_from_config, FeatureEngine, FeaturesConfig};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Default RAM-guard cap on total log bytes for one `materialize_logs` run
@@ -76,6 +92,25 @@ pub struct MaterializeStats {
     /// (`{root}/symbols/{hash}.json`) — the id order this run's `symbol_id`s
     /// refer to. Non-empty whenever at least one log was processed.
     pub symbols_hash: String,
+    /// Rows whose UTC date is BEFORE the run's earliest target date (target
+    /// dates come from the `YYYYMMDD` log-file prefixes): prior-day census
+    /// events that crossed midnight into today's log (the whale-collector
+    /// poll straddle — a poll started at 23:59:47 writes into the 00:00 file
+    /// with yesterday's stamps). They feed the engine as warm-up (boundary
+    /// deltas stay correct) but are NEVER persisted: the prior day's parquet
+    /// is immutable (W-6), and rewriting it with today's run-wide symbol
+    /// table is exactly the drift the daily gate refused on (2026-09-04/05).
+    /// Counted and named here, never silent.
+    pub lookback_rows_suppressed: u64,
+    /// UTC dates (YYYY-MM-DD) of suppressed lookback rows, sorted.
+    pub lookback_dates: Vec<String>,
+    /// Rows whose UTC date is AFTER the run's latest target date: the
+    /// engine's end-of-stream final-bar rows (`finish()`) close at the next
+    /// midnight (00:00:00.000 of the following day). They are re-dated to the
+    /// target day's last nanosecond so the day's final bar persists in the
+    /// day's OWN parquet — writing the next day's parquet from today's run
+    /// would make tomorrow's run refuse it (W-6, the same drift class).
+    pub forward_rows_redated: u64,
 }
 
 /// Logs read, symbol-remapped, and k-way merged — the canonical day input
@@ -88,6 +123,52 @@ pub struct LoadedLogs {
     pub symbols: SymbolTable,
     /// Raw events read across all logs (before merge).
     pub events_read: u64,
+}
+
+/// The run's target dates: `YYYYMMDD` prefixes parsed from the log file
+/// basenames (`20260905_hyperliquid_positions.log` → `2026-09-05`). Rows
+/// whose own UTC date is outside this set are boundary rows (see
+/// [`MaterializeStats`] docs): prior-day census events that crossed midnight
+/// into today's file (whale poll straddle) and the engine's end-of-stream
+/// final bars that close at the next midnight. An empty set (undated
+/// filenames — tests, ad-hoc runs) preserves the legacy behavior: every date
+/// is a target and nothing is suppressed or re-dated.
+fn target_dates_from_logs(logs: &[PathBuf]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for p in logs {
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(prefix) = name.split('_').next() else {
+            continue;
+        };
+        if prefix.len() != 8 || !prefix.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        out.insert(format!(
+            "{}-{}-{}",
+            &prefix[0..4],
+            &prefix[4..6],
+            &prefix[6..8]
+        ));
+    }
+    out
+}
+
+/// UTC date `YYYY-MM-DD` → ns of the day's LAST nanosecond (next midnight
+/// minus one). Pure civil arithmetic (Howard Hinnant), matching `date_str`.
+fn day_end_ns(date: &str) -> i64 {
+    let y: i64 = date[0..4].parse().unwrap_or(1970);
+    let m: i64 = date[5..7].parse().unwrap_or(1);
+    let d: i64 = date[8..10].parse().unwrap_or(1);
+    let yy = if m <= 2 { y - 1 } else { y };
+    let era = if yy >= 0 { yy } else { yy - 399 } / 400;
+    let yoe = yy - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468 + 1; // next midnight
+    (days * 86_400) * 1_000_000_000 - 1
 }
 
 /// Read, symbol-remap, and k-way merge event logs (MAT-5/EVT-5/EVT-8). The
@@ -421,6 +502,15 @@ pub fn materialize_logs_limited(
         nan_suppressed,
         ..MaterializeStats::default()
     };
+    // Boundary discipline (2026-09-06): the run's target dates come from the
+    // log filenames. A daily run persists rows for its OWN target date(s)
+    // only — prior-day rows (the whale poll straddle) are warm-up and are
+    // suppressed, and next-day rows (the engine's end-of-stream final bars)
+    // are re-dated into the latest target day. Both directions keep a daily
+    // run from ever writing a parquet another run owns (W-6 drift).
+    let target_dates = target_dates_from_logs(&logs);
+    let min_target = target_dates.iter().next();
+    let max_target = target_dates.iter().next_back();
     for ((feature, venue, symbol_id, ver), mut rows) in groups {
         // MAT-5: deterministic output — sorted rows, stable tiebreak.
         rows.sort_by(|a, b| {
@@ -442,7 +532,55 @@ pub fn materialize_logs_limited(
         for r in &rows {
             by_date.entry(date_str(r.ts_ns)).or_default().push(*r);
         }
-        for (date, day_rows) in by_date {
+        if max_target.is_some() {
+            let mut kept: BTreeMap<String, Vec<FeatureRow>> = BTreeMap::new();
+            let mut redated: Vec<FeatureRow> = Vec::new();
+            for (date, day_rows) in by_date {
+                if let Some(min) = min_target {
+                    if date < *min {
+                        // Prior-day rows: warm-up already happened; the prior
+                        // day's parquet is immutable (W-6) — count and drop.
+                        stats.lookback_rows_suppressed += day_rows.len() as u64;
+                        if !stats.lookback_dates.contains(&date) {
+                            stats.lookback_dates.push(date.clone());
+                        }
+                        continue;
+                    }
+                }
+                if let Some(max) = max_target {
+                    if date > *max {
+                        // Next-day rows: the engine's end-of-stream final
+                        // bars, closed at the next midnight. Re-date to the
+                        // target day's last nanosecond so the day's final bar
+                        // lands in the day's OWN parquet (written once below).
+                        let clamp = day_end_ns(max);
+                        let mut dr = day_rows;
+                        for r in &mut dr {
+                            if r.ts_ns > clamp {
+                                r.ts_ns = clamp;
+                            }
+                        }
+                        stats.forward_rows_redated += dr.len() as u64;
+                        redated.extend(dr);
+                        continue;
+                    }
+                }
+                kept.entry(date).or_default().extend(day_rows);
+            }
+            if !redated.is_empty() {
+                if let Some(max) = max_target {
+                    kept.entry(max.clone()).or_default().extend(redated);
+                }
+            }
+            by_date = kept;
+        }
+        for (date, mut day_rows) in by_date {
+            day_rows.sort_by(|a, b| {
+                a.ts_ns
+                    .cmp(&b.ts_ns)
+                    .then_with(|| a.value.to_bits().cmp(&b.value.to_bits()))
+                    .then_with(|| a.ver.cmp(&b.ver))
+            });
             materialize(
                 root,
                 &feature,

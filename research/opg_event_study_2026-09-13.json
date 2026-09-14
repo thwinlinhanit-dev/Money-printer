@@ -1,0 +1,951 @@
+{
+  "configs": [
+    {
+      "adverse_strata": [
+        "hyperliquid:ETH/+6h"
+      ],
+      "move_pct": 0.005,
+      "n_days_total": 7,
+      "n_events_total": 9,
+      "n_weeks_total": 3,
+      "opg1_pass": false,
+      "purge_pct": 0.02,
+      "strata": [
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [
+            "2026-08-25"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": -18.562001017908834,
+              "ci95_bps": [
+                -18.562001017908834,
+                -18.562001017908834
+              ],
+              "excess_car_bps": 28.487655981693784,
+              "excess_ci95_bps": [
+                28.487655981693784,
+                28.487655981693784
+              ],
+              "excess_n": 1,
+              "n": 1,
+              "n_days": 1,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 1,
+          "n_events": 1,
+          "n_events_raw": 2,
+          "symbol": "BTC",
+          "venue": "hyperliquid"
+        },
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [
+            "2026-08-27"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": true,
+              "car_bps": 66.96777106618646,
+              "ci95_bps": [
+                66.96777106618646,
+                66.96777106618646
+              ],
+              "excess_car_bps": -51.18807577506157,
+              "excess_ci95_bps": [
+                -51.18807577506157,
+                -51.18807577506157
+              ],
+              "excess_n": 1,
+              "n": 1,
+              "n_days": 1,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 1,
+          "n_events": 1,
+          "n_events_raw": 2,
+          "symbol": "ETH",
+          "venue": "hyperliquid"
+        },
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [
+            "2026-08-25",
+            "2026-09-04",
+            "2026-09-09"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 17.850337967094674,
+              "ci95_bps": [
+                -14.620341066016174,
+                50.32101700020553
+              ],
+              "excess_car_bps": -5.804758411577238,
+              "excess_ci95_bps": [
+                -46.61407878769008,
+                35.00456196453561
+              ],
+              "excess_n": 2,
+              "n": 2,
+              "n_days": 2,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 3,
+          "n_events": 3,
+          "n_events_raw": 5,
+          "symbol": "BTC",
+          "venue": "bybit"
+        },
+        {
+          "corroboration_rate": 0.25,
+          "event_days": [
+            "2026-08-28",
+            "2026-08-31",
+            "2026-09-04",
+            "2026-09-10"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 41.96292611247099,
+              "ci95_bps": [
+                5.795226334769921,
+                88.98129562922269
+              ],
+              "excess_car_bps": 33.78940816135249,
+              "excess_ci95_bps": [
+                -35.00456196453561,
+                113.89690089898875
+              ],
+              "excess_n": 3,
+              "n": 4,
+              "n_days": 4,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 1,
+          "n_days": 4,
+          "n_events": 4,
+          "n_events_raw": 9,
+          "symbol": "ETH",
+          "venue": "bybit"
+        }
+      ],
+      "symbols_with_events": [
+        "bybit:BTC",
+        "bybit:ETH",
+        "hyperliquid:BTC",
+        "hyperliquid:ETH"
+      ]
+    },
+    {
+      "adverse_strata": [
+        "hyperliquid:ETH/+6h"
+      ],
+      "move_pct": 0.01,
+      "n_days_total": 5,
+      "n_events_total": 6,
+      "n_weeks_total": 3,
+      "opg1_pass": false,
+      "purge_pct": 0.02,
+      "strata": [
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 0,
+          "n_events": 0,
+          "n_events_raw": 0,
+          "symbol": "BTC",
+          "venue": "hyperliquid"
+        },
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [
+            "2026-08-27"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": true,
+              "car_bps": 66.96777106618646,
+              "ci95_bps": [
+                66.96777106618646,
+                66.96777106618646
+              ],
+              "excess_car_bps": -51.18807577506157,
+              "excess_ci95_bps": [
+                -51.18807577506157,
+                -51.18807577506157
+              ],
+              "excess_n": 1,
+              "n": 1,
+              "n_days": 1,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 1,
+          "n_events": 1,
+          "n_events_raw": 2,
+          "symbol": "ETH",
+          "venue": "hyperliquid"
+        },
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [
+            "2026-09-04"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 50.32101700020553,
+              "ci95_bps": [
+                50.32101700020553,
+                50.32101700020553
+              ],
+              "excess_car_bps": 35.00456196453561,
+              "excess_ci95_bps": [
+                35.00456196453561,
+                35.00456196453561
+              ],
+              "excess_n": 1,
+              "n": 1,
+              "n_days": 1,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 1,
+          "n_events": 1,
+          "n_events_raw": 3,
+          "symbol": "BTC",
+          "venue": "bybit"
+        },
+        {
+          "corroboration_rate": 0.25,
+          "event_days": [
+            "2026-08-28",
+            "2026-08-31",
+            "2026-09-04",
+            "2026-09-10"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 41.96292611247099,
+              "ci95_bps": [
+                1.034611984319922,
+                88.98129562922269
+              ],
+              "excess_car_bps": 33.78940816135249,
+              "excess_ci95_bps": [
+                -35.00456196453561,
+                113.89690089898875
+              ],
+              "excess_n": 3,
+              "n": 4,
+              "n_days": 4,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 1,
+          "n_days": 4,
+          "n_events": 4,
+          "n_events_raw": 7,
+          "symbol": "ETH",
+          "venue": "bybit"
+        }
+      ],
+      "symbols_with_events": [
+        "bybit:BTC",
+        "bybit:ETH",
+        "hyperliquid:ETH"
+      ]
+    },
+    {
+      "adverse_strata": [],
+      "move_pct": 0.005,
+      "n_days_total": 4,
+      "n_events_total": 6,
+      "n_weeks_total": 2,
+      "opg1_pass": false,
+      "purge_pct": 0.03,
+      "strata": [
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [
+            "2026-08-25"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": -18.562001017908834,
+              "ci95_bps": [
+                -18.562001017908834,
+                -18.562001017908834
+              ],
+              "excess_car_bps": 28.487655981693784,
+              "excess_ci95_bps": [
+                28.487655981693784,
+                28.487655981693784
+              ],
+              "excess_n": 1,
+              "n": 1,
+              "n_days": 1,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 1,
+          "n_events": 1,
+          "n_events_raw": 2,
+          "symbol": "BTC",
+          "venue": "hyperliquid"
+        },
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 0,
+          "n_events": 0,
+          "n_events_raw": 0,
+          "symbol": "ETH",
+          "venue": "hyperliquid"
+        },
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [
+            "2026-08-25",
+            "2026-09-04"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 50.32101700020553,
+              "ci95_bps": [
+                50.32101700020553,
+                50.32101700020553
+              ],
+              "excess_car_bps": 35.00456196453561,
+              "excess_ci95_bps": [
+                35.00456196453561,
+                35.00456196453561
+              ],
+              "excess_n": 1,
+              "n": 1,
+              "n_days": 1,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 2,
+          "n_events": 2,
+          "n_events_raw": 4,
+          "symbol": "BTC",
+          "venue": "bybit"
+        },
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [
+            "2026-08-28",
+            "2026-08-31",
+            "2026-09-04"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 18.105153985381225,
+              "ci95_bps": [
+                -3.7260023661300767,
+                42.725009286603836
+              ],
+              "excess_car_bps": -6.264338207465636,
+              "excess_ci95_bps": [
+                -35.00456196453561,
+                22.475885549604335
+              ],
+              "excess_n": 2,
+              "n": 3,
+              "n_days": 3,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 3,
+          "n_events": 3,
+          "n_events_raw": 4,
+          "symbol": "ETH",
+          "venue": "bybit"
+        }
+      ],
+      "symbols_with_events": [
+        "bybit:BTC",
+        "bybit:ETH",
+        "hyperliquid:BTC"
+      ]
+    },
+    {
+      "adverse_strata": [],
+      "move_pct": 0.01,
+      "n_days_total": 3,
+      "n_events_total": 4,
+      "n_weeks_total": 2,
+      "opg1_pass": false,
+      "purge_pct": 0.03,
+      "strata": [
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 0,
+          "n_events": 0,
+          "n_events_raw": 0,
+          "symbol": "BTC",
+          "venue": "hyperliquid"
+        },
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 0,
+          "n_events": 0,
+          "n_events_raw": 0,
+          "symbol": "ETH",
+          "venue": "hyperliquid"
+        },
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [
+            "2026-09-04"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 50.32101700020553,
+              "ci95_bps": [
+                50.32101700020553,
+                50.32101700020553
+              ],
+              "excess_car_bps": 35.00456196453561,
+              "excess_ci95_bps": [
+                35.00456196453561,
+                35.00456196453561
+              ],
+              "excess_n": 1,
+              "n": 1,
+              "n_days": 1,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 1,
+          "n_events": 1,
+          "n_events_raw": 3,
+          "symbol": "BTC",
+          "venue": "bybit"
+        },
+        {
+          "corroboration_rate": 0.0,
+          "event_days": [
+            "2026-08-28",
+            "2026-08-31",
+            "2026-09-04"
+          ],
+          "horizons": {
+            "+24h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 0.0,
+              "ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_car_bps": 0.0,
+              "excess_ci95_bps": [
+                0.0,
+                0.0
+              ],
+              "excess_n": 0,
+              "n": 0,
+              "n_days": 0,
+              "testable": true
+            },
+            "+6h": {
+              "adverse_opposite_hypothesis": false,
+              "car_bps": 18.105153985381225,
+              "ci95_bps": [
+                -3.7260023661300767,
+                42.725009286603836
+              ],
+              "excess_car_bps": -6.264338207465636,
+              "excess_ci95_bps": [
+                -35.00456196453561,
+                22.475885549604335
+              ],
+              "excess_n": 2,
+              "n": 3,
+              "n_days": 3,
+              "testable": true
+            }
+          },
+          "n_corroborated_other_venue": 0,
+          "n_days": 3,
+          "n_events": 3,
+          "n_events_raw": 4,
+          "symbol": "ETH",
+          "venue": "bybit"
+        }
+      ],
+      "symbols_with_events": [
+        "bybit:BTC",
+        "bybit:ETH"
+      ]
+    }
+  ],
+  "corpus": {
+    "end_day": "20260912",
+    "hour_coverage": {
+      "bybit:BTC": 425,
+      "bybit:ETH": 419,
+      "hyperliquid:BTC": 356,
+      "hyperliquid:ETH": 356
+    },
+    "missing_logs": [
+      "20260903_hyperliquid_BTC.log",
+      "20260903_hyperliquid_ETH.log",
+      "20260904_hyperliquid_BTC.log",
+      "20260904_hyperliquid_ETH.log",
+      "20260905_hyperliquid_BTC.log",
+      "20260905_hyperliquid_ETH.log"
+    ],
+    "start_day": "20260825"
+  },
+  "data_gates": {
+    "OPG-1_events_days_symbols": {
+      "floor": {
+        "events": 12,
+        "symbols": 2,
+        "weeks": 3
+      },
+      "observed": [
+        {
+          "events": 9,
+          "move_pct": 0.005,
+          "purge_pct": 0.02,
+          "symbols": 2,
+          "weeks": 3
+        },
+        {
+          "events": 6,
+          "move_pct": 0.01,
+          "purge_pct": 0.02,
+          "symbols": 2,
+          "weeks": 3
+        },
+        {
+          "events": 6,
+          "move_pct": 0.005,
+          "purge_pct": 0.03,
+          "symbols": 2,
+          "weeks": 2
+        },
+        {
+          "events": 4,
+          "move_pct": 0.01,
+          "purge_pct": 0.03,
+          "symbols": 2,
+          "weeks": 2
+        }
+      ],
+      "pass": false
+    },
+    "OPG-2_grid_fixed": {
+      "note": "all four pre-registered cells reported; none selected post hoc",
+      "pass": true
+    },
+    "OPG-3_two_venue_corroboration": {
+      "note": "corroboration rate reported per stratum; not enforced",
+      "pass": true
+    }
+  },
+  "falsification": {
+    "excess_ci_opposite_hypothesis_in_ge_2_configs": {
+      "adverse_configs": [],
+      "status": "NOT_TRIGGERED"
+    },
+    "expectancy_2x_cost": {
+      "reason": "event study precedes the cost sim",
+      "status": "NOT_ASSESSED"
+    },
+    "gate_verdict": "NOT_GRADABLE",
+    "wf_sign_flip": {
+      "reason": "walk-forward is downstream of this gate",
+      "status": "NOT_ASSESSED"
+    }
+  },
+  "hypothesis_id": "oi-purge-v1",
+  "kind": "opg_event_study",
+  "protocol": {
+    "bootstrap_replicates": 1000,
+    "boundary": "every bar of the window must lie in the event's UTC day (E3)",
+    "exhaustion": "OI must not fall in the confirming hour; entry at that hour",
+    "grid": {
+      "move_pct": [
+        0.005,
+        0.01
+      ],
+      "purge_pct": [
+        0.02,
+        0.03
+      ]
+    },
+    "horizons_hours": [
+      6,
+      24
+    ],
+    "partial_windows": "omitted",
+    "seed": 42,
+    "series": "signed mark return; BTC-ETH excess per venue as the beta control"
+  },
+  "run_id": "opg-event-study-2026-09-13"
+}

@@ -266,9 +266,12 @@ fn run() -> Result<ExitCode, String> {
             }
         }
     }
-    let obs_dir = Path::new(&out_dir).join("observations");
-    let paths = partitioned_write(&obs_dir, &observations)
+    // REL-34 layout note: partitioned_write appends `observations/<fp>` to
+    // the ROOT itself — pass out_dir directly (the sim CLI convention); a
+    // pre-joined `out_dir/observations` double-nests the identity dirs.
+    let paths = partitioned_write(Path::new(&out_dir), &observations)
         .map_err(|e| format!("observation write: {e}"))?;
+    let obs_dir = Path::new(&out_dir).join("observations");
 
     // ---- evaluation reports (per rule, per horizon) --------------------------
     for (rule_id, identity) in &identities {

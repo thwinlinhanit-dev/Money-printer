@@ -184,6 +184,12 @@ if (-not (Test-Path $rawDir)) { Log "master corpus dir missing: $rawDir" "ERROR"
 if ($Register) {
     $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(1), [DateTimeKind]::Utc)
     $localAt = $utcTarget.ToLocalTime()
+    # Registration-race guard (2026-09-05): -Daily anchors StartBoundary to the
+    # DATE passed in -At, so registering AT/AFTER the target time puts the
+    # boundary in the past and Task Scheduler can fire the task immediately into
+    # its own registration (MoneyPrinterDataBackup 00:07Z launch failure,
+    # 0xFFFD0000). Pin the first trigger to tomorrow in that case.
+    if ($localAt -le (Get-Date)) { $localAt = $localAt.AddDays(1) }
     $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
     $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
         -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`""

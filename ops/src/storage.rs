@@ -214,13 +214,16 @@ pub fn parse_drain_manifest_line(line: &str) -> Option<DrainManifestEntry> {
 
 /// The drain manifest's "VPS is still holding it" state: a file whose LATEST
 /// manifest entry is `action=landed` but `release` not in {released,
-/// no_release} — the byte-verified copy never left the relay (skipped by the
-/// re-hash guard, an ssh failure, …) and re-attempts next run. The manifest
-/// is append-only, so per-file LATEST-entry resolution is required: a file
-/// that failed one night but was released on a later run must not keep
-/// firing. `kept` (A-B collision — never released by design) and entries
-/// predating the `release` field are never flagged. Returns (file, reason)
-/// pairs sorted by file. Pure — the CLI owns the file I/O (PD-3, W-6).
+/// no_release, skipped: missing} — the byte-verified copy never left the
+/// relay (skipped by the re-hash guard, an ssh failure, …) and re-attempts
+/// next run. `skipped: missing` is the release script's re-verification proof
+/// that the relay holds NO copy (VPS retention pruned it) — that is released
+/// in effect and never flagged. The manifest is append-only, so per-file
+/// LATEST-entry resolution is required: a file that failed one night but was
+/// released on a later run must not keep firing. `kept` (A-B collision —
+/// never released by design) and entries predating the `release` field are
+/// never flagged. Returns (file, reason) pairs sorted by file. Pure — the
+/// CLI owns the file I/O (PD-3, W-6).
 pub fn held_drain_files(entries: &[DrainManifestEntry]) -> Vec<(String, String)> {
     let mut latest: BTreeMap<&str, &DrainManifestEntry> = BTreeMap::new();
     for e in entries {
@@ -236,7 +239,11 @@ pub fn held_drain_files(entries: &[DrainManifestEntry]) -> Vec<(String, String)>
     let mut held: Vec<(String, String)> = latest
         .into_iter()
         .filter(|(_, e)| {
-            e.action == "landed" && !matches!(e.release.as_str(), "released" | "no_release" | "")
+            e.action == "landed"
+                && !matches!(
+                    e.release.as_str(),
+                    "released" | "no_release" | "skipped: missing" | ""
+                )
         })
         .map(|(f, e)| (f.to_string(), e.release.clone()))
         .collect();

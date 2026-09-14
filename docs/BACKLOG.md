@@ -141,6 +141,18 @@ decision), or **[maybe-never]** (recorded so it stops being re-proposed).
   needs ≥ 3 days). Re-gate is one command when the next bybit days drain
   (ETHUSDT/SOLUSDT deploy + 08-16..) — the harness is pair-driven,
   `--run-id` distinguishes re-gate records.
+
+  FINAL VERDICT (2026-09-13, run `farb2-backtest-2026-09-13`): **KILLED** by
+  the pre-registered falsification. FARB-2 cleared (14 same-day pairs/symbol)
+  and the full-cost backtest graded both registered configs: 58 episodes,
+  expectancy −28.13/−28.16 bps at BASE costs (−57.1/−57.2 at the 2× kill
+  column), win rate 0/58. Mechanism: the cross-venue spread mean-reverts
+  within hours, so collectible carry (max 4.3 bps) never clears the
+  two-venue fee+spread leg (29 bps RT) — FARB-5's "the honest bar is the
+  spread at the exit" warned exactly this. Edge breadth was fine (6–8
+  calendar windows, WF sign-flips 0/3 — consistently negative, not curve
+  fit). Report: `docs/research/BACKTEST-funding-arb-v1-2026-09-13.md`.
+
 - **[v1.x] basis-carry-v1** — dated-future vs perp/spot basis harvest where
   listed (OKX/Binance quarterlies). EVENT-STUDY GATE (2026-08-16, RES-4
   batch 2): dated-future leg NOT TESTABLE by construction (no quarterly

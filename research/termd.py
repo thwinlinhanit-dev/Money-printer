@@ -402,73 +402,122 @@ def _dom(
     }
 
 
-# Feature families for options analytics (specs 037-040).
-OPTIONS_FAMILIES = [
-    "gex.net",
-    "gex.max_pain",
-    "net.delta",
-    "net.vega",
-    "net.theta",
-    "iv.atm",
-    "iv.index",
-    "iv.skew",
-    "iv.regime",
-    "iv.percentile",
-]
+# Feature families feeding /v1/options (specs 037-040). The feature store's
+# directories ARE full feature ids (e.g. `features/iv.skew.btc.rr25/`), so a
+# family entry here is the id PREFIX plus how the underlying is embedded:
+#   "suffix": `family.{u}`           (gex.net.btc, iv.regime.eth)
+#   "tail":   `family.{u}.{tail}`   (iv.skew.btc.rr25, iv.term.eth.1m)
+# The old list held bare prefixes ("iv.skew", "gex.net") treated as directory
+# names — no such dirs exist on disk, so /v1/options always returned {}.
+OPTIONS_FAMILIES: dict[str, str] = {
+    "gex.net": "suffix",
+    "gex.max_pain": "suffix",
+    "net.delta": "suffix",
+    "net.vega": "suffix",
+    "net.theta": "suffix",
+    "iv.atm": "suffix",
+    "iv.index": "suffix",
+    "iv.regime": "suffix",
+    "iv.percentile": "suffix",
+    "iv.skew": "tail",
+    "iv.term": "tail",
+}
+
+_OPTIONS_CACHE_TTL_S = 5.0  # dir scan is not free; absorb the UI's 5s poll
+_options_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _options_feature_dir_id(name: str, u: str) -> str | None:
+    """Feature id for a feature-store dir name, or None when the dir is not an
+    options id for this underlying (id grammar in OPTIONS_FAMILIES)."""
+    for family, mode in OPTIONS_FAMILIES.items():
+        fam_parts = family.split(".")
+        parts = name.split(".")
+        if parts[: len(fam_parts)] != fam_parts:
+            continue
+        rest = parts[len(fam_parts) :]
+        if mode == "suffix" and rest == [u]:
+            return name
+        if mode == "tail" and len(rest) >= 2 and rest[0] == u:
+            return name
+    return None
+
+
+def _latest_feature_value(pq: Path) -> tuple[int, float] | None:
+    """(ts_ns, value) of the LAST row, or None. Multiple symbol-days can live
+    under one id dir, so 'latest' means max ts_ns — not merely the last ROW
+    of one file. One corrupt file must not kill the payload."""
+    try:
+        df = pl.read_parquet(pq, columns=["ts_ns", "value"])
+        if df.is_empty():
+            return None
+        row = df.sort("ts_ns").tail(1)
+        val = row["value"][0]
+        if val is None:
+            return None
+        return int(row["ts_ns"][0]), float(val)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _options_payload(underlying: str) -> dict[str, Any]:
-    """Aggregate options analytics for one underlying from the feature store.
-    Returns the latest value of each options feature + GEX profile."""
-    features: dict[str, Any] = {}
-    gex_profile: list[dict[str, Any]] = []
-    term_structure: list[dict[str, Any]] = []
-    flow: dict[str, Any] = {
-        "npf": 0,
-        "block": 0,
-        "netDelta": 0,
-        "callPutRatio": 0,
-        "whaleNet": 0,
-    }
+    """Aggregate options analytics for one underlying from the feature store:
+    latest value per options feature id (dirs are full ids — see
+    OPTIONS_FAMILIES), term structure from `iv.term.{u}.*`, and spot from
+    `iv.index.{u}` (the option-ticker index price). Per-strike GEX profiles
+    are computed in-memory by the Rust engine (OptionsGreeks::gex_profile)
+    and are NOT materialized, so `gex_profile` is an explicit empty state
+    with a note (UI-5) — never fabricated data."""
     u = underlying.lower()
-    # Read latest feature values from Parquet
-    for family in OPTIONS_FAMILIES:
-        feature_id = f"{family}.{u}"
-        root = DATA_ROOT / "features" / family
-        ver = _max_ver_dir(root)
-        if ver is None:
+    now = time.monotonic()
+    hit = _options_cache.get(u)
+    if hit is not None and now - hit[0] < _OPTIONS_CACHE_TTL_S:
+        return hit[1]
+
+    base = DATA_ROOT / "features"
+    best: dict[str, tuple[int, float]] = {}  # fid -> (ts_ns, value)
+    try:
+        candidates = [p for p in base.iterdir() if p.is_dir()]
+    except OSError:
+        candidates = []
+    for d in candidates:
+        fid = _options_feature_dir_id(d.name, u)
+        if fid is None:
             continue
-        # Scan all venue/symbol dirs for this underlying's option tickers
-        for venue_dir in ver.glob("venue=*"):
-            for sym_dir in venue_dir.glob("symbol=*"):
-                for pq in sym_dir.glob("*.parquet"):
-                    try:
-                        df = pl.read_parquet(pq)
-                        if "value" in df.columns and len(df) > 0:
-                            last = df.sort("ts_ns").tail(1)
-                            val = last["value"][0]
-                            if val is not None and str(val) != "null":
-                                features[feature_id] = {
-                                    "value": float(val),
-                                    "ts_ns": int(last["ts_ns"][0])
-                                    if "ts_ns" in df.columns
-                                    else 0,
-                                }
-                    except Exception:  # noqa: BLE001
-                        pass
-    # Build term structure from iv.term.{u}.* features
-    for tenor in ["1w", "1m", "3m", "6m"]:
-        fid = f"iv.term.{u}.{tenor}"
-        if fid in features:
-            term_structure.append({"tenor": tenor, "iv": features[fid]["value"]})
-    return {
+        for pq in d.glob("venue=*/symbol=*/*.parquet"):
+            got = _latest_feature_value(pq)
+            if got is None:
+                continue
+            ts_ns, value = got
+            prev = best.get(fid)
+            if prev is None or ts_ns > prev[0]:
+                best[fid] = (ts_ns, value)
+    features = {
+        fid: {"value": value, "ts_ns": ts_ns}
+        for fid, (ts_ns, value) in best.items()
+    }
+
+    term_structure = [
+        {"tenor": t, "iv": features[f"iv.term.{u}.{t}"]["value"]}
+        for t in ("1w", "1m", "3m", "6m")
+        if f"iv.term.{u}.{t}" in features
+    ]
+    payload = {
         "underlying": u,
         "features": features,
-        "gex_profile": gex_profile,
+        "spot": features.get(f"iv.index.{u}", {}).get("value"),
+        "gex_profile": [],
         "term_structure": term_structure,
-        "flow": flow,
+        "flow": {"npf": 0, "block": 0, "netDelta": 0, "callPutRatio": 0, "whaleNet": 0},
         "trades": [],
+        "note": (
+            f"no options features for {u} in the feature store"
+            if not features
+            else "per-strike GEX profile is not materialized (computed in-engine only)"
+        ),
     }
+    _options_cache[u] = (time.monotonic(), payload)
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -588,9 +637,15 @@ class _WsSession:
         return out
 
 
-def _insight_payload(asset: str) -> dict[str, Any]:
-    """Per-token AI insight endpoint (spec 044 TOK-5). Returns cached insight
-    with staleness metadata, or generates one if no cache exists."""
+_INSIGHT_COMPOSER: list[Any] = []  # memoized [composer] — module load is not free
+
+
+def _get_insight_composer() -> Any:
+    """Load research/insight_composer.py once and reuse the composer across
+    requests (the file-based cache is shared either way; re-exec'ing the
+    module per request just burned startup work on every cold page load)."""
+    if _INSIGHT_COMPOSER:
+        return _INSIGHT_COMPOSER[0]
     import importlib.util
 
     spec_mod = importlib.util.spec_from_file_location(
@@ -601,6 +656,14 @@ def _insight_payload(asset: str) -> dict[str, Any]:
     mod = importlib.util.module_from_spec(spec_mod)
     spec_mod.loader.exec_module(mod)
     composer = mod.InsightComposer(mod.InsightConfig())
+    _INSIGHT_COMPOSER.append(composer)
+    return composer
+
+
+def _insight_payload(asset: str) -> dict[str, Any]:
+    """Per-token AI insight endpoint (spec 044 TOK-5). Returns cached insight
+    with staleness metadata, or generates one if no cache exists."""
+    composer = _get_insight_composer()
     cached = composer.cache.get(asset)
     if cached:
         insight, stale = cached

@@ -108,6 +108,13 @@ fn direction_from_code(code: i8) -> Direction {
 
 /// Deterministic content hash over observations + outcomes (FNV-1a) — the
 /// W-6 no-overwrite identity. Same observations ⇒ same hash, always.
+///
+/// REL-33: snapshot values are hashed in their STORAGE-CANONICAL form — the
+/// f64 that actually survives the JSON text column (`parse(ryu(v))`). The
+/// f64→decimal→f64 cycle is not bit-exact for long-decimal values, so hashing
+/// the raw bits would make every read-back hash differ from the in-memory
+/// hash and break W-6 idempotency for identical re-runs. Canonicalizing here
+/// makes in-memory and read-back hashes agree by construction.
 pub fn observations_content_hash(obs: &[SignalObservation]) -> u64 {
     let mut h = FNV1A_OFFSET;
     for o in obs {
@@ -121,7 +128,9 @@ pub fn observations_content_hash(obs: &[SignalObservation]) -> u64 {
         h = fnv1a_absorb(h, &o.created_at_ns.to_le_bytes());
         for (k, v) in &o.feature_snapshot {
             h = fnv1a_absorb(h, k.as_bytes());
-            h = fnv1a_absorb(h, &v.to_bits().to_le_bytes());
+            // Storage-canonical value: hash what the JSON column preserves.
+            let canon = storage_canonical_f64(*v);
+            h = fnv1a_absorb(h, &canon.to_bits().to_le_bytes());
         }
         for oc in &o.outcomes {
             h = fnv1a_absorb(h, &oc.horizon_ns.to_le_bytes());
@@ -294,11 +303,32 @@ pub fn write_observations_no_overwrite(
     write_observations(path, obs)
 }
 
+/// REL-33: the storage-canonical form of a snapshot value — the f64 that
+/// actually survives the JSON text column under THIS module's writer+parser
+/// pair. The f64→decimal→f64 cycle is not bit-exact for some long-decimal
+/// values (1-ULP drift) but is idempotent after one pass, so canonicalizing
+/// before hashing makes in-memory and read-back hashes agree by construction.
+/// Non-finite values never reach a snapshot (quality gate), but hash their
+/// raw bits to keep behavior defined.
+fn storage_canonical_f64(v: f64) -> f64 {
+    if !v.is_finite() {
+        return v;
+    }
+    let s = serde_json::to_string(&v).unwrap_or_else(|_| v.to_string());
+    serde_json::from_str::<f64>(&s).unwrap_or(v)
+}
+
 /// Partitioned write: one `{date}-{content_hash}.parquet` per UTC date of the
 /// observations' OWN `timestamp_ns` (midnight-straddling batches land rows on
 /// the days they happened). Layout:
 /// `{root}/observations/{identity_fingerprint}/date={date}-{hash}.parquet`.
 /// Returns the paths written.
+///
+/// REL-33: the W-6 guard is CONTENT-based, not filename-based — before
+/// writing, every existing `date={d}-*.parquet` sibling is read and compared;
+/// identical content is a no-op (returns the existing path), divergent
+/// content on the same identity+date is a hard error (append-only, R-2). A
+/// filename-hash match alone is not trusted (the hash function may evolve).
 pub fn partitioned_write(
     root: &Path,
     observations: &[SignalObservation],
@@ -306,20 +336,79 @@ pub fn partitioned_write(
     if observations.is_empty() {
         return Ok(Vec::new());
     }
-    let fp = observations[0].identity.fingerprint();
-    let base = root.join("observations").join(&fp);
+    // REL-35: group by identity fingerprint FIRST, then delegate to the
+    // per-identity date-partition writer. A multi-identity batch (the
+    // footprint study writes one identity per rule) must land each
+    // identity's rows in their own directory — taking observations[0]'s
+    // fingerprint for the whole batch silently mis-filed every other
+    // identity's rows while they still carried their true identity columns
+    // (a store the REL-34 Python loader must refuse).
+    let mut by_fp: BTreeMap<String, Vec<&SignalObservation>> = BTreeMap::new();
+    for o in observations {
+        by_fp
+            .entry(o.identity.fingerprint())
+            .or_default()
+            .push(o);
+    }
+    let mut out = Vec::new();
+    for (fp, obs) in &by_fp {
+        out.extend(write_identity_partition(root, fp, obs)?);
+    }
+    Ok(out)
+}
+
+/// One identity's date-partitioned write (REL-35 helper): the REL-33
+/// content-based sibling guard applies per identity+date.
+fn write_identity_partition(
+    root: &Path,
+    fp: &str,
+    observations: &[&SignalObservation],
+) -> Result<Vec<PathBuf>, StorageError> {
+    let base = root.join("observations").join(fp);
     std::fs::create_dir_all(&base)?;
     let mut by_date: BTreeMap<String, Vec<SignalObservation>> = BTreeMap::new();
     for o in observations {
         by_date
             .entry(crate::feature_store::date_str(o.timestamp_ns))
             .or_default()
-            .push(o.clone());
+            .push((*o).clone());
     }
     let mut out = Vec::new();
     for (d, group) in by_date {
         let hash = observations_content_hash(&group);
         let path = base.join(format!("date={d}-{hash:016x}.parquet"));
+        // REL-33 content-based guard: identical content anywhere in the
+        // date partition ⇒ no-op (return that path); divergent content
+        // under the same identity+date ⇒ hard error, never a duplicate
+        // sibling file.
+        let mut identical: Option<PathBuf> = None;
+        for sib in base
+            .read_dir()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| {
+                        n.starts_with(&format!("date={d}-")) && n.ends_with(".parquet")
+                    })
+            })
+        {
+            let Ok(existing) = read_observations(&sib) else { continue };
+            if observations_content_hash(&existing) == hash {
+                identical = Some(sib);
+                break;
+            }
+            return Err(StorageError::Parquet(format!(
+                "refusing divergent observation content for identity {} on date {d} (W-6): {}",
+                fp,
+                sib.display()
+            )));
+        }
+        if let Some(sib) = identical {
+            out.push(sib);
+            continue;
+        }
         write_observations_no_overwrite(&path, &group)?;
         out.push(path);
     }
@@ -570,6 +659,149 @@ mod tests {
         let back = read_observations(&path).unwrap();
         assert_eq!(back[0].quality, DataQualityState::Missing);
         assert_eq!(back[1].quality, DataQualityState::Gap);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REL-33(a): the W-6 content hash must be STABLE across the Parquet
+    /// roundtrip even for snapshot values whose f64→JSON→f64 cycle is not
+    /// bit-exact (1-ULP drift on long decimals). Regression for the PAP-12
+    /// smoke failure: identical re-runs were refused because the read-back
+    /// hash drifted from the in-memory hash.
+    #[test]
+    fn rel_33_content_hash_survives_roundtrip_for_lossy_f64_snapshots() {
+        let dir = tmp("rel33-roundtrip");
+        let mut obs = sample_obs(3, true);
+        // Inject the exact class of value that drifted live:
+        // 11.439860000000003 → JSON → 11.439860000000005.
+        obs[0].feature_snapshot.insert(
+            "cvd.hyperliquid".to_string(),
+            11.439_860_000_000_003_f64,
+        );
+        obs[1]
+            .feature_snapshot
+            .insert("orderflow.gauge".to_string(), 0.300_000_000_000_000_04_f64);
+        let path = dir.join("lossy.parquet");
+
+        // The value really does drift under the writer+parser pair —
+        // guard the regression against silently losing its trigger.
+        let raw = *obs[0].feature_snapshot.get("cvd.hyperliquid").unwrap();
+        let s = serde_json::to_string(&raw).unwrap();
+        let back_v: f64 = serde_json::from_str(&s).unwrap();
+        assert_ne!(raw.to_bits(), back_v.to_bits(), "fixture value no longer drifts — pick another");
+
+        // Hash equality across the roundtrip is the contract.
+        write_observations(&path, &obs).unwrap();
+        let back = read_observations(&path).unwrap();
+        assert_eq!(
+            observations_content_hash(&obs),
+            observations_content_hash(&back),
+            "W-6 hash must survive the JSON snapshot column roundtrip"
+        );
+
+        // And the guard accepts the identical re-write as a no-op.
+        assert_eq!(write_observations_no_overwrite(&path, &obs).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REL-35: a MULTI-identity batch must land each identity's rows in
+    /// their own directory (grouping by fingerprint first) — not everything
+    /// under observations[0]'s fingerprint. Each identity dir then loads
+    /// cleanly as a single-identity store (the REL-34 loader contract).
+    #[test]
+    fn rel_35_partitioned_write_groups_multi_identity_batches_per_fingerprint() {
+        let dir = tmp("rel35-multi");
+        let mut a = ObservationEngine::with_default_quality(
+            SignalResearchIdentity::new("rule-a", 1, "p", "cost-1"),
+            T0,
+        );
+        let mut b = ObservationEngine::with_default_quality(
+            SignalResearchIdentity::new("rule-b", 1, "p", "cost-1"),
+            T0,
+        );
+        let mut obs = Vec::new();
+        for (e, sym) in [(&mut a, SymbolId(1)), (&mut b, SymbolId(2))] {
+            // Quality warmup: the tracker blocks records without history.
+            for i in 0..5 {
+                e.on_feature_update(&mp_features::FeatureUpdate {
+                    symbol: sym,
+                    feature: SymbolId(9),
+                    name: "funding.rate".into(),
+                    venue: Venue::Bybit,
+                    value: 0.0001 * i as f64,
+                    ts_ns: T0 + i,
+                    ver: 1,
+                });
+            }
+            for i in 0..3 {
+                obs.push(
+                    e.record(
+                        T0 + 10 + i,
+                        sym,
+                        Venue::Bybit,
+                        Direction::Long,
+                        BTreeMap::from([("funding.rate".into(), 0.0004)]),
+                    )
+                    .expect("healthy"),
+                );
+            }
+        }
+        assert_eq!(obs.len(), 6);
+        let paths = partitioned_write(&dir, &obs).unwrap();
+        // 2 identities × 1 date ⇒ 2 files, in DIFFERENT identity dirs.
+        assert_eq!(paths.len(), 2);
+        let dirs: std::collections::BTreeSet<PathBuf> = paths
+            .iter()
+            .map(|p| p.parent().unwrap().to_path_buf())
+            .collect();
+        assert_eq!(dirs.len(), 2, "one directory per identity, got {dirs:?}");
+        // Each directory must load cleanly as a single-identity store.
+        for d in dirs {
+            let back = read_observations(
+                &std::fs::read_dir(&d).unwrap().next().unwrap().unwrap().path(),
+            )
+            .unwrap();
+            assert_eq!(back.len(), 3);
+            assert_eq!(back[0].identity.fingerprint(), d.file_name().unwrap().to_string_lossy());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REL-33(b): partitioned_write's guard is CONTENT-based — divergent
+    /// content for the same identity+date must fault, not land as a
+    /// duplicate `date=D-hash2.parquet` sibling; identical content must be
+    /// a no-op returning the existing path.
+    #[test]
+    fn rel_33_partitioned_write_is_content_garded_not_name_garded() {
+        let dir = tmp("rel33-siblings");
+        let obs = sample_obs(2, true);
+
+        // First write lands one date file.
+        let paths = partitioned_write(&dir, &obs).unwrap();
+        assert_eq!(paths.len(), 1);
+        let first = paths[0].clone();
+
+        // Identical re-write: no-op, SAME path returned.
+        let again = partitioned_write(&dir, &obs).unwrap();
+        assert_eq!(again, vec![first.clone()], "identical re-write must reuse the existing file");
+        assert_eq!(
+            std::fs::read_dir(first.parent().unwrap()).unwrap().count(),
+            1,
+            "no duplicate sibling may appear"
+        );
+
+        // Divergent content, same date + identity: HARD ERROR.
+        let mut changed = obs.clone();
+        changed[0].timestamp_ns += 1_000_000; // same date, different content
+        let err = partitioned_write(&dir, &changed).unwrap_err();
+        assert!(
+            format!("{err}").contains("W-6"),
+            "divergent content must W-6 fault: {err}"
+        );
+        assert_eq!(
+            std::fs::read_dir(first.parent().unwrap()).unwrap().count(),
+            1,
+            "the divergence must not create a sibling file"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

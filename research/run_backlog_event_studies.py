@@ -73,6 +73,39 @@ CROSS_VENUE_PAIRS = [
     ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260815"),
     ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260816"),
     ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260816"),
+    # FARB-2 re-gate (2026-09-12): the bybit drain grew the overlap corpus
+    # from 2 to 15 same-day pairs per symbol. 07-19 is intentionally NOT
+    # repeated for bybit (the bybit leg is a 60 KB collector-start stub with
+    # ~0 funding hours; the 07-19 calendar day is already graded via the
+    # binance pair above).
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260825"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260826"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260827"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260828"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260829"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260830"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260831"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260901"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260902"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260906"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260907"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260908"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260909"),
+    ("hyperliquid", "BTC", "bybit", "BTCUSDT", "20260910"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260825"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260826"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260827"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260828"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260829"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260830"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260831"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260901"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260902"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260906"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260907"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260908"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260909"),
+    ("hyperliquid", "ETH", "bybit", "ETHUSDT", "20260910"),
 ]
 
 # basis-carry-v1: perp-vs-oracle basis thresholds (bps) — |basis| wide = the

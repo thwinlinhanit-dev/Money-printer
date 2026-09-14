@@ -1,0 +1,2506 @@
+{
+  "data_gate": {
+    "audit_records": [
+      {
+        "blocking_codes": [
+          "backpressure_loss",
+          "low_coverage"
+        ],
+        "coverage": 0.9614300449557438,
+        "day": "20260825",
+        "eligible": false,
+        "event_count": 3016526,
+        "findings": [
+          {
+            "code": "backpressure_loss",
+            "detail": "11129 dropped frame(s) at 1787624391996936653"
+          },
+          {
+            "code": "coverage_gap",
+            "detail": "1 gap(s)"
+          },
+          {
+            "code": "low_coverage",
+            "detail": "coverage 0.9614 < required 0.995"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260826",
+        "eligible": true,
+        "event_count": 2223798,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260827",
+        "eligible": true,
+        "event_count": 2474957,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260828",
+        "eligible": false,
+        "event_count": 2866548,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260829",
+        "eligible": false,
+        "event_count": 709967,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "4 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 4,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260830",
+        "eligible": false,
+        "event_count": 1441622,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "5 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 5,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260831",
+        "eligible": false,
+        "event_count": 2288040,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "2 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 2,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [
+          "low_coverage"
+        ],
+        "coverage": 0.689024876534722,
+        "day": "20260901",
+        "eligible": false,
+        "event_count": 1241906,
+        "findings": [
+          {
+            "code": "coverage_gap",
+            "detail": "1 gap(s)"
+          },
+          {
+            "code": "low_coverage",
+            "detail": "coverage 0.6890 < required 0.995"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260902",
+        "eligible": true,
+        "event_count": 1927060,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260903",
+        "eligible": true,
+        "event_count": 2801410,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260904",
+        "eligible": false,
+        "event_count": 2233491,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260905",
+        "eligible": false,
+        "event_count": 647059,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "9 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 7,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260906",
+        "eligible": false,
+        "event_count": 864483,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "7 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 6,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260907",
+        "eligible": false,
+        "event_count": 1270910,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "4 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 4,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260908",
+        "eligible": false,
+        "event_count": 1819624,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "3 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 3,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260909",
+        "eligible": false,
+        "event_count": 2060356,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260910",
+        "eligible": false,
+        "event_count": 2049048,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "3 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 3,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260911",
+        "eligible": false,
+        "event_count": 2738259,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "4 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 4,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260912",
+        "eligible": false,
+        "event_count": 378833,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "26 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 22,
+        "symbol": "BTCUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [
+          "low_coverage"
+        ],
+        "coverage": 0.9617347775593587,
+        "day": "20260825",
+        "eligible": false,
+        "event_count": 2712813,
+        "findings": [
+          {
+            "code": "coverage_gap",
+            "detail": "1 gap(s)"
+          },
+          {
+            "code": "low_coverage",
+            "detail": "coverage 0.9617 < required 0.995"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260826",
+        "eligible": true,
+        "event_count": 2386135,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260827",
+        "eligible": true,
+        "event_count": 2663694,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260828",
+        "eligible": false,
+        "event_count": 2673027,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260829",
+        "eligible": false,
+        "event_count": 671317,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "18 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 15,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260830",
+        "eligible": false,
+        "event_count": 1763443,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "12 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 11,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260831",
+        "eligible": false,
+        "event_count": 2347453,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [
+          "low_coverage"
+        ],
+        "coverage": 0.6890227231427449,
+        "day": "20260901",
+        "eligible": false,
+        "event_count": 1201033,
+        "findings": [
+          {
+            "code": "coverage_gap",
+            "detail": "1 gap(s)"
+          },
+          {
+            "code": "low_coverage",
+            "detail": "coverage 0.6890 < required 0.995"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260902",
+        "eligible": false,
+        "event_count": 2225642,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260903",
+        "eligible": false,
+        "event_count": 2626086,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260904",
+        "eligible": false,
+        "event_count": 2360618,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "2 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 2,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260905",
+        "eligible": false,
+        "event_count": 729956,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "14 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 12,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260906",
+        "eligible": false,
+        "event_count": 1428179,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260907",
+        "eligible": true,
+        "event_count": 1735959,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260908",
+        "eligible": false,
+        "event_count": 2144027,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "2 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 2,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260909",
+        "eligible": false,
+        "event_count": 2282943,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260910",
+        "eligible": false,
+        "event_count": 2256678,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260911",
+        "eligible": false,
+        "event_count": 3953175,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "2 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 2,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260912",
+        "eligible": false,
+        "event_count": 780445,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "8 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 8,
+        "symbol": "ETHUSDT",
+        "venue": "bybit"
+      },
+      {
+        "blocking_codes": [
+          "low_coverage"
+        ],
+        "coverage": 0.9599442950255705,
+        "day": "20260825",
+        "eligible": false,
+        "event_count": 746490,
+        "findings": [
+          {
+            "code": "coverage_gap",
+            "detail": "2 gap(s)"
+          },
+          {
+            "code": "low_coverage",
+            "detail": "coverage 0.9599 < required 0.995"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260826",
+        "eligible": false,
+        "event_count": 620397,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260827",
+        "eligible": false,
+        "event_count": 637069,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260828",
+        "eligible": true,
+        "event_count": 729392,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260829",
+        "eligible": false,
+        "event_count": 420200,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "6 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260830",
+        "eligible": true,
+        "event_count": 506643,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260831",
+        "eligible": false,
+        "event_count": 195621,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "103 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 4,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260901",
+        "eligible": false,
+        "event_count": 292262,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "150 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 6,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260902",
+        "eligible": true,
+        "event_count": 628176,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "day": "20260903",
+        "eligible": false,
+        "present": false,
+        "reason": "missing log",
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "day": "20260904",
+        "eligible": false,
+        "present": false,
+        "reason": "missing log",
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "day": "20260905",
+        "eligible": false,
+        "present": false,
+        "reason": "missing log",
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260906",
+        "eligible": false,
+        "event_count": 408347,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260907",
+        "eligible": true,
+        "event_count": 471354,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260908",
+        "eligible": true,
+        "event_count": 564010,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260909",
+        "eligible": false,
+        "event_count": 631275,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260910",
+        "eligible": true,
+        "event_count": 579119,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260911",
+        "eligible": false,
+        "event_count": 633428,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260912",
+        "eligible": false,
+        "event_count": 356272,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "2 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 2,
+        "symbol": "BTC",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [
+          "low_coverage"
+        ],
+        "coverage": 0.9600566360864438,
+        "day": "20260825",
+        "eligible": false,
+        "event_count": 483454,
+        "findings": [
+          {
+            "code": "coverage_gap",
+            "detail": "2 gap(s)"
+          },
+          {
+            "code": "stale_stream",
+            "detail": "2 stale status event(s)"
+          },
+          {
+            "code": "low_coverage",
+            "detail": "coverage 0.9601 < required 0.995"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260826",
+        "eligible": true,
+        "event_count": 459324,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260827",
+        "eligible": true,
+        "event_count": 472261,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260828",
+        "eligible": true,
+        "event_count": 460618,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260829",
+        "eligible": false,
+        "event_count": 338046,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "6 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260830",
+        "eligible": true,
+        "event_count": 435264,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260831",
+        "eligible": false,
+        "event_count": 140417,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "104 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 5,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260901",
+        "eligible": false,
+        "event_count": 197147,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "150 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 6,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260902",
+        "eligible": true,
+        "event_count": 425636,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "day": "20260903",
+        "eligible": false,
+        "present": false,
+        "reason": "missing log",
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "day": "20260904",
+        "eligible": false,
+        "present": false,
+        "reason": "missing log",
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "day": "20260905",
+        "eligible": false,
+        "present": false,
+        "reason": "missing log",
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260906",
+        "eligible": true,
+        "event_count": 376165,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260907",
+        "eligible": true,
+        "event_count": 410666,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260908",
+        "eligible": false,
+        "event_count": 401769,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260909",
+        "eligible": false,
+        "event_count": 426291,
+        "findings": [
+          {
+            "code": "stale_stream",
+            "detail": "1 stale status event(s)"
+          }
+        ],
+        "present": true,
+        "stale_bursts": 1,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260910",
+        "eligible": true,
+        "event_count": 410678,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260911",
+        "eligible": true,
+        "event_count": 556685,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      },
+      {
+        "blocking_codes": [],
+        "coverage": 1.0,
+        "day": "20260912",
+        "eligible": true,
+        "event_count": 335912,
+        "findings": [],
+        "present": true,
+        "stale_bursts": 0,
+        "symbol": "ETH",
+        "venue": "hyperliquid"
+      }
+    ],
+    "eligible_days_by_recording": {
+      "bybit:BTCUSDT": [
+        "20260826",
+        "20260827",
+        "20260902",
+        "20260903"
+      ],
+      "bybit:ETHUSDT": [
+        "20260826",
+        "20260827",
+        "20260907"
+      ],
+      "hyperliquid:BTC": [
+        "20260828",
+        "20260830",
+        "20260902",
+        "20260907",
+        "20260908",
+        "20260910"
+      ],
+      "hyperliquid:ETH": [
+        "20260826",
+        "20260827",
+        "20260828",
+        "20260830",
+        "20260902",
+        "20260906",
+        "20260907",
+        "20260910",
+        "20260911",
+        "20260912"
+      ]
+    },
+    "end_day": "2026-09-12",
+    "fpx1_by_config": {
+      "pct80_range0.4": {
+        "all_recordings_meet_20_events_and_3_weeks": false,
+        "by_recording": [
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "BTCUSDT",
+            "venue": "bybit"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "ETHUSDT",
+            "venue": "bybit"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "BTC",
+            "venue": "hyperliquid"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "ETH",
+            "venue": "hyperliquid"
+          }
+        ],
+        "is_reference_for_fpx1": false,
+        "thresholds": {
+          "range_atr_ratio": 0.4,
+          "volume_percentile": 80.0
+        }
+      },
+      "pct80_range0.6": {
+        "all_recordings_meet_20_events_and_3_weeks": false,
+        "by_recording": [
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "BTCUSDT",
+            "venue": "bybit"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "ETHUSDT",
+            "venue": "bybit"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "BTC",
+            "venue": "hyperliquid"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "ETH",
+            "venue": "hyperliquid"
+          }
+        ],
+        "is_reference_for_fpx1": true,
+        "thresholds": {
+          "range_atr_ratio": 0.6,
+          "volume_percentile": 80.0
+        }
+      },
+      "pct90_range0.4": {
+        "all_recordings_meet_20_events_and_3_weeks": false,
+        "by_recording": [
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "BTCUSDT",
+            "venue": "bybit"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "ETHUSDT",
+            "venue": "bybit"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "BTC",
+            "venue": "hyperliquid"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "ETH",
+            "venue": "hyperliquid"
+          }
+        ],
+        "is_reference_for_fpx1": false,
+        "thresholds": {
+          "range_atr_ratio": 0.4,
+          "volume_percentile": 90.0
+        }
+      },
+      "pct90_range0.6": {
+        "all_recordings_meet_20_events_and_3_weeks": false,
+        "by_recording": [
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "BTCUSDT",
+            "venue": "bybit"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "ETHUSDT",
+            "venue": "bybit"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "BTC",
+            "venue": "hyperliquid"
+          },
+          {
+            "days": [],
+            "n_days": 0,
+            "n_events": 0,
+            "n_weeks": 0,
+            "symbol": "ETH",
+            "venue": "hyperliquid"
+          }
+        ],
+        "is_reference_for_fpx1": false,
+        "thresholds": {
+          "range_atr_ratio": 0.6,
+          "volume_percentile": 90.0
+        }
+      }
+    },
+    "fpx1_pass": false,
+    "start_day": "2026-08-25"
+  },
+  "falsification": {
+    "base_net_negative_every_config": {
+      "reason": "event study has no execution/fill cost model",
+      "status": "NOT_ASSESSED"
+    },
+    "event_study_excess_ci_opposite_at_two_or_more_horizons_in_two_or_more_configs": {
+      "adverse_configs": [],
+      "requires_fpx1": true,
+      "status": "NOT_TRIGGERED"
+    },
+    "expectancy_2x_cost": {
+      "reason": "event study precedes full-cost sim",
+      "status": "NOT_ASSESSED"
+    },
+    "gate_verdict": "NOT_GRADABLE",
+    "overall": "NOT_KILLED_BY_EVENT_STUDY",
+    "profitable_episodes_fewer_than_three_weeks": {
+      "reason": "episode P&L is a backtest-stage measure",
+      "status": "NOT_ASSESSED"
+    },
+    "walk_forward_sign_flip": {
+      "reason": "walk-forward is downstream of FPX event gate",
+      "status": "NOT_ASSESSED"
+    }
+  },
+  "hypothesis_id": "footprint-exhaustion-v1",
+  "kind": "fpx_event_study",
+  "pooled_results": [
+    {
+      "car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "event_days": [],
+      "excess_car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "excess_ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "excess_positive_horizons": 0,
+      "n_days": 0,
+      "n_events_complete_1h": 0,
+      "n_events_complete_2h": 0,
+      "n_events_complete_4h": 0,
+      "n_events_raw": 0,
+      "n_weeks": 0,
+      "range_ratio": 0.4,
+      "raw_positive_horizons": 0,
+      "symbols": [],
+      "venues": [],
+      "volume_pct": 80.0
+    },
+    {
+      "car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "event_days": [],
+      "excess_car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "excess_ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "excess_positive_horizons": 0,
+      "n_days": 0,
+      "n_events_complete_1h": 0,
+      "n_events_complete_2h": 0,
+      "n_events_complete_4h": 0,
+      "n_events_raw": 0,
+      "n_weeks": 0,
+      "range_ratio": 0.6,
+      "raw_positive_horizons": 0,
+      "symbols": [],
+      "venues": [],
+      "volume_pct": 80.0
+    },
+    {
+      "car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "event_days": [],
+      "excess_car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "excess_ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "excess_positive_horizons": 0,
+      "n_days": 0,
+      "n_events_complete_1h": 0,
+      "n_events_complete_2h": 0,
+      "n_events_complete_4h": 0,
+      "n_events_raw": 0,
+      "n_weeks": 0,
+      "range_ratio": 0.4,
+      "raw_positive_horizons": 0,
+      "symbols": [],
+      "venues": [],
+      "volume_pct": 90.0
+    },
+    {
+      "car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "event_days": [],
+      "excess_car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "excess_ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "excess_positive_horizons": 0,
+      "n_days": 0,
+      "n_events_complete_1h": 0,
+      "n_events_complete_2h": 0,
+      "n_events_complete_4h": 0,
+      "n_events_raw": 0,
+      "n_weeks": 0,
+      "range_ratio": 0.6,
+      "raw_positive_horizons": 0,
+      "symbols": [],
+      "venues": [],
+      "volume_pct": 90.0
+    }
+  ],
+  "protocol": {
+    "atr_denominator": "20 bars immediately before candidate; candidate excluded",
+    "atr_window_bars": 20,
+    "bar_interval": "1h",
+    "bootstrap_replicates": 1000,
+    "costs": "not applied in event study; cost/WF criteria require backtest",
+    "delta": "buy_vol - sell_vol from mp-query bars; mirrored sign condition",
+    "event_timestamp": "climax-bar-close; +1h starts with the next closed bar",
+    "horizons_hours": [
+      1,
+      2,
+      4
+    ],
+    "integrity": "coverage >= 0.995, no blocking INT-4 findings, zero stale_bursts; segments reset at any non-eligible/missing day",
+    "partial_windows": "omitted",
+    "range_atr_ratios": [
+      0.4,
+      0.6
+    ],
+    "seed": 42,
+    "volume_percentiles": [
+      80.0,
+      90.0
+    ],
+    "volume_window_bars": 100
+  },
+  "run_id": "fpx-event-study-2026-09-13",
+  "strata_results": {
+    "bybit:BTCUSDT": [
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.4,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 80.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.6,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 80.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.4,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 90.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.6,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 90.0
+      }
+    ],
+    "bybit:ETHUSDT": [
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.4,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 80.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.6,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 80.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.4,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 90.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.6,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 90.0
+      }
+    ],
+    "hyperliquid:BTC": [
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.4,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 80.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.6,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 80.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.4,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 90.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.6,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 90.0
+      }
+    ],
+    "hyperliquid:ETH": [
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.4,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 80.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.6,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 80.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.4,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 90.0
+      },
+      {
+        "car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "event_days": [],
+        "excess_car_bps": {
+          "+1h": 0.0,
+          "+2h": 0.0,
+          "+4h": 0.0
+        },
+        "excess_ci95_bps": {
+          "+1h": [
+            0.0,
+            0.0
+          ],
+          "+2h": [
+            0.0,
+            0.0
+          ],
+          "+4h": [
+            0.0,
+            0.0
+          ]
+        },
+        "excess_positive_horizons": 0,
+        "n_days": 0,
+        "n_events_complete_1h": 0,
+        "n_events_complete_2h": 0,
+        "n_events_complete_4h": 0,
+        "n_events_raw": 0,
+        "n_weeks": 0,
+        "range_ratio": 0.6,
+        "raw_positive_horizons": 0,
+        "symbols": [],
+        "venues": [],
+        "volume_pct": 90.0
+      }
+    ]
+  }
+}

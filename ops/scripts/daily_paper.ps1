@@ -80,6 +80,10 @@ if ($RegisterTask) {
     # PAP-1: schedule AFTER the daily pipeline (07:30 UTC), at 08:30 UTC.
     $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(8).AddMinutes(30), [DateTimeKind]::Utc)
     $localAt = $utcTarget.ToLocalTime()
+    # Registration-race guard (2026-09-05): pin the first trigger to tomorrow
+    # when registering at/after the target time (see daily_pipeline.ps1
+    # -RegisterTask; MoneyPrinterDataBackup 00:07Z launch failure, 0xFFFD0000).
+    if ($localAt -le (Get-Date)) { $localAt = $localAt.AddDays(1) }
     $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
     $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
         -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`""
@@ -170,24 +174,48 @@ if ($papStrategy -eq "liq-fade-v1") {
 Log "Paper strategy: $papStrategy (seed=$Seed)"
 
 # ---- build mp-sim if missing or stale ----------------------------------------
-$simBin = Join-Path $root "target\release\mp-sim.exe"
-if (-not (Test-Path $simBin)) {
-    Log "mp-sim.exe not found - building release binary" "WARN"
+# The mp-sim package's paper binary is `sim` (sim/src/bin/sim.rs); `mp-sim`
+# is the package name, not the artifact name. The old check pointed at
+# mp-sim.exe, which NEVER exists - so every rehearsal "built" (a cached
+# no-op) and then failed to launch: the perpetual PAP-1 WARN (fix 2026-09-06).
+$simBinCandidates = @(
+    (Join-Path $root "target\release\sim.exe"),
+    (Join-Path $root "target\release\mp-sim.exe")   # fallback if the bin is ever renamed
+)
+$simBin = $simBinCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $simBin) {
+    Log "sim.exe not found - building release binary" "WARN"
     Push-Location $root
     $res = Invoke-Native -FilePath "cargo" -Arguments @("build", "-p", "mp-sim", "--release")
     Pop-Location
     if ($res[1] -ne 0) { Log "mp-sim build failed (exit $($res[1]))" "ERROR"; Exit 2 }
+    $simBin = $simBinCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $simBin) {
+        Log "mp-sim built but no binary found at $($simBinCandidates -join ' or ')" "ERROR"; Exit 2
+    }
 }
 
 # ---- run the paper session ----------------------------------------------------
 # PAP-4: if latched, run with zero intents (the sim still journals for
 # operational visibility). PAP-2: sim fills only, no OMS adapter.
-$logArgs = @("paper", "--log", $rawLog, "--strategy", $papStrategy, "--seed", "$Seed")
+# run_id is generated ONCE here and passed to the sim (--run-id / --runs-dir
+# are mandatory; `sim paper` refuses to run without them - fix 2026-09-06,
+# the missing args faulted every rehearsal) and reused by the PAP-6 journal
+# entry so both records share the identity.
+$runId = "paper-${dateFlat}-$(Get-Date -UFormat %s)"
+# PAP-12 (spec 054 REL-30): the primary leg records observations nightly —
+# write-only recording under the stable `pap1-primary` identity. The research
+# corpus grows from the daily schedule (date-partitioned Parquet under one
+# fingerprint). Same-date re-runs follow the W-6 guard: identical = no-op,
+# divergent = loud fault (never a silent overwrite). Recording does not
+# touch the decision path or the primary verdict.
+$logArgs = @("paper", "--log", $rawLog, "--strategy", $papStrategy, "--seed", "$Seed", "--run-id", $runId, "--runs-dir", $runsDir,
+    "--params-hash", "pap1-primary", "--obs-dir", (Join-Path $root "data\observations"))
 if ($latched) {
     $logArgs += @("--zero-intents")
 }
 
-Log "Running paper session: mp-sim $($logArgs -join ' ')"
+Log "Running paper session: $(Split-Path $simBin -Leaf) $($logArgs -join ' ')"
 $env:RUST_LOG = "off"
 Push-Location $root
 try {
@@ -202,7 +230,6 @@ $paperExit = $paperResult[1]
 # ---- PAP-6: journal to runs/index.jsonl --------------------------------------
 New-Item -ItemType Directory -Path $runsDir -Force | Out-Null
 $indexFile = Join-Path $runsDir "index.jsonl"
-$runId = "paper-${dateFlat}-$(Get-Date -UFormat %s)"
 $journalEntry = [ordered]@{
     run_id    = $runId
     kind      = "paper"
@@ -223,16 +250,91 @@ if ($paperExit -eq 0) {
     if ($paperOut -match 'trades[:\s]+(\d+)') {
         $journalEntry["trades"] = [int]$Matches[1]
     }
+    if ($paperOut -match 'observations:\s*(\d+) recorded') {
+        $journalEntry["observations"] = [int]$Matches[1]
+    }
     if ($paperOut -match 'faults[:\s]+(\d+)') {
         $journalEntry["faults"] = [int]$Matches[1]
     }
-    $journalEntry["faults"] = if ($journalEntry.ContainsKey("faults")) { $journalEntry["faults"] } else { 0 }
+    $journalEntry["faults"] = if ($journalEntry.Contains("faults")) { $journalEntry["faults"] } else { 0 }
 } else {
     $journalEntry["faults"] = 1
     $journalEntry["error"] = $paperOut.Substring(0, [Math]::Min(500, $paperOut.Length))
 }
 Add-Content -Path $indexFile -Value ($journalEntry | ConvertTo-Json -Compress) -Encoding UTF8
 Log "PAP-6: journaled paper run to $indexFile (run_id=$runId)"
+
+# ---- PAP-11: noise-baseline leg (spec 051 + spec 054 REL-32) ------------------
+# Run the venue-generic noise control (coinflip-any) over the SAME log and
+# seed, with observation recording enabled so the spec 054 gates grade it.
+# Expected daily outcome: control FIRES on the hyperliquid log and is REFUSED
+# at every horizon (NET_EXPECTANCY_NEGATIVE at minimum). Control GATE PASS at
+# any horizon means the gate chain is broken - noise survived the net gate -
+# which is a P1 pipeline fault (R-8), not a strategy result. The control leg
+# never gates the primary strategy's verdict; it certifies the evaluation
+# pipeline itself. Latch-independent: the control grades the PIPELINE, not a
+# strategy, and paper sim never touches a live path (PAP-2).
+$pap11Fault = $false
+$noiseRunId = "${runId}-noise"
+$obsDir = Join-Path $root "data\observations"
+$noiseArgs = @("paper", "--log", $rawLog, "--strategy", "coinflip-any", "--seed", "$Seed", "--run-id", $noiseRunId, "--runs-dir", $runsDir, "--params-hash", "pap11-noise-baseline", "--obs-dir", $obsDir)
+
+Log "PAP-11: running noise-baseline leg (coinflip-any, run_id=$noiseRunId)"
+$env:RUST_LOG = "off"
+Push-Location $root
+try {
+    $noiseResult = Invoke-Native -FilePath $simBin -Arguments $noiseArgs
+} finally {
+    Pop-Location
+    Remove-Item Env:RUST_LOG -ErrorAction SilentlyContinue
+}
+$noiseOut = ($noiseResult[0] | Out-String).Trim()
+$noiseExit = $noiseResult[1]
+
+$noiseEntry = [ordered]@{
+    run_id    = $noiseRunId
+    kind      = "paper-noise-baseline"
+    date      = $dateDashed
+    venue     = "hyperliquid"
+    strategy  = "coinflip-any"
+    seed      = $Seed
+    latched   = $false
+    exit_code = $noiseExit
+    ts_utc    = (Get-Date).ToUniversalTime().ToString("o")
+}
+if ($noiseExit -ne 0) {
+    $noiseEntry["faults"] = 1
+    $noiseEntry["error"] = $noiseOut.Substring(0, [Math]::Min(500, $noiseOut.Length))
+    Add-Content -Path $indexFile -Value ($noiseEntry | ConvertTo-Json -Compress) -Encoding UTF8
+    Log "PAP-11: noise-baseline leg FAULTED (exit $noiseExit) - counts as a session fault" "ERROR"
+    $pap11Fault = $true
+} elseif ($noiseOut -match 'GATE PASS') {
+    # R-8 violation: the evaluation pipeline let noise through the net gate.
+    $noiseEntry["faults"] = 1
+    $noiseEntry["gate_pass"] = $true
+    Add-Content -Path $indexFile -Value ($noiseEntry | ConvertTo-Json -Compress) -Encoding UTF8
+    Log "PAP-11: noise control GATE PASS - evaluation pipeline is BROKEN (R-8). Firing P1; session faults." "ERROR"
+    $mpOps11 = Join-Path $root "target\release\mp-ops.exe"
+    if (Test-Path $mpOps11) {
+        $tgArgs11 = @("telegram-send", "--id", "pap11-noise-baseline", "--severity", "p1", "--detail", "PAP-11 $dateDashed : coinflip-any GATE PASS - gate chain broken (noise survived net gate)")
+        $tg11 = Invoke-Native -FilePath $mpOps11 -Arguments $tgArgs11
+        if ($tg11[1] -ne 0) { Log "PAP-11: P1 telegram send failed (exit $($tg11[1]))" "WARN" }
+    } else {
+        Log "PAP-11: P1 telegram skipped - mp-ops.exe not found" "WARN"
+    }
+    $pap11Fault = $true
+} else {
+    $noiseFires = $null
+    if ($noiseOut -match 'observations:\s*(\d+) recorded') { $noiseFires = [int]$Matches[1] }
+    $noiseEntry["observations"] = $noiseFires
+    $noiseEntry["faults"] = 0
+    Add-Content -Path $indexFile -Value ($noiseEntry | ConvertTo-Json -Compress) -Encoding UTF8
+    if (-not $noiseFires -or $noiseFires -eq 0) {
+        Log "PAP-11: noise control fired 0 on this log - baseline VOID today (P3), nothing certified" "WARN"
+    } else {
+        Log "PAP-11: noise baseline OK - control fired $noiseFires and was refused by the gates (expected)"
+    }
+}
 
 # ---- PAP-9: fault-free streak tracking --------------------------------------
 $streakFile = Join-Path $runsDir "paper_streak.json"
@@ -271,10 +373,10 @@ if ($faults -eq 0) {
 # ---- PAP-7: Telegram summary -------------------------------------------------
 $severity = if ($faults -gt 0) { "p2" } else { "p3" }
 $tgDetail = "paper ${dateDashed}: strategy=$papStrategy seed=$Seed latched=$latched faults=$faults"
-if ($journalEntry.ContainsKey("expectancy")) {
+if ($journalEntry.Contains("expectancy")) {
     $tgDetail += " expectancy=$($journalEntry['expectancy'])"
 }
-if ($journalEntry.ContainsKey("trades")) {
+if ($journalEntry.Contains("trades")) {
     $tgDetail += " trades=$($journalEntry['trades'])"
 }
 $tgArgs = @("telegram-send", "--id", "daily-paper", "--detail", $tgDetail, "--severity", $severity)
@@ -294,6 +396,10 @@ if (Test-Path $mpOps) {
 # ---- verdict -----------------------------------------------------------------
 if ($paperExit -ne 0) {
     Log "Paper session FAULTED for $dateDashed (exit $paperExit)" "ERROR"
+    Exit 1
+}
+if ($pap11Fault) {
+    Log "Paper session FAULTED for $dateDashed (PAP-11 noise-baseline leg)" "ERROR"
     Exit 1
 }
 Log "Paper session complete: $dateDashed (faults=$faults)"

@@ -13,7 +13,20 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from grading import Hit, RuleGrade, grade_hits, leaderboard, recommendation
+from grading import (
+    Hit,
+    RuleGrade,
+    grade_hits,
+    grade_observation_returns,
+    leaderboard,
+    recommendation,
+)
+from observation_store import (
+    ObservationStore,
+    ObservationStoreError,
+    discover_identities,
+    load_observation_store,
+)
 
 
 def render_markdown(week: str, horizon_ns: int, board: list[RuleGrade]) -> str:
@@ -101,3 +114,188 @@ def _row(g: RuleGrade) -> dict:
         "win_rate": g.win_rate,
         "avg_excess": g.avg_excess,
     }
+
+
+# --- Observation-store grading (spec 054 REL-34) -----------------------------
+
+#: Tier floors mirroring features/src/evaluation.rs (REL-15/REL-24, R-5):
+#: below INSUFFICIENT the sample cannot support ANY claim; below RESEARCH
+#: it is indicative only; Research is the promotion floor.
+INSUFFICIENT_MIN_N = 30
+RESEARCH_MIN_N = 100
+
+#: The Rust engine's default evaluation horizons (sim CLI --horizons default).
+DEFAULT_HORIZONS_NS: tuple[int, ...] = (
+    900_000_000_000,
+    3_600_000_000_000,
+    14_400_000_000_000,
+    86_400_000_000_000,
+)
+
+
+def _tier(n: int) -> str:
+    if n < INSUFFICIENT_MIN_N:
+        return "INSUFFICIENT"
+    if n < RESEARCH_MIN_N:
+        return "PRELIMINARY"
+    return "RESEARCH"
+
+
+def _decision(g: RuleGrade) -> tuple[str, list[str]]:
+    """Structured decision mirroring the Rust gate's thresholds (REL-24/16):
+    REJECT with machine-readable reasons; the Python arm's view is recorded
+    beside the identity so it can be cross-checked against the authoritative
+    Rust decision for the same fingerprint — never silently substituted."""
+    reasons: list[str] = []
+    tier = _tier(g.n)
+    if tier == "INSUFFICIENT":
+        reasons.append(
+            f"INSUFFICIENT_SAMPLE: {g.n} closed outcomes < required {INSUFFICIENT_MIN_N} (REL-15)"
+        )
+    elif tier == "PRELIMINARY":
+        reasons.append(
+            f"SAMPLE_TIER_PRELIMINARY: n={g.n} below the Research floor ({RESEARCH_MIN_N}) (REL-24)"
+        )
+    if g.n > 0 and g.avg_excess <= 0.0:
+        reasons.append(
+            f"NET_EXPECTANCY_NONPOSITIVE: net expectancy {g.avg_excess:+.6f} ≤ 0 (REL-16)"
+        )
+    return ("GATE_PASS" if not reasons else "REJECT"), reasons
+
+
+def _corpus_stamp(identity_dir: Path) -> str:
+    """The latest date partition under the identity dir — idempotency key:
+    a re-run over an unchanged corpus no-ops; newly landed partitions grade
+    under a new stamp (append-only, never a silent rewrite)."""
+    dates = sorted(
+        p.name.removeprefix("date=")[:10]  # date=YYYY-MM-DD-<hash>.parquet
+        for p in identity_dir.iterdir()
+        if p.is_file() and p.name.startswith("date=") and p.suffix == ".parquet"
+    )
+    if not dates:
+        raise ObservationStoreError(
+            f"no observation parquet files under {identity_dir}"
+        )
+    return dates[-1]
+
+
+def run_observation_grading(
+    obs_dir: Path | str,
+    fingerprint: str,
+    out_dir: Path | str,
+    horizons_ns: list[int] | tuple[int, ...] | None = None,
+) -> tuple[Path, bool]:
+    """Grade one identity's observation corpus and journal the results.
+
+    The store is loaded through the verified Python reader (schema +
+    cross-language fingerprint + single-identity — REL-34); grading consumes
+    the store's precomputed NET outcomes (R-4) at each horizon with an honest
+    denominator (open windows are skipped and COUNTED, never imputed — R-1).
+
+    Emits ``{out_dir}/observation_grades/{fingerprint}-{stamp}.json`` (plus
+    ``.md``) where ``stamp`` is the latest date partition, and appends one
+    line per horizon to ``observation_grades/observation_grades.jsonl``.
+
+    Returns ``(grades_path, ran)``. Idempotent (RES-2/W-6): an unchanged
+    corpus re-run is a no-op (``ran=False``) and never double-appends.
+    """
+    horizons_ns = list(horizons_ns or DEFAULT_HORIZONS_NS)
+    out_root = Path(out_dir) / "observation_grades"
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    store: ObservationStore = load_observation_store(obs_dir, fingerprint)
+    stamp = _corpus_stamp(Path(obs_dir) / "observations" / fingerprint)
+    grades_path = out_root / f"{fingerprint}-{stamp}.json"
+    if grades_path.exists():
+        return grades_path, False
+
+    distinct_ids = {r.observation_id for r in store.rows}
+    non_healthy = sum(1 for r in store.rows if r.quality_code != 0)
+
+    horizons_out: list[dict] = []
+    for h in horizons_ns:
+        rows = store.net_outcomes(h)
+        skipped_open = len(distinct_ids) - len(rows)
+        g = grade_observation_returns(
+            rows,
+            h,
+            signal_id=store.signal_id,
+            identity_fingerprint=store.fingerprint,
+        )
+        decision, reasons = _decision(g)
+        horizons_out.append(
+            {
+                "horizon_ns": h,
+                "n": g.n,
+                "win_rate": g.win_rate,
+                "avg_net": g.avg_excess,
+                "sharpe": g.sharpe,
+                "tier": _tier(g.n),
+                "decision": decision,
+                "reasons": reasons,
+                "skipped_open": skipped_open,
+            }
+        )
+
+    payload = {
+        "identity": store.identity,
+        "corpus_stamp": stamp,
+        "rows_total": len(store.rows),
+        "observations_total": len(distinct_ids),
+        "rows_non_healthy_quality_excluded": non_healthy,
+        "horizons": horizons_out,
+        "generated_by": "research/grading_job.py run_observation_grading (spec 054 REL-34)",
+    }
+    grades_path.write_text(
+        json.dumps(payload, sort_keys=True, indent=1), encoding="utf-8"
+    )
+    (out_root / f"{fingerprint}-{stamp}.md").write_text(
+        _render_observation_markdown(store, payload), encoding="utf-8", newline="\n"
+    )
+
+    with (out_root / "observation_grades.jsonl").open("a", encoding="utf-8") as f:
+        for hrow in horizons_out:
+            f.write(
+                json.dumps({"identity": store.identity, **hrow}, sort_keys=True) + "\n"
+            )
+    return grades_path, True
+
+
+def _render_observation_markdown(store: ObservationStore, payload: dict) -> str:
+    ident = store.identity
+    lines = [
+        f"# Observation grading — {ident['signal_id']} @ {store.fingerprint}",
+        "",
+        f"- Identity: params={ident['params_hash']} fv={ident['feature_version']} "
+        f"schema={ident['data_schema_version']} cost={ident['cost_model_hash']}",
+        f"- Corpus: {payload['observations_total']} observations / {payload['rows_total']} rows "
+        f"through {payload['corpus_stamp']}",
+        f"- Non-healthy-quality rows excluded: {payload['rows_non_healthy_quality_excluded']}",
+        "",
+        "| horizon | n | tier | win rate | avg net | sharpe | decision | skipped (open) |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for h in payload["horizons"]:
+        lines.append(
+            f"| {h['horizon_ns']} | {h['n']} | {h['tier']} | {h['win_rate']:.3f} | "
+            f"{h['avg_net']:+.6f} | {h['sharpe']:.3f} | {h['decision']} | {h['skipped_open']} |"
+        )
+    lines += ["", "## Reasons", ""]
+    for h in payload["horizons"]:
+        lines.append(f"- {h['horizon_ns']}: {'; '.join(h['reasons']) or '—'}")
+    return "\n".join(lines) + "\n"
+
+
+def run_all_observation_grading(
+    obs_dir: Path | str,
+    out_dir: Path | str,
+    horizons_ns: list[int] | tuple[int, ...] | None = None,
+) -> list[tuple[str, Path, bool]]:
+    """Grade EVERY identity present under ``obs_dir`` (sorted). One bad
+    identity fails the whole run loudly — a store that partially grades is
+    a store that quietly lies (R-1)."""
+    results: list[tuple[str, Path, bool]] = []
+    for fp in discover_identities(obs_dir):
+        path, ran = run_observation_grading(obs_dir, fp, out_dir, horizons_ns)
+        results.append((fp, path, ran))
+    return results

@@ -63,6 +63,12 @@ class RuleGrade:
     wins: int = 0
     sum_excess: float = 0.0
     excesses: list[float] = field(default_factory=list)
+    # Identity stamp (spec 054 REL-34): when grading observation-store
+    # outcomes, the rule IS a signal_id under a full research identity —
+    # carried on the grade so journal rows are comparable only
+    # like-for-like (R-3). Empty for legacy screener grading.
+    signal_id: str = ""
+    identity_fingerprint: str = ""
 
     @property
     def win_rate(self) -> float:
@@ -116,6 +122,57 @@ def grade_hits(
         g.sum_excess += excess
         g.excesses.append(excess)
     return grades
+
+
+def grade_observation_returns(
+    rows: list,
+    horizon_ns: int,
+    *,
+    rule: str | None = None,
+    signal_id: str | None = None,
+    identity_fingerprint: str | None = None,
+) -> RuleGrade:
+    """Grade PRECOMPUTED net outcomes from the observation store (REL-34).
+
+    ``rows`` are ``observation_store.ObservationRow``s with a closed outcome
+    at ``horizon_ns`` (``load_observation_store(...).net_outcomes(h)``).
+    An EMPTY row list grades to an honest n=0 ``RuleGrade`` (the tier gate
+    speaks for it — the Rust evaluator does the same); pass ``signal_id``/
+    ``identity_fingerprint`` then, since they cannot come from rows.
+
+    R-4: net expectancy is the primary metric — the store's
+    ``outcome_net_return`` is already cost-adjusted under the identity's
+    cost model, so the grader consumes it as-is and never re-derives "net"
+    from gross with different assumptions.
+
+    Semantics match the Rust evaluator (features/src/evaluation.rs):
+    expectancy = mean(net_return); win = ``outcome_hit`` (gross > 0).
+    Non-finite outcomes REFUSE the grade (REL-1: a corrupt store must not
+    silently shrink the sample — raise, never impute, never skip quietly).
+    Deterministic: rows are graded in the loader's order.
+    """
+    sid = rule or signal_id or (rows[0].signal_id if rows else "")
+    if not sid:
+        raise ValueError("grade target unknown: no rows and no rule/signal_id given")
+    g = RuleGrade(rule=sid, horizon_ns=horizon_ns)
+    g.signal_id = signal_id or sid
+    g.identity_fingerprint = identity_fingerprint or (
+        rows[0].identity_fingerprint if rows else ""
+    )
+    if not rows:
+        return g
+    for r in rows:
+        net = r.outcome_net_return
+        if net is None or net != net or net in (float("inf"), float("-inf")):
+            raise ValueError(
+                f"non-finite outcome_net_return for observation {r.observation_id} "
+                "(REL-1: refusing to grade a corrupt sample)"
+            )
+        g.n += 1
+        g.wins += 1 if r.outcome_hit == 1 else 0
+        g.sum_excess += net
+        g.excesses.append(net)
+    return g
 
 
 def leaderboard(grades: dict[str, RuleGrade]) -> list[RuleGrade]:

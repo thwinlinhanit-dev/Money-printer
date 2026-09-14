@@ -86,8 +86,11 @@
 //!           --manifest PATH (the vps_drain_manifest.jsonl), the watch ALSO
 //!           fires the same P2 when the relay is silently holding files:
 //!           any entry whose LATEST per-file record is action=landed with
-//!           release not in {released, no_release} (ssh_failed/skipped) —
-//!           the drain landed the file but never released the VPS copy.
+//!           release not in {released, no_release, skipped: missing}
+//!           (ssh_failed / skipped by the re-hash guard) — the drain landed
+//!           the file but never released the VPS copy. `skipped: missing` is
+//!           the release script's re-verification proof that the relay holds
+//!           NO copy (retention-pruned) — released in effect, not held.
 //!           Windows-side artifact; the VPS timer does not pass it.
 //!           Prints a JSON verdict {dir, current_bytes, growth_bytes_per_day,
 //!           days_to_cap, held_vps_files, held_vps_count, alert}; with

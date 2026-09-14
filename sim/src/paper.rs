@@ -662,6 +662,83 @@ mod tests {
         );
     }
 
+    // PAP-11 (spec 051 + spec 054 REL-32): the PAPER path's noise baseline.
+    // `coinflip-any` must FIRE on a Hyperliquid-venued log through the real
+    // strategy resolver (paper engine registers cvd.hyperliquid), every
+    // observation carrying the Hyperliquid venue — while the legacy
+    // fixed-`cvd.bybit` control STARVES on the same log. This is the
+    // test-side proof that the rehearsal's noise-baseline leg has something
+    // to grade on hyperliquid tapes.
+    #[test]
+    fn pap_11_coinflip_any_fires_on_hyperliquid_log_via_resolver() {
+        let hl_trade = |recv: i64, price: f64, side: Side| {
+            EventEnvelope::new(
+                Venue::Hyperliquid,
+                SymbolId(0),
+                recv,
+                recv,
+                recv as u64,
+                mp_core::MarketEvent::Trade {
+                    price,
+                    qty: 1.0,
+                    side,
+                    trade_id: recv as u64,
+                },
+            )
+        };
+        let events: Vec<EventEnvelope> = (0..200)
+            .map(|i| {
+                hl_trade(
+                    i * 1_000_000 + 1,
+                    100.0 + (i % 7) as f64,
+                    if i % 2 == 0 { Side::Buy } else { Side::Sell },
+                )
+            })
+            .collect();
+
+        // Paper-layer engine mirrors the sim binary's paper engine: the
+        // venue'd CVD for the tape under test (cvd.hyperliquid).
+        let mk = |name: &str| -> Backtester {
+            let mut fe = FeatureEngine::new(1_000_000_000);
+            fe.register_tick(|| Box::new(mp_features::catalog::Cvd::new(Venue::Hyperliquid)));
+            let cfg = SimConfig {
+                bar_tf_ns: 1_000_000,
+                latency_ns: 0,
+                fill_model: crate::fills::FillModel::L0BarFill,
+                ..SimConfig::default()
+            };
+            let mut bt = Backtester::new(
+                fe,
+                strategy_named(name, &events, None, None).expect("resolve"),
+                cfg,
+                7,
+            );
+            bt.enable_observations("pap11-noise-baseline".into(), 1, events[0].recv_ts_ns);
+            bt
+        };
+
+        // The venue-generic control FIRES on the hyperliquid log.
+        let mut session = PaperSession::new(mk("coinflip-any"));
+        session.push_batch(events.clone()).unwrap();
+        let obs = session.backtester().observations();
+        assert!(
+            !obs.is_empty(),
+            "PAP-11: coinflip-any must fire on a Hyperliquid-venued log (cvd. prefix seam)"
+        );
+        assert!(
+            obs.iter().all(|o| o.venue == Venue::Hyperliquid),
+            "PAP-11: every control observation must carry the Hyperliquid venue"
+        );
+
+        // The legacy fixed-cvd.bybit control STARVES on the same log.
+        let mut legacy = PaperSession::new(mk("coinflip"));
+        legacy.push_batch(events).unwrap();
+        assert!(
+            legacy.backtester().observations().is_empty(),
+            "PAP-11: legacy coinflip (cvd.bybit) must starve on a hyperliquid-only log"
+        );
+    }
+
     // PAP-8: paper-tail over a real event LOG — the live-tail contract
     // without a live VPS. The `sim paper-tail` loop re-reads the growing log
     // from the head each poll and hands the batch to PaperSession, which skips

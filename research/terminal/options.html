@@ -143,7 +143,26 @@ const S = {
   trades: [],
   // Flow aggregates
   flow: { npf: 0, block: 0, netDelta: 0, callPutRatio: 0, whaleNet: 0 },
+  // Spot price (option-ticker index) from the payload — null until served.
+  spot: null,
+  // Last payload note from /v1/options (e.g. "no gex rows…") — shown, not hidden.
+  note: null,
 };
+
+/* min+max in one pass without spread args — the same crash class that took
+ * down the recorded-day viewer: `Math.min(...xs)` fanned out over a large
+ * array (an unbounded per-strike GEX profile) blows the engine's argument
+ * limit → RangeError, which the old onmessage try/catch then swallowed
+ * silently. */
+function extent(xs) {
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < xs.length; i++) {
+    const v = xs[i];
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  return [lo, hi];
+}
 
 const UNDERLYINGS = { btc: "BTC", eth: "ETH", sol: "SOL", avax: "AVAX", xrp: "XRP", zec: "ZEC" };
 
@@ -168,7 +187,17 @@ function connectWs() {
       // Subscribe to this asset's features
       S.ws.send(JSON.stringify({ type: "subscribe", asset: S.asset }));
     };
-    S.ws.onmessage = (e) => { try { handleMessage(JSON.parse(e.data)); } catch(_){} };
+    // Parse + dispatch under SEPARATE guards: one malformed frame or one
+    // crashing renderer must not kill the socket loop, and the error must be
+    // VISIBLE — the old swallow-everything catch let a render bug blank the
+    // page with zero console surface.
+    S.ws.onmessage = (e) => {
+      let msg = null;
+      try { msg = JSON.parse(e.data); }
+      catch (err) { console.error("ws: bad json frame", err); return; }
+      try { handleMessage(msg); }
+      catch (err) { console.error("ws: handler failed", err); }
+    };
     S.ws.onclose = () => {
       S.wsConnected = false;
       dot.className = "dot err"; label.textContent = "disconnected";
@@ -246,8 +275,6 @@ function renderMetrics() {
     return n.toFixed(2);
   };
 
-  // Spot
-  const spot = f["gex.net." + S.asset]?.value;
   const ivAtm = f["iv.atm." + S.asset]?.value;
   const gexNet = f["gex.net." + S.asset]?.value;
   const maxPain = f["gex.max_pain." + S.asset]?.value;
@@ -255,8 +282,10 @@ function renderMetrics() {
   const skew = f["iv.skew." + S.asset + ".rr25"]?.value;
   const netDelta = f["net.delta." + S.asset]?.value;
 
-  // Get spot from ticker data
-  const spotVal = findSpot();
+  // Spot comes from the payload's `spot` (option-ticker index price) ONLY.
+  // The old findSpot() fallback printed max pain as the spot price — a
+  // confidently-wrong number on a trading dashboard.
+  const spotVal = S.spot;
   document.getElementById("mSpot").textContent = spotVal != null ? "$" + fmt(spotVal, spotVal > 100 ? 1 : 4) : "—";
   document.getElementById("mIV").textContent = ivAtm != null ? fmt(ivAtm * 100, 1) + "%" : "—";
   document.getElementById("mGEX").textContent = gexNet != null ? fmtK(gexNet) : "—";
@@ -275,16 +304,7 @@ function renderMetrics() {
   document.getElementById("navGEX").textContent = gexNet != null ? "GEX " + fmtK(gexNet) : "";
 }
 
-function findSpot() {
-  // The spot price is embedded in the latest OptionTicker events
-  // We look for it in the gex profile context or use a known feature
-  for (const [k, v] of Object.entries(S.features)) {
-    if (k.startsWith("gex.max_pain.")) return null; // not spot
-  }
-  // If we have max_pain, use it as a rough reference; otherwise return null
-  // In production the server pushes spot directly
-  return S.features["spot." + S.asset]?.value ?? S.features["gex.max_pain." + S.asset]?.value ?? null;
-}
+
 
 // ─── Canvas Rendering ───
 const PAD = { l: 70, r: 14, t: 8, b: 24 };
@@ -325,8 +345,9 @@ function renderGex() {
   const innerW = w - PAD.l - PAD.r, innerH = h - PAD.t - PAD.b;
   const strikes = profile.map(p => p.strike);
   const gexVals = profile.map(p => p.gex);
-  const maxAbs = Math.max(...gexVals.map(Math.abs), 1e-9);
-  const minStrike = Math.min(...strikes), maxStrike = Math.max(...strikes);
+  const [gAbsMax] = extent(gexVals.map(Math.abs));
+  const maxAbs = Math.max(gAbsMax, 1e-9);
+  const [minStrike, maxStrike] = extent(strikes);
   const strikeRange = maxStrike - minStrike || 1;
   const barH = Math.max(2, Math.min(14, innerH / profile.length * 0.7));
 
@@ -400,8 +421,9 @@ function renderTermData(canvas, data) {
   const { ctx, w, h } = clearCanvas(canvas);
   const innerW = w - PAD.l - PAD.r, innerH = h - PAD.t - PAD.b;
   const ivs = data.map(d => d.iv);
-  const minIV = Math.min(...ivs) * 0.95;
-  const maxIV = Math.max(...ivs) * 1.05;
+  const [ivLo, ivHi] = extent(ivs);
+  const minIV = ivLo * 0.95;
+  const maxIV = ivHi * 1.05;
   const ivRange = maxIV - minIV || 0.01;
 
   // Grid
@@ -454,7 +476,8 @@ function renderFlow() {
   ];
 
   const barW = Math.min(80, innerW / metrics.length - 12);
-  const maxVal = Math.max(...metrics.map(m => Math.abs(m.value || 0)), 1e-9);
+  const [mAbsMax] = extent(metrics.map(m => Math.abs(m.value || 0)));
+  const maxVal = Math.max(mAbsMax, 1e-9);
 
   for (let i = 0; i < metrics.length; i++) {
     const m = metrics[i];
@@ -537,32 +560,47 @@ function setAsset(asset) {
     a.classList.toggle("active", a.dataset.asset === asset);
   });
   renderAll();
-  if (S.ws && S.ws.readyState === 1) {
-    S.ws.send(JSON.stringify({ type: "subscribe", asset }));
+  loadFromServer();
+}
+
+// ─── Server data (termd /v1/options, same origin) ───
+// The options page is served BY termd, so the data source is the same origin:
+// no port guessing, no cross-origin failure mode. (The old hardcoded
+// http://host:8787 endpoint belongs to a server that doesn't exist — termd
+// binds 8765 — so every poll died in a silent catch and the page stayed dark.)
+async function loadFromServer() {
+  try {
+    const r = await fetch(`/v1/options?asset=${S.asset}`);
+    if (!r.ok) {
+      console.error(`/v1/options → HTTP ${r.status}`);
+      return;
+    }
+    const data = await r.json();
+    S.features = data.features || {};
+    S.spot = data.spot != null ? Number(data.spot) : null;
+    S.gexProfile = data.gex_profile || [];
+    S.termStructure = data.term_structure || [];
+    S.trades = Array.isArray(data.trades) ? data.trades.slice(-200) : [];
+    S.flow = { npf: 0, block: 0, netDelta: 0, callPutRatio: 0, whaleNet: 0, ...data.flow };
+    S.note = data.note || null;
+    S.lastUpdate = Date.now();
+    document.getElementById("staleBanner").classList.remove("show");
+    renderAll();
+  } catch (err) {
+    // Visible failure: log it, and flip the stale banner once data is old.
+    console.error("loadFromServer failed:", err);
+    if (S.lastUpdate === 0 || Date.now() - S.lastUpdate > 10000) showStale();
   }
 }
 
-// ─── REST Fallback (load from termd API) ───
-async function loadFromServer() {
-  // Try to load feature data from the termd REST API
-  const base = `http://${window.location.hostname}:8787`;
-  try {
-    const r = await fetch(`${base}/v1/options?asset=${S.asset}`);
-    if (r.ok) {
-      const data = await r.json();
-      if (data.gex_profile) S.gexProfile = data.gex_profile;
-      if (data.term_structure) S.termStructure = data.term_structure;
-      if (data.trades) S.trades = data.trades;
-      if (data.features) Object.assign(S.features, data.features);
-      if (data.flow) S.flow = data.flow;
-      renderAll();
-    }
-  } catch(_) {}
-}
-
 // ─── Render All ───
+// Per-pane guards: one crashing renderer shows its error and must not blank
+// the other panes (same isolation rule the recorded-day viewer follows).
 function renderAll() {
-  renderMetrics(); renderGex(); renderTerm(); renderFlow(); renderTape();
+  for (const fn of [renderMetrics, renderGex, renderTerm, renderFlow, renderTape]) {
+    try { fn(); }
+    catch (err) { console.error("render failed:", err); }
+  }
 }
 
 // ─── Init ───
@@ -580,12 +618,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (UNDERLYINGS[h] && h !== S.asset) setAsset(h);
   });
 
-  // Connect
-  connectWs();
-  // Also try REST fallback
+  // Live termd data via same-origin REST. The WS connection stays wired for
+  // a future push server on :8787, but polling is what actually works today.
   loadFromServer();
-  // Periodic REST poll (for when WS is down)
-  setInterval(() => { if (!S.wsConnected) loadFromServer(); }, 5000);
+  setInterval(loadFromServer, 5000);
 });
 </script>
 </body>

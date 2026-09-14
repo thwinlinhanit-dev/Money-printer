@@ -180,8 +180,13 @@ if ($RegisterTask) {
     # so the gate sits past its realistic completion (drain task limit 8 h).
     $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(7).AddMinutes(30), [DateTimeKind]::Utc)
     $localAt = $utcTarget.ToLocalTime()
-    # -At wants a DateTime (the date is ignored); passing the full local time
-    # keeps the trigger pinned to the local wall-clock of 00:05 UTC.
+    # Registration-race guard (2026-09-05): -Daily anchors StartBoundary to the
+    # DATE passed in -At (verified empirically 2026-09-06), so registering
+    # AT/AFTER the target time puts the boundary in the past and Task Scheduler
+    # can fire the task immediately into its own registration
+    # (MoneyPrinterDataBackup 00:07Z launch failure, 0xFFFD0000). Pin the first
+    # trigger to tomorrow in that case.
+    if ($localAt -le (Get-Date)) { $localAt = $localAt.AddDays(1) }
     $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
     $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
         -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`""
@@ -230,6 +235,9 @@ if ($RegisterStaleTask) {
     # after the 01:00 drain, so the stale deadline moved with it).
     $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(8).AddMinutes(15), [DateTimeKind]::Utc)
     $localAt = $utcTarget.ToLocalTime()
+    # Registration-race guard (2026-09-05): pin the first trigger to tomorrow
+    # when registering at/after the target time (see the -RegisterTask block).
+    if ($localAt -le (Get-Date)) { $localAt = $localAt.AddDays(1) }
     $trigger = New-ScheduledTaskTrigger -Daily -At $localAt
         # Absolute --scorecards-dir (audit 2026-08-18): the task has no working
     # directory, and pipeline-stale's default is CWD-relative — the dead-man

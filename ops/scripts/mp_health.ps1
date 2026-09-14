@@ -124,7 +124,7 @@ if ($null -eq $drainTask) {
     }
 }
 # ---- 5. Backup tasks -------------------------------------------------------------
-foreach ($tt in @("MoneyPrinterVpsBackup","MoneyPrinterOffhostBackup","MoneyPrinterDailyPipeline")) {
+foreach ($tt in @("MoneyPrinterVpsBackup","MoneyPrinterDataBackup","MoneyPrinterOffhostBackup","MoneyPrinterDailyPipeline")) {
     $task = Get-ScheduledTask -TaskName $tt -ErrorAction SilentlyContinue
     if ($null -eq $task) {
         Out-Line "[CRIT]" "$tt not registered"
@@ -174,7 +174,18 @@ if (-not (Test-Path $bkRoot)) {
         $crit += "backup marker missing"
     }
     if (Test-Path $bkManifest) {
-        $last = Get-Content -LiteralPath $bkManifest -Tail 1 -ErrorAction SilentlyContinue | ConvertFrom-Json
+        # Skip prune records (action='prune', appended by vps_backup.ps1
+        # -PruneStale since 2026-09-06) - they are audit entries, not backup
+        # runs, and lack the integrity fields this block keys on. Walk back to
+        # the last real backup entry.
+        $lines = @(Get-Content -LiteralPath $bkManifest -ErrorAction SilentlyContinue)
+        [array]::Reverse($lines)
+        $last = $null
+        foreach ($line in $lines) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $cand = $line | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($null -ne $cand -and $cand.action -ne "prune") { $last = $cand; break }
+        }
         if ($null -ne $last) {
             $mUtc = [DateTimeOffset]::Parse($last.ts_utc).UtcDateTime
             $mAge = ($nowUtc - $mUtc).TotalHours
@@ -218,6 +229,10 @@ if ($freeGB -lt 20) { Out-Line "[WARN]" "C: free under 20 GB"; $warn += "low dis
 if ($Register) {
     $utcTarget = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date.AddHours(5).AddMinutes(30), [DateTimeKind]::Utc)
     $localAt = $utcTarget.ToLocalTime()
+    # Registration-race guard (2026-09-05): pin the first trigger to tomorrow
+    # when registering at/after the target time (MoneyPrinterDataBackup 00:07Z
+    # launch failure, 0xFFFD0000 - see daily_pipeline.ps1 -RegisterTask).
+    if ($localAt -le (Get-Date)) { $localAt = $localAt.AddDays(1) }
     $logPath = Join-Path $PSScriptRoot "mp_health.log"
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden " +
         "-Command `"& '{0}' *> '{1}'`"" -f $PSCommandPath, $logPath)

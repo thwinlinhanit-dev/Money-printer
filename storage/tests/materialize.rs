@@ -1052,3 +1052,159 @@ fn ibi_10_cli_cross_out_writes_leadlag_table() {
     assert_eq!(rows.len(), 2, "days 1 and 2 completed by days 2/3");
     assert!((rows[0].iv_divergence - (0.40 - 0.55)).abs() < 1e-12);
 }
+
+// ---- MAT-9 regression (2026-09-06): daily materialize must never write a
+// parquet another day's run owns. The whale collector rotates logs on the
+// WRITE moment, so a census poll started at 23:59:47 lands in the next day's
+// file with yesterday's stamps (the straddle); the engine's finish() closes
+// the last partial bar at the next midnight (00:00:00.000 of the next day).
+// A daily run over dated logs must suppress the prior-day rows (warm-up
+// only — yesterday's parquet is immutable, W-6) and re-date the next-day
+// final bars into the target day, or every gate run refuses on the previous
+// day's parquet (the 2026-09-04/05 symbols_hash drift).
+
+fn whale_ev(ts: i64, size: f64) -> (i64, SymbolId, MarketEvent) {
+    (
+        ts,
+        SymbolId(0),
+        MarketEvent::WhalePosition {
+            address: "0xaaa".to_owned(),
+            size,
+            entry: 10.0,
+            leverage: 1.0,
+            liq_price: f64::NAN,
+        },
+    )
+}
+
+#[test]
+fn mat_9_straddle_rows_stay_out_of_other_days_parquets() {
+    let dir = tmpdir("straddle");
+    let day1 = DAY0 + 86_400_000_000_000; // 2026-07-12T00:00:00Z
+    let mut table = SymbolTable::new();
+    table.intern_default(Venue::Hyperliquid, "BTC");
+
+    // Day 1's own file: two readings (the run that materializes 07-11 owns
+    // the 07-11 parquet; the straggler poll below is NOT in this file).
+    let f11 = dir.join("20260711_hyperliquid_positions.log");
+    write_log_at(
+        &f11,
+        &table,
+        &[whale_ev(DAY0 + 10_000_000_000, 10.0), whale_ev(DAY0 + 20_000_000_000, 20.0)],
+        Venue::Hyperliquid,
+    );
+
+    // Day 2's file: a prior-day straggler poll (23:59:50 of 07-11) followed
+    // by the day's own readings — the production straddle shape.
+    let straddle_ts = day1 - 10_000_000_000; // 2026-07-11T23:59:50Z
+    let f12p = dir.join("20260712_hyperliquid_positions.log");
+    write_log_at(
+        &f12p,
+        &table,
+        &[
+            whale_ev(straddle_ts, 30.0),
+            whale_ev(day1 + 10_000_000_000, 40.0),
+            whale_ev(day1 + 20_000_000_000, 50.0),
+            whale_ev(day1 + 30_000_000_000, 60.0),
+        ],
+        Venue::Hyperliquid,
+    );
+
+    // Trades across the FULL day so bar features emit and the engine's
+    // finish() final-bar rows close at 00:00:00.000 of 07-13 (the last event
+    // is at 23:59:59) — those rows must be re-dated into the 07-12 parquet.
+    let f12t = dir.join("20260712_hyperliquid_BTC.log");
+    let trades: Vec<(i64, SymbolId, MarketEvent)> = (0..86_400)
+        .map(|i| {
+            (
+                day1 + i * 1_000_000_000,
+                SymbolId(0),
+                MarketEvent::Trade {
+                    price: 100.0,
+                    qty: 10.0,
+                    side: if i % 2 == 0 { Side::Buy } else { Side::Sell },
+                    trade_id: i as u64,
+                },
+            )
+        })
+        .collect();
+    write_log_at(&f12t, &table, &trades, Venue::Hyperliquid);
+
+    let out = dir.join("features");
+    let cfg = FeaturesConfig::default();
+
+    // Run 0: materialize 07-11 alone (the prior day's gate) — owns the
+    // 07-11 parquet with the run's own symbols_hash.
+    let s0 = materialize_logs(&out, &cfg, &[f11.clone()], "abc123").unwrap();
+    assert!(s0.rows_written > 0, "day-1 run must write rows: {s0:?}");
+    let whale11 = out
+        .join("whale.delta.hyperliquid")
+        .join("ver=0")
+        .join("venue=hyperliquid")
+        .join("symbol=0")
+        .join("2026-07-11.parquet");
+    assert!(whale11.exists(), "day-1 parquet must exist after its own run");
+    let whale11_before = std::fs::read(&whale11).unwrap();
+
+    // Run 1: the daily 07-12 run. With the straddle present, the OLD code
+    // refused to overwrite the 07-11 parquet with a different symbols_hash;
+    // the fixed code suppresses the straggler rows and re-dates finish bars.
+    let s1 = materialize_logs(&out, &cfg, &[f12p.clone(), f12t.clone()], "abc123").unwrap();
+    assert!(
+        s1.lookback_rows_suppressed > 0,
+        "straggler rows must be suppressed: {s1:?}"
+    );
+    assert!(
+        s1.lookback_dates.iter().any(|d| d == "2026-07-11"),
+        "suppressed dates: {:?}",
+        s1.lookback_dates
+    );
+    assert!(
+        s1.forward_rows_redated > 0,
+        "finish-bar rows must be re-dated into the target day: {s1:?}"
+    );
+
+    // The prior day's parquet is untouched (byte-identical) — W-6 immutability.
+    assert_eq!(
+        std::fs::read(&whale11).unwrap(),
+        whale11_before,
+        "day-1 parquet must be byte-identical after the day-2 run"
+    );
+
+    // The day-2 parquet exists, and the FIRST delta uses the straggler as the
+    // previous reading (boundary continuity): net = Σ size×entry, so the
+    // first day-2 reading (40) minus the straggler (30) is (40-30)×10 = 100.
+    let whale12 = out
+        .join("whale.delta.hyperliquid")
+        .join("ver=0")
+        .join("venue=hyperliquid")
+        .join("symbol=0")
+        .join("2026-07-12.parquet");
+    let rows12 = read_features(&whale12).unwrap();
+    assert!(!rows12.is_empty(), "day-2 whale.delta parquet must have rows");
+    assert_eq!(
+        rows12[0].value, 100.0,
+        "first day-2 delta must be vs the prior-day straggler reading"
+    );
+
+    // No parquet may be dated outside the target days (nothing on 07-13).
+    for p in walk_parquet(&out) {
+        let s = p.to_string_lossy();
+        assert!(
+            !s.contains("2026-07-13"),
+            "no next-day parquet may be written: {s}"
+        );
+    }
+
+    let whale12_before = std::fs::read(&whale12).unwrap();
+
+    // Run 2: idempotent re-run of the same day — must SUCCEED (the OLD code
+    // refused on the straggler's prior-day rows) and leave bytes untouched.
+    let _s2 = materialize_logs(&out, &cfg, &[f12p, f12t], "abc123").unwrap();
+    assert_eq!(
+        std::fs::read(&whale12).unwrap(),
+        whale12_before,
+        "re-run must leave day-2 parquet byte-identical"
+    );
+}
+

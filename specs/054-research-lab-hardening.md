@@ -246,6 +246,60 @@ refuses promotion when its evidence is absent — never silently passes.
   a strategy that MUST be rejected at every horizon; a pipeline that lets
   it pass is broken. Legacy `coinflip` (fixed `cvd.bybit` subscription,
   fire-on-every-update) is unchanged for golden-test stability.
+- **REL-33** (2026-09-09, found by the PAP-12 smoke) W-6 idempotency must
+  hold across the Parquet roundtrip AND across re-runs with divergent
+  content. Two defects fixed:
+  (a) the snapshot column is JSON TEXT; the f64→decimal→f64 cycle is not
+  bit-exact for long-decimal values (1-ULP drift), so the read-back content
+  hash never matched the in-memory hash and every identical re-run was
+  refused. `observations_content_hash` now hashes each snapshot value in its
+  storage-canonical form — the f64 that actually survives the column
+  (`parse(ryu(value))`) — so in-memory and read-back hashes agree by
+  construction.
+  (b) `partitioned_write` keyed the guard on the FILENAME hash; divergent
+  content landing on the same date silently created a duplicate
+  `date=D-hash2.parquet` sibling instead of faulting. The guard now scans
+  all `date=D-*.parquet` siblings and refuses ANY divergent content on the
+  same identity+date (R-2 append-only). Identical re-writes remain no-ops.
+  Observation-semantics goldens (REL-10/REL-28) are unaffected: they hash a
+  different function (serde_json serialization), not this store hash.
+- **REL-34** (2026-09-09) — the PYTHON grading arm must read the SAME
+  identity-stamped observation Parquet the Rust store writes — one artifact
+  store, two consumers, never a parallel export. `research/observation_store.py`
+  owns the Python side of the contract:
+  (a) the column schema (names + Arrow types) is declared as constants;
+  loading refuses any file whose schema diverges;
+  (b) the identity fingerprint is RE-VERIFIED cross-language: Python
+  re-implements FNV-1a (offset `0xcbf29ce484222325`, prime `0x100000001b3`,
+  wrapping) over signal_id bytes ‖ feature_version LE ‖ data_schema_version
+  LE ‖ params_hash bytes ‖ cost_model_hash bytes and must reproduce the
+  on-disk directory name for every loaded file — a mismatch is a hard error
+  (a store the grader cannot cryptographically place must not be graded);
+  (c) a load spanning files from >1 fingerprint raises — R-3 grades are
+  per-identity or nothing;
+  (d) the on-disk layout is ONE ROW PER (observation, outcome horizon):
+  outcome-less observations store one all-NULL-`outcome_*` row; horizon
+  selection therefore happens by `outcome_horizon_ns` with `observation_id`
+  as the row-identity key (dedup on re-load is a loader invariant).
+  Grading consumes the store's precomputed `outcome_net_return` (R-4: net is
+  the primary metric) at the engine's horizons; rows with a NULL outcome at
+  the requested horizon are skipped with an explicit skipped count (open
+  windows — honest denominator, never imputed, R-1). `RuleGrade` gains
+  `signal_id`/`identity_fingerprint`; the journal row carries the full
+  identity so grades from different identities can never be compared
+  implicitly. Quality-gated observations (code != 0) are EXCLUDED with a
+  count, not folded into the sample.
+- **REL-35** (2026-09-09, found by the REL-34 cross-check on the footprint
+  study) `partitioned_write` took the identity fingerprint from
+  `observations[0]` and filed EVERY observation under it — correct for the
+  sim's single-identity batches, silently mis-filing multi-identity batches
+  (the footprint study writes one identity per rule): all rows landed in
+  observations[0]'s directory while carrying their true identity columns, a
+  store the Python loader must refuse. Fix: group by identity fingerprint
+  FIRST, then by UTC date — each identity's observations land in their own
+  directory, and a multi-identity write yields per-identity date partitions
+  that each load cleanly. Regression test writes a two-identity batch and
+  asserts per-identity directories + clean single-identity loads.
 
 ## Out of scope (explicitly deferred)
 

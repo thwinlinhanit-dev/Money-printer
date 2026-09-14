@@ -186,17 +186,22 @@ def save_registry(path, records: list[dict]) -> None:
 def _run_exists(runs_path, run_id: str) -> bool:
     from pathlib import Path
 
-    p = Path(runs_path)
-    if not p.exists():
-        return False
-    for line in p.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+    # `runs_path` may be one journal or a list of journals (the repo has two:
+    # runs/index.jsonl from the funnel era and data/runs/index.jsonl from the
+    # sim era — a candidate's run_ids may live in either).
+    paths = runs_path if isinstance(runs_path, (list, tuple)) else [runs_path]
+    for rp in paths:
+        p = Path(rp)
+        if not p.exists():
             continue
-        try:
-            if json.loads(line).get("run_id") == run_id:
-                return True
-        except json.JSONDecodeError:
-            continue
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                if json.loads(line).get("run_id") == run_id:
+                    return True
+            except json.JSONDecodeError:
+                continue
     return False
 
 

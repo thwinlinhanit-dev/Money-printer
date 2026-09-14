@@ -217,3 +217,18 @@ can change this: full multi-day bybit coverage of the same symbol
 (08-17 bybit days drain tonight; the 08-16..08-17 host recording gap means
 the 08-17 HL side is partial and will collide — the local copy wins per
 drain policy).
+
+BACKTEST VERDICT (2026-09-13, record `farb2-backtest-2026-09-13`,
+`runs/index.jsonl`): FARB-2 cleared 2026-09-12 (14 same-day bybit<->HL pairs
+per symbol) and the pre-registered full-cost backtest killed the strategy on
+both registered configs. 58 episodes over 15 overlap day-pairs: expectancy
+−28.13 bps (500entry/250exit) / −28.16 bps (1000entry/500exit) at BASE
+costs, −57.1/−57.2 at the 2× kill column; win rate 0/58; carry collected
+0.1–4.3 bps (max 4.265) against the 29 bps RT two-leg cost. Mechanism: the
+spread normalizes within hours (median hold 1–6h), so annualized bps/yr
+never convert to collectible carry — FARB-5's cost bar ("the honest bar is
+the post-entry level, not the peak") is the binding kill, exactly as
+written. Edge breadth was NOT the problem: 6–8 distinct calendar windows,
+WF OOS sign-flips 0/3 (consistently negative, not curve-fit). Registry row
+→ killed. Report: `docs/research/BACKTEST-funding-arb-v1-2026-09-13.md`;
+deterministic artifact `research/funding_arb_backtest_farb2-backtest-2026-09-13.json`.

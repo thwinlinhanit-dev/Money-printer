@@ -1,0 +1,197 @@
+{
+  "corpus": {
+    "end_day": "20260912",
+    "hour_coverage": {
+      "basis:BTC": 332,
+      "basis:ETH": 340,
+      "bybit:BTC": 425,
+      "bybit:ETH": 419,
+      "hyperliquid:BTC": 356,
+      "hyperliquid:ETH": 356
+    },
+    "missing_logs": [
+      "20260903_hyperliquid_BTC.log",
+      "20260903_hyperliquid_ETH.log",
+      "20260904_hyperliquid_BTC.log",
+      "20260904_hyperliquid_ETH.log",
+      "20260905_hyperliquid_BTC.log",
+      "20260905_hyperliquid_ETH.log"
+    ],
+    "start_day": "20260825",
+    "whale_delta_dates": [
+      "2026-08-13",
+      "2026-08-22",
+      "2026-08-24",
+      "2026-09-03",
+      "2026-09-04",
+      "2026-09-05",
+      "2026-09-06"
+    ]
+  },
+  "data_gates": {
+    "WSH-1_days_with_events_ge_10": {
+      "days": [
+        "2026-09-03",
+        "2026-09-04",
+        "2026-09-05"
+      ],
+      "observed_days": 3,
+      "pass": false
+    },
+    "WSH-2_both_legs_same_day": {
+      "note": "an event qualifies only when HL and bybit hourly marks both exist for the whole window (partial windows dropped)",
+      "pass": false
+    },
+    "WSH-3_ge_2_census_epochs": {
+      "note": "the leaderboard refreshes hourly, so events on >= 2 distinct UTC days necessarily span >= 2 census epochs (proxy for the un-recorded epoch id); single-day event sets fail",
+      "pass": true
+    }
+  },
+  "falsification": {
+    "excess_ci_opposite_hypothesis": {
+      "adverse_strata": [],
+      "status": "NOT_TRIGGERED"
+    },
+    "expectancy_2x_cost": {
+      "reason": "event study precedes the cost sim",
+      "status": "NOT_ASSESSED"
+    },
+    "gate_verdict": "NOT_GRADABLE",
+    "wf_sign_flip": {
+      "reason": "walk-forward is downstream of this gate",
+      "status": "NOT_ASSESSED"
+    }
+  },
+  "hypothesis_id": "whale-shadow-v1",
+  "kind": "wsh_event_study",
+  "protocol": {
+    "bootstrap_replicates": 1000,
+    "boundary": "every bar of the window must lie in the event's UTC day (E3)",
+    "entry_z": 2.0,
+    "horizons_hours": [
+      4,
+      12
+    ],
+    "leg": "signed (HL mark return - bybit mark return), direction = sign(whale delta)",
+    "min_warmup_hours": 24,
+    "partial_windows": "omitted",
+    "seed": 42,
+    "signal": "whale.delta.hyperliquid aggregated to 1h buckets (sum of readings)",
+    "z": "delta_h / std(delta, prior 14d), prior hours only"
+  },
+  "run_id": "wsh-event-study-2026-09-13",
+  "strata": [
+    {
+      "event_days": [
+        "2026-09-03",
+        "2026-09-04",
+        "2026-09-05"
+      ],
+      "event_hours": [
+        1788469200000000000,
+        1788472800000000000,
+        1788480000000000000,
+        1788498000000000000,
+        1788530400000000000,
+        1788548400000000000,
+        1788591600000000000,
+        1788642000000000000
+      ],
+      "horizons": {
+        "+12h": {
+          "adverse_opposite_hypothesis": false,
+          "car_bps": 0.0,
+          "ci95_bps": [
+            0.0,
+            0.0
+          ],
+          "n": 0,
+          "n_days": 0
+        },
+        "+4h": {
+          "adverse_opposite_hypothesis": false,
+          "car_bps": 0.0,
+          "ci95_bps": [
+            0.0,
+            0.0
+          ],
+          "n": 0,
+          "n_days": 0
+        }
+      },
+      "n_event_days": 3,
+      "n_events_raw": 8,
+      "n_events_with_both_legs": 0,
+      "underlying": "BTC"
+    },
+    {
+      "event_days": [
+        "2026-09-03",
+        "2026-09-04"
+      ],
+      "event_hours": [
+        1788472800000000000,
+        1788476400000000000,
+        1788480000000000000,
+        1788498000000000000,
+        1788530400000000000,
+        1788548400000000000
+      ],
+      "horizons": {
+        "+12h": {
+          "adverse_opposite_hypothesis": false,
+          "car_bps": 0.0,
+          "ci95_bps": [
+            0.0,
+            0.0
+          ],
+          "n": 0,
+          "n_days": 0
+        },
+        "+4h": {
+          "adverse_opposite_hypothesis": false,
+          "car_bps": 0.0,
+          "ci95_bps": [
+            0.0,
+            0.0
+          ],
+          "n": 0,
+          "n_days": 0
+        }
+      },
+      "n_event_days": 2,
+      "n_events_raw": 6,
+      "n_events_with_both_legs": 0,
+      "underlying": "ETH"
+    }
+  ],
+  "whale_feature_audit": {
+    "dates": [
+      "2026-08-13",
+      "2026-08-22",
+      "2026-08-24",
+      "2026-09-03",
+      "2026-09-04",
+      "2026-09-05",
+      "2026-09-06"
+    ],
+    "files": 558,
+    "files_missing_symbols_hash": 0,
+    "hours_by_underlying": {
+      "BTC": 141,
+      "ETH": 141
+    },
+    "rows": 811550,
+    "rows_kept": 91014,
+    "same_hour_readings_aggregated": 90732,
+    "snapshots": [
+      "1a7797c8f54a49a4",
+      "22b55476f4e2fd6b",
+      "c9d82f33d709292a",
+      "cd77b9757162f9f0",
+      "d2b7e2ffb0681114",
+      "d80ebf0b3ad208ba",
+      "ee3cd7151f79dad9"
+    ]
+  }
+}

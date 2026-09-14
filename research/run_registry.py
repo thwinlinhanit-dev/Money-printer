@@ -36,7 +36,14 @@ def _cmd_check(args) -> int:
     records = registry.load_registry(args.registry)
     candidates = _discover()
     unique = sorted({c.id for c in candidates})
-    problems = registry.check(records, candidates, REPO_ROOT / "runs" / "index.jsonl")
+    problems = registry.check(
+        records,
+        candidates,
+        [
+            REPO_ROOT / "runs" / "index.jsonl",
+            REPO_ROOT / "data" / "runs" / "index.jsonl",
+        ],
+    )
     print(f"{len(records)} registry records, {len(unique)} discovered candidates")
     for problem in problems:
         print(f"PROBLEM: {problem}")

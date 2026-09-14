@@ -1785,9 +1785,13 @@ fn ops_15_storage_budget_subcommand_reports_verdict() {
 #[test]
 fn ops_15_held_drain_files_flags_landed_but_unreleased() {
     // The drain manifest's "VPS is still holding it" state: action=landed
-    // with release NOT in {released, no_release} (ssh_failed / skipped).
-    // `kept` (A-B collision — never released by design), `no_release`, and
-    // entries predating the release field (release="") are never flagged.
+    // with release NOT in {released, no_release, skipped: missing} — the
+    // byte-verified copy never left the relay (ssh_failed / skipped by the
+    // re-hash guard) and re-attempts next run. `skipped: missing` is the
+    // release script's re-verification proof that the relay holds NO copy
+    // (retention-pruned) — released in effect, never flagged. `kept` (A-B
+    // collision — never released by design), `no_release`, and entries
+    // predating the release field (release="") are never flagged either.
     use mp_ops::{held_drain_files, parse_drain_manifest_line, DrainManifestEntry};
     let e = |ts: &str, file: &str, action: &str, release: &str| DrainManifestEntry {
         ts_utc: ts.to_string(),
@@ -1810,6 +1814,12 @@ fn ops_15_held_drain_files_flags_landed_but_unreleased() {
         ),
         e(
             "2026-08-16T08:21:01Z",
+            "raw/20260815_hyperliquid_ETH.log",
+            "landed",
+            "skipped: missing",
+        ),
+        e(
+            "2026-08-16T08:21:01Z",
             "raw/20260815_bybit_SOLUSDT.log",
             "landed",
             "ssh_failed",
@@ -1825,6 +1835,12 @@ fn ops_15_held_drain_files_flags_landed_but_unreleased() {
             "raw/20260814_bybit_BTCUSDT.log",
             "landed",
             "skipped: hash changed: expected abc got def",
+        ),
+        e(
+            "2026-08-16T08:21:01Z",
+            "raw/20260815_bybit_ETHUSDT.log",
+            "landed",
+            "skipped: missing",
         ),
         e(
             "2026-08-14T16:20:14Z",

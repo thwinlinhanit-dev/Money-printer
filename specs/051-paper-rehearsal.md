@@ -64,6 +64,31 @@ config explicitly sets `paper.strategy = "null"` for a plumbing drill).
   fault resets the consecutive count (same spirit as promotion streak).
 - **PAP-10** Paper MUST refuse `TradingMode::Live` config. Env
   `MONEY_PRINTER_MODE=live` during paper task ⇒ Sleep + P1, no session.
+- **PAP-11** (2026-09-09, spec 054 REL-32 cross-ref) Every closed-day paper
+  rehearsal MUST also run the venue-generic noise control `coinflip-any`
+  over the SAME log and seed, with recording enabled (`--params-hash
+  pap11-noise-baseline --obs-dir <obs-dir>`) so the spec 054 gates grade it.
+  Expected: control fires on the venue'd log and is REFUSED at every
+  horizon. Verdicts: control `GATE PASS` at ANY horizon ⇒ the gate chain is
+  broken ⇒ session FAULT (exit 1) + P1 (noise must never survive the net
+  gate). Control fires 0 ⇒ P3 WARN (baseline void on this log — nothing
+  certified). Control leg crash ⇒ session fault, journaled. The control leg
+  never gates the primary strategy's result; it certifies the evaluation
+  pipeline itself (R-8). Journaled as `kind=paper-noise-baseline`,
+  `run_id=<primary>-noise`.
+- **PAP-12** (2026-09-09, spec 054 REL-30 cross-ref) The PRIMARY paper leg
+  records observations nightly: the rehearsal invokes `sim paper` with
+  `--params-hash pap1-primary --obs-dir <root>/data/observations`, so the
+  research corpus grows from the daily schedule (identity-stamped,
+  date-partitioned Parquet under one stable fingerprint — the fingerprint is
+  tape/date-independent by design; per-day partitions accumulate beneath it).
+  Recording is write-only (REL-30): it MUST NOT alter the decision path or
+  the primary leg's verdict. Latched (`--zero-intents`) sessions record
+  nothing (0 fires) — harmless. Journal row gains `observations=<n> recorded`.
+  Re-run semantics follow the W-6 guard: identical re-run for the same date
+  is a byte-identical no-op; a re-run over a CHANGED log for the same date
+  W-6-refuses and faults the leg BY DESIGN (divergent evidence must surface,
+  never silently overwrite).
 
 ## Acceptance criteria
 
@@ -76,6 +101,9 @@ config explicitly sets `paper.strategy = "null"` for a plumbing drill).
 - [ ] `pap_7_telegram_payload_shape` — snapshot test.
 - [ ] `pap_9_fault_resets_streak` — counter fixture.
 - [ ] `pap_10_live_env_refused` — reuse mode.rs MOD-12.
+- [ ] `pap_11_noise_baseline_leg` — paper-layer test: control fires on a
+  Hyperliquid-venued log via the real resolver (legacy `coinflip` starves);
+  rehearsal journal carries the control row; control `GATE PASS` ⇒ exit 1.
 
 ## Decisions
 
@@ -89,6 +117,8 @@ config explicitly sets `paper.strategy = "null"` for a plumbing drill).
 | 2026-08-31 | PAP-8 (live tail) deferred to slice B — not v1-blocking. |
 | 2026-08-31 | PAP-9: streak counter stored in `paper_streak_count.txt` beside journal. |
 | 2026-08-31 | PAP-10: reuse MOD-12 test; live env → Sleep, no paper session. |
+| 2026-09-09 | PAP-11: `coinflip-any` (spec 054 REL-32) is the paper noise baseline; fires+refused is the expected daily outcome, `GATE PASS` is a pipeline fault (P1, exit 1). Fixed params-hash keeps one control identity across days (append-only, W-6-safe: same venue/symbols). Control leg does not enter the PAP-9 streak; its own crash does count as a session fault in its journal row. |
+| 2026-09-09 | PAP-12: primary leg records nightly under fixed params-hash `pap1-primary` (distinct from the control's `pap11-noise-baseline`). Same-date divergent re-runs W-6-fault by design; identical re-runs no-op. Recording never gates the primary verdict (write-only, REL-30). |
 
 ## Open questions
 

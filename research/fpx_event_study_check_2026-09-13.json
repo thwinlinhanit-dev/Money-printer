@@ -1,0 +1,275 @@
+{
+  "data_gate": {
+    "eligible_days_by_recording": {
+      "bybit:BTCUSDT": [
+        "20260826",
+        "20260827",
+        "20260902",
+        "20260903"
+      ],
+      "bybit:ETHUSDT": [
+        "20260826",
+        "20260827",
+        "20260907"
+      ],
+      "hyperliquid:BTC": [
+        "20260828",
+        "20260830",
+        "20260902",
+        "20260907",
+        "20260908",
+        "20260910"
+      ],
+      "hyperliquid:ETH": [
+        "20260826",
+        "20260827",
+        "20260828",
+        "20260830",
+        "20260902",
+        "20260906",
+        "20260907",
+        "20260910",
+        "20260911",
+        "20260912"
+      ]
+    },
+    "fpx1_pass": false
+  },
+  "falsification": {
+    "base_net_negative_every_config": {
+      "reason": "event study has no execution/fill cost model",
+      "status": "NOT_ASSESSED"
+    },
+    "event_study_excess_ci_opposite_at_two_or_more_horizons_in_two_or_more_configs": {
+      "adverse_configs": [],
+      "requires_fpx1": true,
+      "status": "NOT_TRIGGERED"
+    },
+    "expectancy_2x_cost": {
+      "reason": "event study precedes full-cost sim",
+      "status": "NOT_ASSESSED"
+    },
+    "gate_verdict": "NOT_GRADABLE",
+    "overall": "NOT_KILLED_BY_EVENT_STUDY",
+    "profitable_episodes_fewer_than_three_weeks": {
+      "reason": "episode P&L is a backtest-stage measure",
+      "status": "NOT_ASSESSED"
+    },
+    "walk_forward_sign_flip": {
+      "reason": "walk-forward is downstream of FPX event gate",
+      "status": "NOT_ASSESSED"
+    }
+  },
+  "hypothesis_id": "footprint-exhaustion-v1",
+  "kind": "fpx_event_study",
+  "pooled_results": [
+    {
+      "car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "excess_car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "excess_ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "n_days": 0,
+      "n_events_raw": 0,
+      "n_weeks": 0,
+      "range_ratio": 0.4,
+      "volume_pct": 80.0
+    },
+    {
+      "car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "excess_car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "excess_ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "n_days": 0,
+      "n_events_raw": 0,
+      "n_weeks": 0,
+      "range_ratio": 0.6,
+      "volume_pct": 80.0
+    },
+    {
+      "car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "excess_car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "excess_ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "n_days": 0,
+      "n_events_raw": 0,
+      "n_weeks": 0,
+      "range_ratio": 0.4,
+      "volume_pct": 90.0
+    },
+    {
+      "car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "excess_car_bps": {
+        "+1h": 0.0,
+        "+2h": 0.0,
+        "+4h": 0.0
+      },
+      "excess_ci95_bps": {
+        "+1h": [
+          0.0,
+          0.0
+        ],
+        "+2h": [
+          0.0,
+          0.0
+        ],
+        "+4h": [
+          0.0,
+          0.0
+        ]
+      },
+      "n_days": 0,
+      "n_events_raw": 0,
+      "n_weeks": 0,
+      "range_ratio": 0.6,
+      "volume_pct": 90.0
+    }
+  ],
+  "protocol": {
+    "atr_denominator": "20 bars immediately before candidate; candidate excluded",
+    "atr_window_bars": 20,
+    "bar_interval": "1h",
+    "bootstrap_replicates": 1000,
+    "costs": "not applied in event study; cost/WF criteria require backtest",
+    "delta": "buy_vol - sell_vol from mp-query bars; mirrored sign condition",
+    "event_timestamp": "climax-bar-close; +1h starts with the next closed bar",
+    "horizons_hours": [
+      1,
+      2,
+      4
+    ],
+    "integrity": "coverage >= 0.995, no blocking INT-4 findings, zero stale_bursts; segments reset at any non-eligible/missing day",
+    "partial_windows": "omitted",
+    "range_atr_ratios": [
+      0.4,
+      0.6
+    ],
+    "seed": 42,
+    "volume_percentiles": [
+      80.0,
+      90.0
+    ],
+    "volume_window_bars": 100
+  },
+  "report_path": "research/fpx_event_study_2026-09-13.json",
+  "run_id": "fpx-event-study-2026-09-13"
+}
